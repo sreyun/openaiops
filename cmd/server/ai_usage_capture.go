@@ -36,6 +36,23 @@ func withAIUsageSlot(ctx context.Context) (context.Context, uint64) {
 	return context.WithValue(ctx, aiUsageCtxKey{}, id), id
 }
 
+// bindAIUsageSlot reuses an existing live slot on ctx when present so nested LLM
+// helpers (streamChat / aiChatV*) do not create a child slot that is deleted
+// before the outer recordAICallActor can takeCapturedAIUsageCtx. owned=true means
+// the caller created the slot and must endAIUsageSlot it.
+func bindAIUsageSlot(ctx context.Context) (context.Context, uint64, bool) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if id, ok := ctx.Value(aiUsageCtxKey{}).(uint64); ok && id != 0 {
+		if _, live := aiUsageSlots.Load(id); live {
+			return ctx, id, false
+		}
+	}
+	ctx2, id := withAIUsageSlot(ctx)
+	return ctx2, id, true
+}
+
 func endAIUsageSlot(id uint64) {
 	aiUsageSlots.Delete(id)
 }

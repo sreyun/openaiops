@@ -2078,12 +2078,16 @@ func (s *Server) handleAIChat(w http.ResponseWriter, r *http.Request) {
 	msgs = append(msgs, map[string]string{"role": "user", "content": req.Message})
 
 	start := time.Now()
-	reply, err := streamChat(r.Context(), w, cfg, msgs, nil)
+	// Bind usage slot on the request ctx so streamChat captures into a slot that
+	// still exists when recordAICallActor takes exact provider tokens.
+	callCtx, usageID := withAIUsageSlot(r.Context())
+	defer endAIUsageSlot(usageID)
+	reply, err := streamChat(callCtx, w, cfg, msgs, nil)
 	errStr := ""
 	if err != nil {
 		errStr = err.Error()
 	}
-	s.recordAICallActor(r.Context(), "chat", cfg.Model, s.actorName(r), time.Since(start).Milliseconds(), err == nil, errStr, memHits, skillHits, reply)
+	s.recordAICallActor(callCtx, "chat", cfg.Model, s.actorName(r), time.Since(start).Milliseconds(), err == nil, errStr, memHits, skillHits, reply)
 	// 未经人工验证的模型输出默认不进入跨会话 RAG；管理员显式接受污染风险后才可开启。
 	if s.shouldRememberUnverifiedAIOutput() && strings.TrimSpace(reply) != "" {
 		go s.rememberAI("chat", "ai_chat", "【用户】\n"+req.Message+"\n\n【AI】\n"+reply)
@@ -2770,35 +2774,40 @@ func (s *Server) handleDiagnoseIncident(w http.ResponseWriter, r *http.Request) 
 		var diag string
 		usedModel := cfg.Model
 		diagStart := time.Now()
+		diagCtx, diagUsageID := withAIUsageSlot(r.Context())
 		if len(moaModelList(cfg)) > 1 {
 			writeDiagnoseStage(w, "moa", "多模型集成研判中…")
-			diag = aiChatMoAStream(r.Context(), w, cfg, diagMsgs)
+			diag = aiChatMoAStream(diagCtx, w, cfg, diagMsgs)
 		} else {
 			writeDiagnoseStage(w, "generate", "AI 生成诊断结论…")
 			var err error
-			diag, usedModel, err = s.streamChatWithFallback(r.Context(), w, cfg, diagMsgs, nil, false, aiCallOpts{})
+			diag, usedModel, err = s.streamChatWithFallback(diagCtx, w, cfg, diagMsgs, nil, false, aiCallOpts{})
 			if err != nil && strings.TrimSpace(diag) == "" {
-				diag, _ = streamChatNoDone(r.Context(), w, cfg, diagMsgs, nil)
+				diag, _ = streamChatNoDone(diagCtx, w, cfg, diagMsgs, nil)
 				usedModel = cfg.Model
 			}
 			if usedModel == "" {
 				usedModel = cfg.Model
 			}
 		}
+		diagLat := time.Since(diagStart).Milliseconds()
+		s.recordAICallActor(diagCtx, "diagnose", usedModel, s.actorName(r), diagLat,
+			strings.TrimSpace(diag) != "", "", memHits, skillHits, diag)
+		endAIUsageSlot(diagUsageID)
 		// 自我校验（可选）：独立第二遍对照证据复核结论，流式续写到同一响应。
 		verify := ""
 		if cfg.SelfVerify && strings.TrimSpace(diag) != "" {
 			writeDiagnoseStage(w, "verify", "自我校验中…")
-			verify = streamSelfVerify(r.Context(), w, cfg, sys, diag)
+			vCtx, vUsageID := withAIUsageSlot(r.Context())
+			verify = streamSelfVerify(vCtx, w, cfg, sys, diag)
+			s.recordAICallActor(vCtx, "diagnose:verify", cfg.Model, s.actorName(r), 0, true, "", 0, 0, verify)
+			endAIUsageSlot(vUsageID)
 		}
 		writeDiagnoseStage(w, "done", "诊断完成")
 		full := diag
 		if strings.TrimSpace(verify) != "" {
 			full += "\n\n🔎 自我校验：\n" + verify
 		}
-		diagLat := time.Since(diagStart).Milliseconds()
-		s.recordAICallActor(r.Context(), "diagnose", usedModel, s.actorName(r), diagLat,
-			strings.TrimSpace(diag) != "", "", memHits, skillHits, full)
 		if diag != "" {
 			runID := newOpaqueID("run_")
 			okVerify := diagnosisEvidenceOK(cites)
@@ -3968,7 +3977,9 @@ func (s *Server) handleSreyunChat(w http.ResponseWriter, r *http.Request) {
 		f.Flush()
 	}
 	start := time.Now()
-	reply, loopMeta, chatErr := s.sreyun.Chat(r.Context(), session, msg, images, true, w)
+	callCtx, usageID := withAIUsageSlot(r.Context())
+	defer endAIUsageSlot(usageID)
+	reply, loopMeta, chatErr := s.sreyun.Chat(callCtx, session, msg, images, true, w)
 	errStr := ""
 	if chatErr != nil {
 		errStr = chatErr.Error()
@@ -3978,7 +3989,7 @@ func (s *Server) handleSreyunChat(w http.ResponseWriter, r *http.Request) {
 	if loopMeta.FallbackModel != "" {
 		usedModel = loopMeta.FallbackModel
 	}
-	s.recordAICallActor(r.Context(), "sreyun", usedModel, s.actorName(r), lat,
+	s.recordAICallActor(callCtx, "sreyun", usedModel, s.actorName(r), lat,
 		chatErr == nil && strings.TrimSpace(reply) != "", errStr, 0, 0, reply)
 	runID := newOpaqueID("run_")
 	reqID := requestIDFrom(r)

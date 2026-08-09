@@ -87,6 +87,52 @@ func TestAIUsageSlotConsumerMarksExact(t *testing.T) {
 	}
 }
 
+// TestAIUsageSlotSurvivesNestedLLMHelper is the production call-graph regression:
+// outer request binds a slot, nested streamChat/aiChatV-style helper reuses it
+// (must not own/delete), then recordAICallActor on the outer ctx still sees exact usage.
+func TestAIUsageSlotSurvivesNestedLLMHelper(t *testing.T) {
+	s := &Server{aiStats: newAIStatsHub()}
+	outer, id := withAIUsageSlot(context.Background())
+	defer endAIUsageSlot(id)
+
+	nested := func(ctx context.Context) {
+		ctx2, slotID, owned := bindAIUsageSlot(ctx)
+		if owned {
+			t.Fatal("nested LLM helper must reuse the outer slot, not create one")
+		}
+		if slotID == 0 {
+			t.Fatal("expected live slot id")
+		}
+		captureAIUsageCtx(ctx2, 321, 654)
+	}
+	nested(outer)
+
+	s.recordAICallActor(outer, "chat", "m", "u", 10, true, "", 0, 0, "x")
+	snap := s.aiStats.snapshot()
+	recent := snap["recent"].([]aiCallStat)
+	if len(recent) != 1 || recent[0].UsageSource != "exact" || recent[0].PromptTokens != 321 || recent[0].CompletionTokens != 654 {
+		t.Fatalf("exact usage lost across nested helper boundary: %+v", recent[0])
+	}
+}
+
+func TestOpenAIStreamUsageOptions(t *testing.T) {
+	opts := openAIStreamUsageOptions()
+	if opts["include_usage"] != true {
+		t.Fatalf("expected include_usage=true, got %#v", opts)
+	}
+}
+
+func TestApplyWeeklyEvalModelUsesCheap(t *testing.T) {
+	got := applyWeeklyEvalModel(AIConfig{Model: "primary-expensive", CheapModel: "cheap-mini"})
+	if got.Model != "cheap-mini" {
+		t.Fatalf("weekly eval must call cheap model, got %q", got.Model)
+	}
+	got2 := applyWeeklyEvalModel(AIConfig{Model: "only-primary"})
+	if got2.Model != "only-primary" {
+		t.Fatalf("without cheap_model keep primary, got %q", got2.Model)
+	}
+}
+
 func TestParseTimeRangeQueryDefaults(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/api/v1/ai/usage/history", nil)
 	from, to := parseTimeRangeQuery(r, 24*time.Hour)

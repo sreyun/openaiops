@@ -657,6 +657,8 @@ func (s *Server) runAssistTaskSync(ctx context.Context, task, userMsg, contextTe
 	if opts.Timeout <= 0 {
 		opts.Timeout = 90 * time.Second
 	}
+	ctx, usageID := withAIUsageSlot(ctx)
+	defer endAIUsageSlot(usageID)
 	callCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
 	defer cancel()
 	start := time.Now()

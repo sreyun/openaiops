@@ -459,8 +459,11 @@ func aiChatVOpts(ctx context.Context, cfg AIConfig, messages []map[string]string
 		ctx = context.Background()
 	}
 	var slotID uint64
-	ctx, slotID = withAIUsageSlot(ctx)
-	defer endAIUsageSlot(slotID)
+	var owned bool
+	ctx, slotID, owned = bindAIUsageSlot(ctx)
+	if owned {
+		defer endAIUsageSlot(slotID)
+	}
 	if cfg.Endpoint == "" || cfg.Model == "" {
 		return "", nil, fmt.Errorf("AI Endpoint 或模型名未配置，请先在「AI 设置」中填写并保存")
 	}
@@ -677,8 +680,11 @@ func aiChatVStreamOpts(ctx context.Context, cfg AIConfig, messages []map[string]
 		ctx = context.Background()
 	}
 	var slotID uint64
-	ctx, slotID = withAIUsageSlot(ctx)
-	defer endAIUsageSlot(slotID)
+	var owned bool
+	ctx, slotID, owned = bindAIUsageSlot(ctx)
+	if owned {
+		defer endAIUsageSlot(slotID)
+	}
 	if cfg.Endpoint == "" || cfg.Model == "" {
 		return "", nil, fmt.Errorf("AI Endpoint 或模型名未配置")
 	}
@@ -691,10 +697,11 @@ func aiChatVStreamOpts(ctx context.Context, cfg AIConfig, messages []map[string]
 	}
 
 	reqBody := map[string]any{
-		"model":       cfg.Model,
-		"messages":    buildRequestMessages(messages, images, prov), // 无图片时等价原 messages
-		"temperature": 0.2,
-		"stream":      true,
+		"model":          cfg.Model,
+		"messages":       buildRequestMessages(messages, images, prov), // 无图片时等价原 messages
+		"temperature":    0.2,
+		"stream":         true,
+		"stream_options": openAIStreamUsageOptions(),
 	}
 	if len(tools) > 0 {
 		reqBody["tools"] = tools
@@ -923,6 +930,13 @@ func compressHistory(cfg AIConfig, history []map[string]string, keepRecentTurns 
 	return out, newSummary, newCount
 }
 
+// openAIStreamUsageOptions asks OpenAI-compatible gateways to emit a final
+// usage chunk on SSE streams. Without this, most providers omit usage and the
+// exact-token ledger stays empty on the dominant streaming path.
+func openAIStreamUsageOptions() map[string]any {
+	return map[string]any{"include_usage": true}
+}
+
 // streamChat calls the AI provider with streaming enabled (SSE) and writes each
 // streamChat streams an AI chat response via SSE. When images are non-nil,
 // the last user message is converted to multimodal content format so vision
@@ -941,8 +955,11 @@ func streamChatInnerOpts(ctx context.Context, w http.ResponseWriter, cfg AIConfi
 		ctx = context.Background()
 	}
 	var slotID uint64
-	ctx, slotID = withAIUsageSlot(ctx)
-	defer endAIUsageSlot(slotID)
+	var owned bool
+	ctx, slotID, owned = bindAIUsageSlot(ctx)
+	if owned {
+		defer endAIUsageSlot(slotID)
+	}
 	if cfg.Endpoint == "" || cfg.Model == "" {
 		fmt.Fprintf(w, "data: {\"error\":\"AI 未配置\"}\n\n")
 		return "", nil
@@ -975,10 +992,11 @@ func streamChatInnerOpts(ctx context.Context, w http.ResponseWriter, cfg AIConfi
 		reqMessages = buildRequestMessages(messages, images, prov)
 	}
 	reqBody := map[string]any{
-		"model":       cfg.Model,
-		"messages":    reqMessages,
-		"temperature": 0.2,
-		"stream":      true,
+		"model":          cfg.Model,
+		"messages":       reqMessages,
+		"temperature":    0.2,
+		"stream":         true,
+		"stream_options": openAIStreamUsageOptions(),
 	}
 	applyThinkingKnobs(reqBody, cfg, prov, opts)
 	applyOutputTokenLimit(reqBody, cfg, prov, opts)

@@ -59,20 +59,25 @@ func (s *Server) onlineEvalLLM(cfg AIConfig) evalLLMFunc {
 
 // runWeeklyEval 每周一与周报一起跑在线评测（走 cheap_model 控制成本），结果落库。
 // 由 runDutyReportLoop 的周一分支调用。返回最新汇总。
-func (s *Server) runWeeklyEval() (evalRunSummary, error) {
-	cfg := s.cfg.AIConfig()
-	model := cfg.Model
+// applyWeeklyEvalModel prefers CheapModel for the real provider call so cost
+// control and the persisted ai_eval_runs.model label stay aligned.
+func applyWeeklyEvalModel(cfg AIConfig) AIConfig {
 	if cfg.CheapModel != "" {
-		model = cfg.CheapModel
+		cfg.Model = cfg.CheapModel
 	}
-	sum, err := runEvalSet(context.Background(), model, "online", s.onlineEvalLLM(cfg))
+	return cfg
+}
+
+func (s *Server) runWeeklyEval() (evalRunSummary, error) {
+	cfg := applyWeeklyEvalModel(s.cfg.AIConfig())
+	sum, err := runEvalSet(context.Background(), cfg.Model, "online", s.onlineEvalLLM(cfg))
 	if err != nil {
 		return sum, err
 	}
 	if s.pg != nil {
 		s.pg.persistEvalRun(sum)
 		slog.Info("ai.eval online", "run", sum.RunID, "pass_rate", sum.PassRate,
-			"cases", sum.CaseCount, "model", model)
+			"cases", sum.CaseCount, "model", cfg.Model)
 	}
 	return sum, nil
 }

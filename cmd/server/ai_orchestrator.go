@@ -414,18 +414,15 @@ func (s *Server) streamOrchestratedAssist(ctx context.Context, w http.ResponseWr
 	// 不发 [DONE]，以便在流末追加 assist_id / verify meta，再由本函数统一收尾。
 	var reply, usedModel string
 	var err error
+	// Outer usage slot: nested streamChat/aiChatV reuse it so exact tokens survive
+	// until recordAICallActor (inner helpers used to create+delete their own slot).
+	callCtx, usageID := withAIUsageSlot(ctx)
 	usedMoA := isHighRiskAssistTask(task) && len(moaModelList(cfg)) > 1
 	if usedMoA {
-		reply = aiChatMoAStream(ctx, w, cfg, msgs)
+		reply = aiChatMoAStream(callCtx, w, cfg, msgs)
 		usedModel = cfg.Model
-		for _, m := range moaModelList(cfg) {
-			if m == cfg.Model {
-				continue
-			}
-			s.recordAICallActor(ctx, task+":moa", m, actor, 0, true, "", 0, 0, "")
-		}
 	} else {
-		reply, usedModel, err = s.streamChatWithFallback(ctx, w, cfg, msgs, nil, false, opts)
+		reply, usedModel, err = s.streamChatWithFallback(callCtx, w, cfg, msgs, nil, false, opts)
 		if err != nil && thinkingParamForcedTrueError(err) && !opts.EnableThinking {
 			retry := opts
 			retry.EnableThinking = true
@@ -438,17 +435,7 @@ func (s *Server) streamOrchestratedAssist(ctx context.Context, w http.ResponseWr
 			}
 			slog.Info("assist retry with enable_thinking=true", "task", task, "model", cfg.Model, "budget", retry.ThinkingBudget)
 			start = time.Now()
-			reply, usedModel, err = s.streamChatWithFallback(ctx, w, cfg, msgs, nil, false, retry)
-		}
-	}
-	llmSelfVerify := false
-	if err == nil && cfg.SelfVerify && isHighRiskAssistTask(task) && strings.TrimSpace(reply) != "" {
-		vStart := time.Now()
-		vtxt := streamSelfVerify(ctx, w, cfg, safeCtx, reply)
-		llmSelfVerify = strings.TrimSpace(vtxt) != ""
-		s.recordAICallActor(ctx, task+":verify", cfg.Model, actor, time.Since(vStart).Milliseconds(), true, "", 0, 0, vtxt)
-		if llmSelfVerify {
-			reply = reply + "\n\n" + vtxt
+			reply, usedModel, err = s.streamChatWithFallback(callCtx, w, cfg, msgs, nil, false, retry)
 		}
 	}
 	if err == nil {
@@ -462,7 +449,29 @@ func (s *Server) streamOrchestratedAssist(ctx context.Context, w http.ResponseWr
 	if usedModel == "" {
 		usedModel = cfg.Model
 	}
-	s.recordAICallActor(ctx, task, usedModel, actor, latency, err == nil, errStr, memHits, skillHits, reply)
+	// Record the primary call before MoA markers so takeCapturedAIUsageCtx still sees tokens.
+	s.recordAICallActor(callCtx, task, usedModel, actor, latency, err == nil, errStr, memHits, skillHits, reply)
+	endAIUsageSlot(usageID)
+	if usedMoA {
+		for _, m := range moaModelList(cfg) {
+			if m == cfg.Model {
+				continue
+			}
+			s.recordAICallActor(ctx, task+":moa", m, actor, 0, true, "", 0, 0, "")
+		}
+	}
+	llmSelfVerify := false
+	if err == nil && cfg.SelfVerify && isHighRiskAssistTask(task) && strings.TrimSpace(reply) != "" {
+		vStart := time.Now()
+		vCtx, vUsageID := withAIUsageSlot(ctx)
+		vtxt := streamSelfVerify(vCtx, w, cfg, safeCtx, reply)
+		llmSelfVerify = strings.TrimSpace(vtxt) != ""
+		s.recordAICallActor(vCtx, task+":verify", cfg.Model, actor, time.Since(vStart).Milliseconds(), true, "", 0, 0, vtxt)
+		endAIUsageSlot(vUsageID)
+		if llmSelfVerify {
+			reply = reply + "\n\n" + vtxt
+		}
+	}
 
 	assistID := ""
 	var verify *assistVerifyResult
