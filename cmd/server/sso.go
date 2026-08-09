@@ -281,6 +281,22 @@ func (s *Server) handleSSOCallback(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) finishSSOLogin(w http.ResponseWriter, r *http.Request, username, provider string) {
+	// Honor global MFA enrollment the same way completeLogin does. SSO replaces
+	// the password factor; it must not skip MFARequired for users who have not
+	// bound TOTP yet.
+	if s.cfg.MFARequired() {
+		if acc, ok := s.cfg.UserByName(username); ok && !acc.MFAEnabled {
+			sessTok := s.auth.issueRestrictedSession(username)
+			http.SetCookie(w, &http.Cookie{
+				Name: sessionCookie, Value: sessTok, Path: "/", HttpOnly: true,
+				Secure: s.isHTTPS(r), SameSite: http.SameSiteLaxMode, MaxAge: int(sessionTTL / time.Second),
+			})
+			s.store.AddLog(LogEntry{Kind: KindOperation, Level: "info", Actor: username, IP: s.clientIP(r),
+				Message: fmt.Sprintf("SSO 登录成功（%s，待绑定 MFA）", provider)})
+			http.Redirect(w, r, "/?require_mfa_setup=1", http.StatusFound)
+			return
+		}
+	}
 	sessTok := s.auth.issueSession(username)
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: sessTok, Path: "/", HttpOnly: true,

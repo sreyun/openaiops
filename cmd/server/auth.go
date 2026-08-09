@@ -763,11 +763,35 @@ func (s *Server) handleSetPassword(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "auth.password_policy")})
 		return
 	}
+	// Capture before clearUserSessions: a forced-change session must not be
+	// upgraded to a full session when global MFA enrollment is still required.
+	wasPwChangeOnly := s.auth.isPasswordChangeOnly(r)
 	_ = s.cfg.SetUserPassword(acc.Username, req.New)
 	// v5.4.0: clear MustChangePassword flag after a successful self-change
 	s.cfg.ClearMustChangePassword(acc.Username)
 	// Invalidate only THIS user's other sessions, then re-issue one for the current.
 	s.auth.clearUserSessions(acc.Username)
+	// completeLogin applies MFARequired after MustChangePassword. /password is
+	// allowed on pwChangeOnly sessions, so it must apply the same gate — otherwise
+	// POST /password after a forced-change login mints a full session and skips
+	// MFA enrollment entirely.
+	if wasPwChangeOnly && s.cfg.MFARequired() {
+		if u, ok := s.cfg.UserByName(acc.Username); ok && !u.MFAEnabled {
+			tok := s.auth.issueRestrictedSession(acc.Username)
+			http.SetCookie(w, &http.Cookie{
+				Name: sessionCookie, Value: tok, Path: "/", HttpOnly: true,
+				Secure:   s.isHTTPS(r),
+				SameSite: http.SameSiteLaxMode, MaxAge: int(sessionTTL / time.Second),
+			})
+			s.store.AddLog(LogEntry{Kind: KindOperation, Level: "warning", Actor: s.actorName(r), IP: s.clientIP(r), Message: Tz("log.change_password", acc.Username)})
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok":                true,
+				"require_mfa_setup": true,
+				"message":           Tr(r, "auth.global_mfa_required"),
+			})
+			return
+		}
+	}
 	tok := s.auth.issueSession(acc.Username)
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: tok, Path: "/", HttpOnly: true,
