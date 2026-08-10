@@ -135,8 +135,14 @@ func (s *Server) handleRecoverVerify(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	// No MFA — email verification is sufficient. Consume the code and return result.
-	s.emailMgr.consumeVerifiedCode(user.Email, req.Purpose, req.Code)
+	// No MFA — email verification is sufficient. Consume the code and return
+	// result only on a successful one-shot consume (same gate as MFA path).
+	// Ignoring a failed consume previously let concurrent recover-verify calls
+	// mint multiple reset_tokens from a single email OTP.
+	if consumedEmail := s.emailMgr.consumeVerifiedCode(user.Email, req.Purpose, req.Code); consumedEmail == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "recovery.code_invalid")})
+		return
+	}
 	s.finalizeRecovery(w, r, user, req.Purpose)
 }
 

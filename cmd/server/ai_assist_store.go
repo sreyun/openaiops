@@ -152,40 +152,44 @@ func (h *aiGovHub) consumeWriteApproval(id, tool, argsHash string) bool {
 	if h == nil || strings.TrimSpace(id) == "" {
 		return false
 	}
-	now := time.Now().Unix()
 	h.mu.Lock()
-	a, ok := h.approvals[id]
 	pg := h.pg
-	if ok && !a.Used {
-		if a.ExpiresAt > 0 && now > a.ExpiresAt {
-			delete(h.approvals, id)
-			h.mu.Unlock()
+	h.mu.Unlock()
+
+	// When PostgreSQL is wired, it is the sole authority for one-shot consume.
+	// The previous memory-first path deleted the in-memory token then best-effort
+	// upserted used=true; a concurrent caller (or a failed upsert + restart)
+	// could still consumeWriteApprovalPG while used=false and authorize twice.
+	if pg != nil {
+		if !pg.consumeWriteApprovalPG(context.Background(), id, tool, argsHash) {
 			return false
 		}
-		if a.Tool != "" && !strings.EqualFold(a.Tool, tool) {
-			h.mu.Unlock()
-			return false
-		}
-		// Fail closed: empty ArgsHash must never authorize arbitrary args.
-		if strings.TrimSpace(a.ArgsHash) == "" || strings.TrimSpace(argsHash) == "" || a.ArgsHash != argsHash {
-			h.mu.Unlock()
-			return false
-		}
-		a.Used = true
-		a.UsedAt = now
+		h.mu.Lock()
 		delete(h.approvals, id)
 		h.mu.Unlock()
-		if pg != nil {
-			pg.upsertWriteApproval(a)
-		}
 		return true
 	}
-	h.mu.Unlock()
-	// Memory miss (e.g. after restart): try durable PG token.
-	if pg != nil {
-		return pg.consumeWriteApprovalPG(context.Background(), id, tool, argsHash)
+
+	now := time.Now().Unix()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	a, ok := h.approvals[id]
+	if !ok || a.Used {
+		return false
 	}
-	return false
+	if a.ExpiresAt > 0 && now > a.ExpiresAt {
+		delete(h.approvals, id)
+		return false
+	}
+	if a.Tool != "" && !strings.EqualFold(a.Tool, tool) {
+		return false
+	}
+	// Fail closed: empty ArgsHash must never authorize arbitrary args.
+	if strings.TrimSpace(a.ArgsHash) == "" || strings.TrimSpace(argsHash) == "" || a.ArgsHash != argsHash {
+		return false
+	}
+	delete(h.approvals, id)
+	return true
 }
 
 // checkAndIncrMCPRate limits MCP calls per token fingerprint (per minute).
