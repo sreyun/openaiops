@@ -32,6 +32,7 @@
   "login.send_sms": "發送驗證碼",
   "login.sms_hint": "使用已繫結手機號與簡訊驗證碼登入",
   "login.phone_required": "請輸入手機號",
+  "login.phone_ambiguous": "該手機號綁定了多個帳號，請聯絡管理員清理後再登入",
   "login.account": "帳號",
   "login.account_placeholder": "使用者名稱或手機號",
   "login.switch_account": "帳號密碼登入",
@@ -178,6 +179,8 @@
   "check.custom_monitor": "自訂監控",
 
   "user.username_exists": "使用者名稱已存在",
+  "user.phone_in_use": "該手機號已綁定其他帳號",
+  "user.phone_username_conflict": "該手機號與其他帳號的使用者名稱衝突",
   "user.not_found": "使用者不存在",
   "user.keep_one_admin": "至少保留一名管理員",
   "user.keep_one_user": "至少保留一名使用者",

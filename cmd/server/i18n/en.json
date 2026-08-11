@@ -32,6 +32,7 @@
   "login.send_sms": "Send code",
   "login.sms_hint": "Sign in with a bound phone number and SMS OTP",
   "login.phone_required": "Phone number is required",
+  "login.phone_ambiguous": "This phone number is bound to multiple accounts; ask an admin to fix the binding before signing in",
   "login.account": "Account",
   "login.account_placeholder": "Username or phone",
   "login.switch_account": "Password login",
@@ -180,6 +181,8 @@
   "check.custom_monitor": "Custom Monitor",
 
   "user.username_exists": "Username already exists",
+  "user.phone_in_use": "This phone number is already bound to another account",
+  "user.phone_username_conflict": "This phone number conflicts with another account's username",
   "user.not_found": "User not found",
   "user.keep_one_admin": "At least one admin must be kept",
   "user.keep_one_user": "At least one user must be kept",

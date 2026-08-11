@@ -197,16 +197,36 @@ func (cs *ConfigStore) UserByEmail(email string) (AccountConfig, bool) {
 	return AccountConfig{}, false
 }
 
-// UserByPhone returns the first user whose phone number matches (exact).
+// UserByPhone returns the first user whose phone number matches (digits-normalized).
 func (cs *ConfigStore) UserByPhone(phone string) (AccountConfig, bool) {
+	phone = normalizePhoneDigits(phone)
+	if phone == "" {
+		return AccountConfig{}, false
+	}
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	for _, u := range cs.cfg.Users {
-		if u.Phone != "" && u.Phone == phone {
+		if u.Phone != "" && normalizePhoneDigits(u.Phone) == phone {
 			return u, true
 		}
 	}
 	return AccountConfig{}, false
+}
+
+// countUsersByPhoneLocked returns how many accounts share the normalized phone.
+// Caller must hold cs.mu (read or write).
+func (cs *ConfigStore) countUsersByPhoneLocked(phone string) int {
+	phone = normalizePhoneDigits(phone)
+	if phone == "" {
+		return 0
+	}
+	n := 0
+	for _, u := range cs.cfg.Users {
+		if u.Phone != "" && normalizePhoneDigits(u.Phone) == phone {
+			n++
+		}
+	}
+	return n
 }
 
 // RoleOf returns a user's role, or "" if the user doesn't exist.
@@ -353,13 +373,33 @@ func (cs *ConfigStore) ClearMustChangePassword(username string) {
 	_ = cs.save()
 }
 
-// SetUserProfile updates a user's own display name + email.
+// SetUserProfile updates a user's own display name + email + phone.
+// Phone numbers must be unique across accounts and must not equal another
+// account's username (phone-shaped usernames would otherwise be shadowable
+// via the unified username-or-phone login path / SMS OTP binding).
 func (cs *ConfigStore) SetUserProfile(username, displayName, email, phone string) error {
+	phone = strings.TrimSpace(phone)
+	normPhone := normalizePhoneDigits(phone)
 	cs.mu.Lock()
 	i := cs.findLocked(username)
 	if i < 0 {
 		cs.mu.Unlock()
 		return fmt.Errorf("%s", Tz("user.not_found"))
+	}
+	if normPhone != "" {
+		for j, u := range cs.cfg.Users {
+			if j == i {
+				continue
+			}
+			if u.Phone != "" && normalizePhoneDigits(u.Phone) == normPhone {
+				cs.mu.Unlock()
+				return fmt.Errorf("%s", Tz("user.phone_in_use"))
+			}
+			if u.Username == normPhone || u.Username == phone {
+				cs.mu.Unlock()
+				return fmt.Errorf("%s", Tz("user.phone_username_conflict"))
+			}
+		}
 	}
 	cs.cfg.Users[i].DisplayName = displayName
 	cs.cfg.Users[i].Email = email

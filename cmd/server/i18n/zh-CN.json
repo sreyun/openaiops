@@ -32,6 +32,7 @@
   "login.send_sms": "发送验证码",
   "login.sms_hint": "使用已绑定手机号与短信验证码登录",
   "login.phone_required": "请输入手机号",
+  "login.phone_ambiguous": "该手机号绑定了多个账号，请联系管理员清理后再登录",
   "login.account": "账号",
   "login.account_placeholder": "用户名或手机号",
   "login.switch_account": "账号密码登录",
@@ -180,6 +181,8 @@
   "check.custom_monitor": "自定义监控",
 
   "user.username_exists": "用户名已存在",
+  "user.phone_in_use": "该手机号已绑定其他账号",
+  "user.phone_username_conflict": "该手机号与其他账号的用户名冲突",
   "user.not_found": "用户不存在",
   "user.keep_one_admin": "至少保留一名管理员",
   "user.keep_one_user": "至少保留一名用户",

@@ -369,15 +369,20 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	s.completeLogin(w, r, acc, pass, req.Code, ip)
 }
 
-// looksLikePhone reports whether id is shaped like a mainland mobile number
-// (11 digits starting with 1), after stripping spaces/dashes.
-func looksLikePhone(id string) bool {
-	s := strings.Map(func(r rune) rune {
+// normalizePhoneDigits strips spaces/dashes from a phone-like identifier.
+func normalizePhoneDigits(id string) string {
+	return strings.Map(func(r rune) rune {
 		if r == ' ' || r == '-' {
 			return -1
 		}
 		return r
 	}, strings.TrimSpace(id))
+}
+
+// looksLikePhone reports whether id is shaped like a mainland mobile number
+// (11 digits starting with 1), after stripping spaces/dashes.
+func looksLikePhone(id string) bool {
+	s := normalizePhoneDigits(id)
 	if len(s) != 11 || s[0] != '1' {
 		return false
 	}
@@ -390,11 +395,17 @@ func looksLikePhone(id string) bool {
 }
 
 // authenticateAccountLogin accepts username or bound phone + password.
+// Exact username match always wins: a peer must not be able to bind the same
+// digits as their profile phone and shadow a phone-shaped username.
 func (s *Server) authenticateAccountLogin(w http.ResponseWriter, r *http.Request, id, password, ip string) (AccountConfig, bool) {
 	id = strings.TrimSpace(id)
+	if _, found := s.cfg.UserByName(id); found {
+		return s.authenticateUsernameLogin(w, r, id, password, ip)
+	}
 	if looksLikePhone(id) {
-		if _, found := s.cfg.UserByPhone(id); found {
-			return s.authenticatePhoneLogin(w, r, id, password, ip)
+		phone := normalizePhoneDigits(id)
+		if _, found := s.cfg.UserByPhone(phone); found {
+			return s.authenticatePhoneLogin(w, r, phone, password, ip)
 		}
 	}
 	return s.authenticateUsernameLogin(w, r, id, password, ip)
@@ -422,6 +433,7 @@ func (s *Server) authenticateUsernameLogin(w http.ResponseWriter, r *http.Reques
 // password separately (since CheckPassword uses UserByName). On failure, writes
 // the error response and returns false.
 func (s *Server) authenticatePhoneLogin(w http.ResponseWriter, r *http.Request, phone, password, ip string) (AccountConfig, bool) {
+	phone = normalizePhoneDigits(phone)
 	acc, found := s.cfg.UserByPhone(phone)
 	if !found {
 		hashPassword(password, "dummy-salt-000000") // constant-ish timing
@@ -432,6 +444,13 @@ func (s *Server) authenticatePhoneLogin(w http.ResponseWriter, r *http.Request, 
 			s.autoDefendOnLoginLockout(ip, "phone:"+phone)
 		}
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": Tr(r, "auth.invalid_credentials")})
+		return acc, false
+	}
+	s.cfg.mu.RLock()
+	phoneOwners := s.cfg.countUsersByPhoneLocked(phone)
+	s.cfg.mu.RUnlock()
+	if phoneOwners > 1 {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": Tr(r, "login.phone_ambiguous")})
 		return acc, false
 	}
 	if !verifyPassword(password, acc.Salt, acc.Hash) {
@@ -463,12 +482,22 @@ func (s *Server) authenticateSMSLogin(w http.ResponseWriter, r *http.Request, ph
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "login.sms_code_required")})
 		return acc, false
 	}
+	phone = normalizePhoneDigits(phone)
 	acc, found := s.cfg.UserByPhone(phone)
 	if !found {
 		s.auth.loginFailed(ip)
 		s.auth.loginAccountFailed(phone)
 		s.store.AddLog(LogEntry{Kind: KindSystem, Level: "warning", Actor: ip, IP: ip, Message: Tz("log.login_failed", "sms:"+maskPhone(phone))})
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": Tr(r, "auth.invalid_credentials")})
+		return acc, false
+	}
+	// Fail closed when the phone is ambiguously bound to multiple accounts —
+	// OTP proves control of the number, not which account should receive the session.
+	s.cfg.mu.RLock()
+	phoneOwners := s.cfg.countUsersByPhoneLocked(phone)
+	s.cfg.mu.RUnlock()
+	if phoneOwners > 1 {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": Tr(r, "login.phone_ambiguous")})
 		return acc, false
 	}
 	if !s.auth.loginAccountAllowed(acc.Username) {
@@ -647,7 +676,10 @@ func (s *Server) handleSetProfile(w http.ResponseWriter, r *http.Request) {
 		}
 		name = uname
 	}
-	_ = s.cfg.SetUserProfile(name, strings.TrimSpace(req.DisplayName), strings.TrimSpace(req.Email), strings.TrimSpace(req.Phone))
+	if err := s.cfg.SetUserProfile(name, strings.TrimSpace(req.DisplayName), strings.TrimSpace(req.Email), strings.TrimSpace(req.Phone)); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 	s.store.AddLog(LogEntry{Kind: KindOperation, Level: "info", Actor: s.actorName(r), IP: s.clientIP(r), Message: Tz("log.update_profile", name)})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "username": name})
 }
@@ -678,7 +710,7 @@ func (s *Server) handleLoginSMSCode(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "common.invalid_json")})
 		return
 	}
-	phone := strings.TrimSpace(req.Phone)
+	phone := normalizePhoneDigits(req.Phone)
 	if phone == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "login.phone_required")})
 		return
@@ -697,6 +729,14 @@ func (s *Server) handleLoginSMSCode(w http.ResponseWriter, r *http.Request) {
 	if !found {
 		time.Sleep(80 * time.Millisecond)
 		writeJSON(w, http.StatusOK, map[string]any{"message": Tr(r, "login.sms_sent")})
+		return
+	}
+	s.cfg.mu.RLock()
+	phoneOwners := s.cfg.countUsersByPhoneLocked(phone)
+	s.cfg.mu.RUnlock()
+	if phoneOwners > 1 {
+		// Ambiguous binding: refuse to mint an OTP that could authorize the wrong account.
+		writeAPIError(w, r, http.StatusConflict, "phone_ambiguous", Tr(r, "login.phone_ambiguous"))
 		return
 	}
 	// Rate limit: 60s between sends
