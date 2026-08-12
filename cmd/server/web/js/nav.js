@@ -270,6 +270,7 @@ safeAddEventListener("revokeTokenBtn", "click", revokeInstallToken);
 safeAddEventListener("installTokenPolicyBtn", "click", saveInstallTokenPolicy);
 safeAddEventListener("agentAutoUpdateSaveBtn", "click", saveAgentAutoUpdatePolicy);
 safeAddEventListener("agentAutoUpdate", "change", syncAgentAutoUpdateBadge);
+safeAddEventListener("agentAutoStatusRefreshBtn", "click", loadAgentAutoUpdateStatus);
 safeAddEventListener("agentAutoUpdateToggle", "click", () => {
   const b = document.getElementById("agentAutoUpdateBody");
   const c = document.getElementById("agentAutoUpdateCaret");
@@ -424,6 +425,7 @@ const PAGE_META = {
   log:      { title: "审计日志", sub: I18N.t("section.log_desc") },
   datasource: { title: "数据源", sub: I18N.t("section.datasource_desc") },
   "sql-toolkit": { title: I18N.t("nav.sql_toolkit") || "SQL 工具", sub: I18N.t("section.sql_toolkit_desc") || "MySQL 美化 / 审核 / 优化 + EXPLAIN" },
+  cicd: { title: "CI/CD", sub: "GitLab / GitHub Actions / Gitee Go 流水线：查看 · 触发 · 重跑/取消 · 失败 AI 诊断" },
   hardware:  { title: I18N.t("nav.resources") || "资源", sub: I18N.t("section.resources_desc") || "物理硬件 / 虚拟机 / 容器 / Kubernetes" },
   hyperv:    { title: I18N.t("nav.resources") || "资源", sub: I18N.t("section.resources_desc") || "物理硬件 / 虚拟机 / 容器 / Kubernetes" },
   containers:{ title: I18N.t("nav.resources") || "资源", sub: I18N.t("containers.tag") || "主机 Docker / Podman 容器" },
@@ -457,6 +459,7 @@ function rebuildPageMeta() {
   PAGE_META.log        = { title: "审计日志", sub: I18N.t("section.log_desc") };
   PAGE_META.datasource = { title: "数据源", sub: I18N.t("section.datasource_desc") };
   PAGE_META["sql-toolkit"] = { title: I18N.t("nav.sql_toolkit") || "SQL 工具", sub: I18N.t("section.sql_toolkit_desc") || "MySQL 美化 / 审核 / 优化 + EXPLAIN" };
+  PAGE_META.cicd = { title: "CI/CD", sub: "GitLab / GitHub Actions / Gitee Go 流水线：查看 · 触发 · 重跑/取消 · 失败 AI 诊断" };
   PAGE_META.hardware   = { title: I18N.t("nav.resources") || "资源", sub: I18N.t("section.resources_desc") || "物理硬件 / 虚拟机 / 容器 / Kubernetes" };
   PAGE_META.hyperv     = { title: I18N.t("nav.resources") || "资源", sub: I18N.t("section.resources_desc") || "物理硬件 / 虚拟机 / 容器 / Kubernetes" };
   PAGE_META.containers = { title: I18N.t("nav.resources") || "资源", sub: I18N.t("containers.tag") || "主机 Docker / Podman 容器" };
@@ -725,6 +728,7 @@ function switchView(view) {
   if (view === "thresholds") loadThresholds();
   if (view === "datasource") loadDataSources();
   if (view === "sql-toolkit" && window._pageRenderers && window._pageRenderers["sql-toolkit"]) window._pageRenderers["sql-toolkit"]();
+  if (view === "cicd" && window._pageRenderers && window._pageRenderers.cicd) window._pageRenderers.cicd();
   if (view === "hardware" && window._pageRenderers && window._pageRenderers.hardware) window._pageRenderers.hardware();
   if (view === "hyperv" && window._pageRenderers && window._pageRenderers.hyperv) window._pageRenderers.hyperv();
   if (view === "containers" && window._pageRenderers && window._pageRenderers.containers) window._pageRenderers.containers();

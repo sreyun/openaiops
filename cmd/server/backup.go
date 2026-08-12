@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -141,6 +144,43 @@ func backupDir(cfg BackupConfig) string {
 	return filepath.Join(".", "backups")
 }
 
+// pgToolStatus probes one PostgreSQL client tool (pg_dump / pg_restore) so the
+// UI can surface availability before the user triggers a backup/restore.
+func pgToolStatus(tool string) map[string]any {
+	out := map[string]any{tool + "_ok": false}
+	path, err := exec.LookPath(tool)
+	if err != nil {
+		out[tool+"_error"] = pgToolMissingHint(tool)
+		return out
+	}
+	out[tool+"_path"] = path
+	if b, err := exec.Command(path, "--version").CombinedOutput(); err == nil {
+		out[tool+"_version"] = strings.TrimSpace(string(b))
+	}
+	out[tool+"_ok"] = true
+	return out
+}
+
+// pgToolMissingHint returns an actionable hint depending on the deployment mode.
+func pgToolMissingHint(tool string) string {
+	if _, err := os.Stat("/.dockerenv"); err == nil {
+		return fmt.Sprintf("容器内未找到 %s，请更新服务端镜像（新版镜像已内置 PostgreSQL 客户端工具）", tool)
+	}
+	return fmt.Sprintf("未找到 %s，请安装 PostgreSQL 客户端工具（如 Debian: apt install postgresql-client，CentOS: yum install postgresql）", tool)
+}
+
+// backupToolsStatus aggregates client tool availability for the settings UI.
+func backupToolsStatus() map[string]any {
+	out := map[string]any{}
+	for k, v := range pgToolStatus("pg_dump") {
+		out[k] = v
+	}
+	for k, v := range pgToolStatus("pg_restore") {
+		out[k] = v
+	}
+	return out
+}
+
 func (s *Server) listBackups() ([]BackupMeta, error) {
 	if s.pg == nil {
 		return nil, fmt.Errorf("PostgreSQL 未启用")
@@ -205,10 +245,10 @@ func (s *Server) createPGBackup(operator, note string) (BackupMeta, error) {
 	if dsn == "" {
 		return BackupMeta{}, fmt.Errorf("未配置 PostgreSQL DSN")
 	}
-	if _, err := exec.LookPath("pg_dump"); err != nil {
-		return BackupMeta{}, fmt.Errorf("未找到 pg_dump，请安装 PostgreSQL 客户端工具")
-	}
 	cfg := s.cfg.BackupCfg()
+	if _, err := exec.LookPath("pg_dump"); err != nil {
+		return BackupMeta{}, fmt.Errorf("%s（备份目录：%s）", pgToolMissingHint("pg_dump"), backupDir(cfg))
+	}
 	dir := backupDir(cfg)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return BackupMeta{}, err
@@ -263,6 +303,13 @@ func (s *Server) pruneBackups(retain int) {
 	}
 }
 
+// restorePGBackup restores a custom-format dump using the drop-and-recreate
+// strategy. The legacy approach (pg_restore --clean --if-exists into the live DB)
+// fails on partitioned tables: clean-mode DROP CONSTRAINT statements against
+// partition children (e.g. flow_records_default_pkey) are rejected because those
+// constraints are inherited from the parent partition and cannot be dropped
+// directly. Recreating an empty database sidesteps every DROP and makes the
+// restore deterministic. A safety dump of the current state is taken first.
 func (s *Server) restorePGBackup(id, operator string) error {
 	list, err := s.listBackups()
 	if err != nil {
@@ -282,7 +329,7 @@ func (s *Server) restorePGBackup(id, operator string) error {
 		return fmt.Errorf("备份文件缺失: %w", err)
 	}
 	if _, err := exec.LookPath("pg_restore"); err != nil {
-		return fmt.Errorf("未找到 pg_restore，请安装 PostgreSQL 客户端工具")
+		return fmt.Errorf("%s", pgToolMissingHint("pg_restore"))
 	}
 	dsn := strings.TrimSpace(os.Getenv("AIOPS_POSTGRES_DSN"))
 	if dsn == "" {
@@ -290,19 +337,92 @@ func (s *Server) restorePGBackup(id, operator string) error {
 		dsn = s.cfg.cfg.PostgresDSN
 		s.cfg.mu.RUnlock()
 	}
-	cmd := exec.Command("pg_restore", "--clean", "--if-exists", "--no-owner", "--dbname", dsn, meta.Path)
+	if strings.TrimSpace(dsn) == "" {
+		return fmt.Errorf("未配置 PostgreSQL DSN")
+	}
+	// 1) 破坏性操作前先打一份保护性备份，还原失败也能找回当前状态。
+	safety, err := s.createPGBackup(operator, "pre-restore safety backup")
+	if err != nil {
+		return fmt.Errorf("还原前保护性备份失败（已中止还原）: %w", err)
+	}
+	// 2) 连接维护库 postgres，删除并重建目标库（FORCE 断开存量连接，含服务端自身连接池）。
+	if err := pgRecreateDatabase(dsn); err != nil {
+		return fmt.Errorf("重建数据库失败: %w", err)
+	}
+	// 3) 向空库还原（无需 --clean，库内无任何对象）。
+	cmd := exec.Command("pg_restore", "--no-owner", "--exit-on-error", "--dbname", dsn, meta.Path)
 	cmd.Env = os.Environ()
 	if out, err := cmd.CombinedOutput(); err != nil {
-		// pg_restore often returns non-zero with warnings; treat as soft unless empty
-		msg := string(out)
-		if !strings.Contains(msg, "ERROR") && len(msg) < 8 {
-			slog.Warn("pg_restore finished with warnings", "err", err, "out", truncateRunes(msg, 400))
-		} else if strings.Contains(strings.ToUpper(msg), "ERROR") {
-			return fmt.Errorf("pg_restore 失败: %v (%s)", err, truncateRunes(msg, 600))
+		return fmt.Errorf("pg_restore 失败: %v (%s)", err, truncateRunes(string(out), 600))
+	}
+	// 4) 保护性备份的元数据产生于被还原的旧库之后，重建后需补写，避免列表丢失。
+	if s.pg != nil {
+		_, _ = s.pg.db.Exec(`INSERT INTO backup_meta(id, created_at, size_bytes, sha256, operator, path, note)
+			VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (id) DO UPDATE SET size_bytes=EXCLUDED.size_bytes, sha256=EXCLUDED.sha256`,
+			safety.ID, safety.CreatedAt, safety.SizeBytes, safety.SHA256, safety.Operator, safety.Path, safety.Note)
+	}
+	slog.Info("PostgreSQL restore completed (drop-and-recreate)", "backup", id, "operator", operator)
+	s.store.AddLog(LogEntry{Kind: KindOperation, Level: "warning", Actor: operator, Message: "从备份还原 PostgreSQL（删库重建）：" + id})
+	return nil
+}
+
+// pgSplitMaintenanceDSN splits a postgres:// DSN into (maintenance DSN pointing
+// at the "postgres" database, target database name).
+func pgSplitMaintenanceDSN(dsn string) (maint string, dbName string, err error) {
+	u, err := url.Parse(strings.TrimSpace(dsn))
+	if err != nil {
+		return "", "", err
+	}
+	if u.Scheme != "postgres" && u.Scheme != "postgresql" {
+		return "", "", fmt.Errorf("仅支持 postgres:// 形式的 DSN（当前 scheme=%q），无法定位维护库", u.Scheme)
+	}
+	dbName = strings.TrimPrefix(u.Path, "/")
+	if dbName == "" {
+		return "", "", fmt.Errorf("DSN 未包含目标数据库名")
+	}
+	mu := *u
+	mu.Path = "/postgres"
+	return mu.String(), dbName, nil
+}
+
+// pgRecreateDatabase drops and re-creates the target database via the
+// "postgres" maintenance database. WITH (FORCE) (PG≥13) terminates remaining
+// sessions — including this server's own pool, which reconnects lazily.
+func pgRecreateDatabase(dsn string) error {
+	maint, dbName, err := pgSplitMaintenanceDSN(dsn)
+	if err != nil {
+		return err
+	}
+	db, err := sql.Open("postgres", maint)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
+		return fmt.Errorf("连接维护库失败: %w", err)
+	}
+	qi := pqQuoteIdent(dbName)
+	if _, err := db.ExecContext(ctx, "DROP DATABASE IF EXISTS "+qi+" WITH (FORCE)"); err != nil {
+		// FORCE 需要 PG≥13；旧版本退化为普通 DROP（要求无活动连接）。
+		if !strings.Contains(strings.ToLower(err.Error()), "syntax error") {
+			return err
+		}
+		if _, err2 := db.ExecContext(ctx, "DROP DATABASE IF EXISTS "+qi); err2 != nil {
+			return err2
 		}
 	}
-	s.store.AddLog(LogEntry{Kind: KindOperation, Level: "warning", Actor: operator, Message: "从备份还原 PostgreSQL：" + id})
+	if _, err := db.ExecContext(ctx, "CREATE DATABASE "+qi); err != nil {
+		return err
+	}
 	return nil
+}
+
+// pqQuoteIdent quotes an SQL identifier (pgx-style, no external dependency).
+func pqQuoteIdent(s string) string {
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }
 
 func fileSHA256(path string) (string, int64, error) {
@@ -428,7 +548,7 @@ func (s *Server) handleRestoreBackup(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "hint": "还原已执行，建议重启服务端进程以重新加载内存状态"})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "hint": "还原已执行（删库重建模式，还原前已自动创建保护性备份），建议重启服务端进程以重新加载内存状态"})
 }
 
 func (s *Server) handleGetRetention(w http.ResponseWriter, r *http.Request) {
@@ -452,7 +572,15 @@ func (s *Server) handleGetBackupCfg(w http.ResponseWriter, r *http.Request) {
 	b := s.cfg.BackupCfg()
 	b.Remote.SecretKey = maskSecret(b.Remote.SecretKey)
 	b.Remote.AccessKey = maskSecret(b.Remote.AccessKey)
-	writeJSON(w, http.StatusOK, b)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"enabled":       b.Enabled,
+		"daily_at":      b.DailyAt,
+		"retain_count":  b.RetainCount,
+		"dir":           b.Dir,
+		"remote":        b.Remote,
+		"dir_effective": backupDir(b),
+		"tools":         backupToolsStatus(),
+	})
 }
 
 func (s *Server) handleSetBackupCfg(w http.ResponseWriter, r *http.Request) {

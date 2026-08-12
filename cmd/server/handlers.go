@@ -217,6 +217,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/agents/update/jobs/{id}", s.handleAgentUpdateJob)
 	mux.HandleFunc("GET /api/v1/agents/auto-update-policy", s.handleAgentAutoUpdatePolicyGet)
 	mux.HandleFunc("POST /api/v1/agents/auto-update-policy", s.handleAgentAutoUpdatePolicySet)
+	mux.HandleFunc("GET /api/v1/agents/auto-update-status", s.handleAgentAutoUpdateStatusGet)
 	mux.HandleFunc("GET /api/v1/resources/search", s.handleResourceSearch)
 	mux.HandleFunc("GET /api/v1/hosts/{id}/metrics", s.handleHostMetrics)
 	mux.HandleFunc("GET /api/v1/hosts/{id}/history", s.handleHostHistory)
@@ -802,7 +803,7 @@ func (s *Server) Routes() http.Handler {
 		mux.HandleFunc("GET /app.js", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-cache")
-			for _, m := range []string{"core", "export", "duplicates", "overview", "hosts", "host-picker", "forecast", "agent-update", "terminal", "desktop", "settings", "nav", "attachments", "sre", "host-inspect", "ai-assist", "ops-actions", "apimon", "governance", "datasource", "sql-toolkit", "hardware", "hyperv", "containers", "k8s", "netflow", "snmp", "content-audit", "security-overview", "host-security", "security-feeds", "web-security", "security-center", "scrape", "dash_charts", "dashboard", "init"} {
+			for _, m := range []string{"core", "export", "duplicates", "overview", "hosts", "host-picker", "forecast", "agent-update", "terminal", "desktop", "settings", "nav", "attachments", "sre", "host-inspect", "ai-assist", "ops-actions", "apimon", "governance", "datasource", "sql-toolkit", "cicd", "hardware", "hyperv", "containers", "k8s", "netflow", "snmp", "content-audit", "security-overview", "host-security", "security-feeds", "web-security", "security-center", "scrape", "dash_charts", "dashboard", "init"} {
 				b, err := webFS.ReadFile("web/js/" + m + ".js")
 				if err != nil {
 					http.Error(w, "js module missing: "+m, http.StatusInternalServerError)

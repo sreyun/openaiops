@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -16,8 +17,17 @@ const (
 	agentUpdateMaxRetries  = 2
 	// Cooldown after enqueue so success-before-version-ack cannot storm.
 	agentUpdateInFlightSec  = 1800 // hard cooldown after enqueue
-	agentUpdateSoftRetrySec = 360 // >= pending_verify window so soft-retry won't overlap an in-flight swap
+	agentUpdateSoftRetrySec = 360  // >= pending_verify window so soft-retry won't overlap an in-flight swap
+	agentUpdateMaxSkips     = 500  // cap of per-host "why not upgraded" records kept for observability
 )
+
+// agentUpdateSkipInfo records why a host was not auto-enqueued, so operators
+// can answer "为什么这台没升级" from the UI instead of silent no-ops.
+type agentUpdateSkipInfo struct {
+	Reason string `json:"reason"`
+	Detail string `json:"detail,omitempty"`
+	At     int64  `json:"at"`
+}
 
 type agentUpdateHostResult struct {
 	HostID   string `json:"host_id"`
@@ -25,7 +35,7 @@ type agentUpdateHostResult struct {
 	OS       string `json:"os"`
 	Arch     string `json:"arch"`
 	FromVer  string `json:"from_version,omitempty"`
-	Status   string `json:"status"` // pending|running|success|failed|skipped|pending_verify
+	Status   string `json:"status"`           // pending|running|success|failed|skipped|pending_verify
 	Method   string `json:"method,omitempty"` // module|script|rollback
 	Message  string `json:"message,omitempty"`
 	Updated  int64  `json:"updated_at,omitempty"`
@@ -49,12 +59,17 @@ type agentUpdateManager struct {
 	jobs map[string]*agentUpdateJob
 	// inFlight prevents overlapping updates for the same host (manual + auto).
 	inFlight map[string]int64
+	// skipReasons: host_id → latest auto-update skip cause (observability).
+	skipReasons map[string]agentUpdateSkipInfo
+	// lastScanAt is updated by the periodic fleet scanner.
+	lastScanAt int64
 }
 
 func newAgentUpdateManager() *agentUpdateManager {
 	return &agentUpdateManager{
-		jobs:     map[string]*agentUpdateJob{},
-		inFlight: map[string]int64{},
+		jobs:        map[string]*agentUpdateJob{},
+		inFlight:    map[string]int64{},
+		skipReasons: map[string]agentUpdateSkipInfo{},
 	}
 }
 
@@ -188,15 +203,80 @@ func (m *agentUpdateManager) refreshInFlight(hostID string) {
 	m.inFlight[hostID] = time.Now().Unix()
 }
 
+// recordSkip stores the latest "why not upgraded" cause for a host (capped).
+func (m *agentUpdateManager) recordSkip(hostID, reason, detail string) {
+	if m == nil || hostID == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.skipReasons[hostID] = agentUpdateSkipInfo{Reason: reason, Detail: detail, At: time.Now().Unix()}
+	if len(m.skipReasons) > agentUpdateMaxSkips {
+		var oldest string
+		var oldestTS int64 = 1<<63 - 1
+		for id, si := range m.skipReasons {
+			if si.At < oldestTS {
+				oldestTS = si.At
+				oldest = id
+			}
+		}
+		if oldest != "" {
+			delete(m.skipReasons, oldest)
+		}
+	}
+}
+
+func (m *agentUpdateManager) clearSkip(hostID string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.skipReasons, hostID)
+}
+
+type agentUpdateSkipView struct {
+	agentUpdateSkipInfo
+	HostID   string `json:"host_id"`
+	Hostname string `json:"hostname"`
+}
+
+func (m *agentUpdateManager) skipSnapshot(s *Server) []agentUpdateSkipView {
+	m.mu.Lock()
+	cp := make(map[string]agentUpdateSkipInfo, len(m.skipReasons))
+	for k, v := range m.skipReasons {
+		cp[k] = v
+	}
+	m.mu.Unlock()
+	out := make([]agentUpdateSkipView, 0, len(cp))
+	for id, si := range cp {
+		v := agentUpdateSkipView{agentUpdateSkipInfo: si, HostID: id}
+		if s != nil && s.store != nil {
+			if h, ok := s.store.GetHost(id); ok && h != nil {
+				v.Hostname = h.Hostname
+			}
+		}
+		out = append(out, v)
+	}
+	for i := 0; i < len(out); i++ {
+		for j := i + 1; j < len(out); j++ {
+			if out[j].At > out[i].At {
+				out[i], out[j] = out[j], out[i]
+			}
+		}
+	}
+	return out
+}
+
 // ---------- HTTP handlers ----------
 
 func (s *Server) handleAgentDistManifest(w http.ResponseWriter, r *http.Request) {
 	arts := s.listAgentDistManifest()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"version":     appVersion,
-		"comparable":  isComparableAgentVer(appVersion),
-		"artifacts":   arts,
-		"count":       len(arts),
+		"version":    appVersion,
+		"comparable": isComparableAgentVer(appVersion),
+		"artifacts":  arts,
+		"count":      len(arts),
 	})
 }
 
@@ -805,6 +885,8 @@ func (s *Server) hostHasPendingAgentUpdate(hostID string) bool {
 }
 
 // maybeAutoUpdateHost enqueues a single-host update when policy is enabled.
+// Every silent skip is recorded (skip reason + slog) so operators can see
+// "为什么没升级" via GET /api/v1/agents/auto-update-status.
 func (s *Server) maybeAutoUpdateHost(hostID string) {
 	if s == nil || s.cfg == nil || s.agentUpdates == nil || hostID == "" {
 		return
@@ -813,57 +895,16 @@ func (s *Server) maybeAutoUpdateHost(hostID string) {
 	if !ok || h == nil {
 		return
 	}
-	cfg := s.cfg.Get()
-	if !cfg.AgentAutoUpdate {
-		return
-	}
-	if !agentAutoUpdateWindowOpen(cfg.AgentAutoUpdateWindow) {
-		return
-	}
-	for _, id := range cfg.AgentAutoUpdateExemptHosts {
-		if id == h.ID {
-			return
+	enq, reason, detail := s.decideAutoUpdate(h)
+	if !enq {
+		if reason != "" {
+			s.agentUpdates.recordSkip(h.ID, reason, detail)
+			slog.Debug("Agent 自动升级跳过", "host", shortID(h.ID), "hostname", h.Hostname, "reason", reason, "detail", detail)
 		}
-	}
-	for _, cat := range cfg.AgentAutoUpdateExemptCategories {
-		if cat != "" && (h.Category == cat || strings.EqualFold(h.Category, cat)) {
-			return
-		}
-	}
-	if !agentVersionBehind(h.AgentVersion, appVersion) {
-		// Version caught up — release any leftover cooldown early.
-		s.agentUpdates.clearInFlight(h.ID)
 		return
 	}
-	// Do not soft-retry while a prior job is still awaiting version ack.
-	if s.hostHasPendingAgentUpdate(h.ID) {
-		return
-	}
-	goos, goarch := hostGOOSArch(h)
-	if _, ok := s.agentDistResolveForHost(h); !ok {
-		return
-	}
-	_ = goos
-	_ = goarch
-	// Module-capable hosts can update with an empty job base (agent uses report URL).
-	// Legacy script hosts still need a concrete download base.
-	base := agentReportedDownloadBase(h)
-	if base == "" && !hostSupportsAgentUpdateModule(h) {
-		base = s.agentPublicBaseURL()
-		if base == "" {
-			return
-		}
-	}
-	// Freeze-only for auto path: highRisk=false so default remote gate does not
-	// require an approved change outside freeze windows (manual push stays high-risk).
-	if ok, _ := s.remoteGateCheck(h.ID, "auto-update", false, false); !ok {
-		return
-	}
-	// Soft-retry: if still behind after softRetrySec, re-queue (Windows helper
-	// historically died with the service Job before swap completed).
-	if !s.agentUpdates.tryMarkInFlightOrSoftRetry(h.ID, true) {
-		return
-	}
+	s.agentUpdates.clearSkip(h.ID)
+	base := detail // decideAutoUpdate returns the resolved download base on success
 	job := s.createAgentUpdateJob([]*Host{h}, "auto-update", base, false, false)
 	if s.store != nil {
 		s.store.AddLog(LogEntry{
@@ -871,6 +912,134 @@ func (s *Server) maybeAutoUpdateHost(hostID string) {
 			Message: fmt.Sprintf("自动入队 Agent 更新：job=%s from=%s target=%s", job.ID, h.AgentVersion, job.TargetVer),
 		})
 	}
+	slog.Info("Agent 自动升级已入队", "host", shortID(h.ID), "hostname", h.Hostname, "from", h.AgentVersion, "target", job.TargetVer, "job", job.ID)
+}
+
+// decideAutoUpdate runs the full auto-update gate chain for one host. On pass
+// it returns (true, "", base); on skip it returns (false, reason, detail) with
+// a human-readable cause. Kept side-effect free (no enqueue) so the periodic
+// scanner and report-triggered path share identical semantics.
+func (s *Server) decideAutoUpdate(h *Host) (bool, string, string) {
+	cfg := s.cfg.Get()
+	if !cfg.AgentAutoUpdate {
+		return false, "disabled", "自动升级总开关未开启"
+	}
+	if !isComparableAgentVer(appVersion) {
+		return false, "version_not_comparable", fmt.Sprintf("服务端版本 %q 不是可比较的版本号（需 vX.Y.Z 格式，构建时未注入版本号）", appVersion)
+	}
+	if !agentAutoUpdateWindowOpen(cfg.AgentAutoUpdateWindow) {
+		return false, "window_closed", fmt.Sprintf("当前不在维护窗内（%s），下一轮扫描会自动补上", cfg.AgentAutoUpdateWindow)
+	}
+	for _, id := range cfg.AgentAutoUpdateExemptHosts {
+		if id == h.ID {
+			return false, "exempt_host", "主机在豁免名单中"
+		}
+	}
+	for _, cat := range cfg.AgentAutoUpdateExemptCategories {
+		if cat != "" && (h.Category == cat || strings.EqualFold(h.Category, cat)) {
+			return false, "exempt_category", fmt.Sprintf("分类 %q 在豁免名单中", cat)
+		}
+	}
+	if !agentVersionBehind(h.AgentVersion, appVersion) {
+		// Version caught up — release any leftover cooldown early.
+		s.agentUpdates.clearInFlight(h.ID)
+		return false, "", ""
+	}
+	// Do not soft-retry while a prior job is still awaiting version ack.
+	if s.hostHasPendingAgentUpdate(h.ID) {
+		return false, "pending_job", "已有升级任务在进行中（pending/running/pending_verify）"
+	}
+	goos, goarch := hostGOOSArch(h)
+	if _, ok := s.agentDistResolveForHost(h); !ok {
+		return false, "no_artifact", fmt.Sprintf("服务端没有 %s/%s 的 Agent 安装包（dist 目录缺失对应二进制）", goos, goarch)
+	}
+	// Module-capable hosts can update with an empty job base (agent uses report URL).
+	// Legacy script hosts still need a concrete download base.
+	base := agentReportedDownloadBase(h)
+	if base == "" && !hostSupportsAgentUpdateModule(h) {
+		base = s.agentPublicBaseURL()
+		if base == "" {
+			return false, "no_download_base", "老版 agent 需要公网下载基址：请配置 public_url 或确认 agent 上报的 server_url 可达"
+		}
+	}
+	// Freeze-only for auto path: highRisk=false so default remote gate does not
+	// require an approved change outside freeze windows (manual push stays high-risk).
+	if ok, why := s.remoteGateCheck(h.ID, "auto-update", false, false); !ok {
+		return false, "remote_gate", fmt.Sprintf("变更管控拦截：%s", why)
+	}
+	// Soft-retry: if still behind after softRetrySec, re-queue (Windows helper
+	// historically died with the service Job before swap completed).
+	if !s.agentUpdates.tryMarkInFlightOrSoftRetry(h.ID, true) {
+		return false, "cooldown", fmt.Sprintf("升级冷却期内（入队后 %ds 内不重复触发）", agentUpdateInFlightSec)
+	}
+	return true, "", base
+}
+
+// startAgentAutoUpdateScanner periodically sweeps online, version-behind hosts
+// and feeds them through the same auto-update gate as report-time triggers.
+// This covers hosts whose reports arrived while the maintenance window was
+// closed, and retries hosts whose earlier enqueue silently failed.
+func (s *Server) startAgentAutoUpdateScanner(interval time.Duration) {
+	if interval <= 0 {
+		interval = 5 * time.Minute
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for range t.C {
+		s.runAgentAutoUpdateScan()
+	}
+}
+
+func (s *Server) runAgentAutoUpdateScan() {
+	if s == nil || s.store == nil || s.agentUpdates == nil || s.cfg == nil {
+		return
+	}
+	s.agentUpdates.mu.Lock()
+	s.agentUpdates.lastScanAt = time.Now().Unix()
+	s.agentUpdates.mu.Unlock()
+	cfg := s.cfg.Get()
+	if !cfg.AgentAutoUpdate {
+		return // 总开关关闭时不扫描（状态接口仍能反映开关情况）
+	}
+	offlineSec := int64(s.cfg.Thresholds().OfflineAfter.Seconds())
+	now := time.Now().Unix()
+	checked := 0
+	for _, h := range s.store.ListHosts() {
+		if h == nil {
+			continue
+		}
+		// 只扫在线主机：离线主机无法执行升级命令，徒增错误日志。
+		if h.LastSeen <= 0 || now-h.LastSeen > offlineSec {
+			continue
+		}
+		checked++
+		// 与上报触发共用同一闸门链；未入队原因由 maybeAutoUpdateHost 记录。
+		s.maybeAutoUpdateHost(h.ID)
+	}
+	if checked > 0 {
+		slog.Debug("Agent 自动升级扫描完成", "online_checked", checked)
+	}
+}
+
+// handleAgentAutoUpdateStatusGet exposes policy + scanner heartbeat + per-host
+// skip reasons so the UI can explain why a host has not been upgraded.
+func (s *Server) handleAgentAutoUpdateStatusGet(w http.ResponseWriter, r *http.Request) {
+	if s.agentUpdates == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "agent update manager unavailable"})
+		return
+	}
+	cfg := s.cfg.Get()
+	s.agentUpdates.mu.Lock()
+	lastScan := s.agentUpdates.lastScanAt
+	s.agentUpdates.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"agent_auto_update":        cfg.AgentAutoUpdate,
+		"agent_auto_update_window": cfg.AgentAutoUpdateWindow,
+		"target_version":           appVersion,
+		"comparable":               isComparableAgentVer(appVersion),
+		"last_scan_at":             lastScan,
+		"skips":                    s.agentUpdates.skipSnapshot(s),
+	})
 }
 
 // agentAutoUpdateWindowOpen parses "HH:MM-HH:MM" local time; empty = always open.

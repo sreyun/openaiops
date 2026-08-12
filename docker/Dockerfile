@@ -77,10 +77,13 @@ RUN set -e; \
       -o /out/aiops-agent-windows-amd64-win2012.exe ./cmd/agent
 
 # ---- Server image ----
-FROM ${BASE_REGISTRY}/alpine:3.20 AS server
+FROM ${BASE_REGISTRY}/alpine:3.23 AS server
 ARG TARGETARCH
 ARG NUCLEI_VERSION=3.3.9
-RUN apk add --no-cache ca-certificates tzdata zip curl unzip \
+# postgresql18-client：备份/还原依赖 pg_dump / pg_restore；客户端版本必须 ≥ 数据库版本
+# （默认 pgvector:pg18），高版本客户端可向下兼容 dump 旧版服务端。
+ARG PG_CLIENT_PKG=postgresql18-client
+RUN apk add --no-cache ca-certificates tzdata zip curl unzip ${PG_CLIENT_PKG} \
  && curl -fsSL "https://github.com/projectdiscovery/nuclei/releases/download/v${NUCLEI_VERSION}/nuclei_${NUCLEI_VERSION}_linux_${TARGETARCH}.zip" -o /tmp/nuclei.zip \
  && unzip -j /tmp/nuclei.zip nuclei -d /usr/local/bin \
  && chmod +x /usr/local/bin/nuclei \
@@ -101,6 +104,8 @@ EXPOSE 8529
 HEALTHCHECK --interval=15s --timeout=5s --retries=3 CMD wget -qO- http://127.0.0.1:8529/healthz || exit 1
 VOLUME ["/app/data"]
 
+# 备份目录落盘到持久化卷，避免容器重建后丢失
+ENV AIOPS_BACKUP_DIR=/app/data/backups
 ENTRYPOINT ["/app/aiops-server"]
 CMD ["-addr", ":8529", "-config", "/app/data/server_config.json", "-dist", "/app/dist"]
 

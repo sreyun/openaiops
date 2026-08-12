@@ -6186,3 +6186,33 @@ html.embed-mode body {
   overflow: auto;
   background: var(--bg);
 }
+
+/* ===== CI/CD 流水线页 ===== */
+.cicd-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin-bottom:12px}
+.cicd-toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+.cicd-toolbar .select-wrap{min-width:170px}
+.cicd-run{display:flex;gap:10px;align-items:center;padding:10px 12px;border:1px solid var(--line);border-radius:var(--r);background:var(--panel);margin-bottom:8px}
+.cicd-run:hover{border-color:var(--hover-border)}
+.cicd-run-main{flex:1;min-width:0}
+.cicd-run-line1{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:13px}
+.cicd-run-line2{display:flex;gap:12px;flex-wrap:wrap;font-size:11px;color:var(--muted);margin-top:4px}
+.cicd-run-proj{word-break:break-all}
+.cicd-run-name{color:var(--muted);font-size:12px}
+.cicd-run-acts{display:flex;gap:6px;flex-wrap:wrap;flex:none}
+.cicd-job{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:7px 10px;border:1px solid var(--line);border-radius:var(--r);background:var(--panel2);margin-bottom:6px;font-size:12.5px}
+.cicd-job-note{color:var(--crit-txt,var(--crit));font-size:11.5px}
+.cicd-conn-panel{margin-top:16px;padding-top:14px;border-top:1px dashed var(--line)}
+.cicd-conn{display:flex;gap:10px;align-items:center;padding:10px 12px;border:1px solid var(--line);border-radius:var(--r);background:var(--panel);margin-bottom:8px}
+.cicd-conn-main{flex:1;min-width:0}
+
+/* ===== Agent 自动升级运行情况面板（安装弹窗内） ===== */
+.agent-auto-status{margin-top:14px;padding-top:12px;border-top:1px dashed var(--line)}
+.agent-auto-status-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+.agent-auto-status-title{font-weight:600;font-size:13px}
+.agent-auto-status-meta{display:flex;gap:20px;flex-wrap:wrap;font-size:12.5px;color:var(--muted);margin:8px 0}
+.agent-auto-status-meta b{color:var(--txt);font-weight:600}
+.agent-auto-status-warn{color:var(--warn-txt,var(--warn))}
+.agent-auto-skips-title{font-size:12.5px;font-weight:600;margin:10px 0 6px}
+.agent-auto-skips-tbl{width:100%;border-collapse:collapse;font-size:12px}
+.agent-auto-skips-tbl th,.agent-auto-skips-tbl td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+.agent-auto-skips-tbl th{color:var(--muted);font-weight:600;white-space:nowrap}

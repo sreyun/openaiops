@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -29,10 +30,10 @@ const (
 
 // Host is the aggregate record the server keeps per agent.
 type Host struct {
-	ID          string             `json:"id"`
-	Hostname    string             `json:"hostname"`
-	OS          string             `json:"os"`
-	Platform    string             `json:"platform"`
+	ID           string              `json:"id"`
+	Hostname     string              `json:"hostname"`
+	OS           string              `json:"os"`
+	Platform     string              `json:"platform"`
 	Arch         string              `json:"arch"`
 	IP           string              `json:"ip"`
 	Kernel       string              `json:"kernel"`
@@ -79,12 +80,12 @@ type LogEntry struct {
 // Created when an alert fires; updated when it resolves. Survives restart via PG.
 type AlertRecord struct {
 	ID         int64   `json:"id"`
-	Key        string  `json:"key"`                   // hostID/type/scope (dedup key)
+	Key        string  `json:"key"` // hostID/type/scope (dedup key)
 	HostID     string  `json:"host_id"`
 	Hostname   string  `json:"hostname"`
 	IP         string  `json:"ip,omitempty"`
-	Level      string  `json:"level"`                 // warning | critical
-	Type       string  `json:"type"`                  // cpu | memory | disk | offline | ...
+	Level      string  `json:"level"` // warning | critical
+	Type       string  `json:"type"`  // cpu | memory | disk | offline | ...
 	Scope      string  `json:"scope,omitempty"`
 	Message    string  `json:"message"`
 	Value      float64 `json:"value"`
@@ -285,11 +286,12 @@ func (s *Store) CanonicalHostID(claimed, fingerprint string) (string, bool) {
 
 // UpsertAuthenticated applies a report after verifying the agent's fingerprint
 // against the one bound at registration. Returns (nil, false) when the host is
-// unregistered, its fingerprint is not yet bound, or the fingerprint does not
-// match — the caller must reject the report with 403. Verification and update
-// happen under a single lock to avoid a TOCTOU window (host deleted between
-// check and upsert) and the double-lock overhead of GetHost + Upsert on the hot
-// report path.
+// unregistered or the fingerprint does not match — the caller must reject the
+// report with 403. Hosts whose fingerprint was never bound (legacy records)
+// are bound on first use (TOFU) instead of being rejected. Verification and
+// update happen under a single lock to avoid a TOCTOU window (host deleted
+// between check and upsert) and the double-lock overhead of GetHost + Upsert
+// on the hot report path.
 func (s *Store) UpsertAuthenticated(r shared.Report, fingerprint string) (*Host, bool) {
 	now := time.Now().Unix()
 	s.mu.Lock()
@@ -307,9 +309,15 @@ func (s *Store) UpsertAuthenticated(r shared.Report, fingerprint string) (*Host,
 		return nil, false // not registered
 	}
 	if h.Fingerprint == "" {
-		return nil, false // fingerprint not bound (agent hasn't registered yet)
-	}
-	if subtle.ConstantTimeCompare([]byte(fingerprint), []byte(h.Fingerprint)) != 1 {
+		// TOFU（trust-on-first-use）：老主机记录存在但指纹未绑定（早期版本注册
+		// 不写指纹 / 历史导入 / 升级迁移），首次带指纹上报即自动绑定，避免
+		// 这类 agent 永远 403 离线。已绑定指纹的主机仍严格比对（见下）。
+		if fingerprint == "" {
+			return nil, false // 上报也不带指纹，无从绑定
+		}
+		h.Fingerprint = fingerprint
+		slog.Info("TOFU：为指纹未绑定的老主机自动绑定机器指纹", "host", shortID(h.ID), "hostname", h.Hostname)
+	} else if subtle.ConstantTimeCompare([]byte(fingerprint), []byte(h.Fingerprint)) != 1 {
 		return nil, false // fingerprint mismatch
 	}
 	h.Hostname = r.Hostname

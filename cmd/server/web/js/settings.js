@@ -640,6 +640,7 @@ async function loadAgentAutoUpdatePolicy() {
     if (caret) caret.textContent = "▸";
     if (head) head.setAttribute("aria-expanded", "false");
     syncAgentAutoUpdateBadge();
+    loadAgentAutoUpdateStatus();
   } catch (e) {
     if ($("agentAutoUpdate")) $("agentAutoUpdate").checked = true;
     syncAgentAutoUpdateBadge();
@@ -669,9 +670,47 @@ async function saveAgentAutoUpdatePolicy() {
     }
     toast(I18N.t("agent_update.policy_saved", "自动更新策略已保存"), "ok");
     syncAgentAutoUpdateBadge();
+    loadAgentAutoUpdateStatus();
   } catch (e) {
     toast(I18N.t("toast.save_failed2", "保存失败:") + e, "err");
   }
+}
+
+// 自动升级运行情况：目标版本 / 周期扫描心跳 / 每主机跳过原因（为什么没升级）。
+// 与 v2 版 SettingsView 的「自动升级运行情况」面板同源接口，保证两版口径一致。
+async function loadAgentAutoUpdateStatus() {
+  const meta = $("agentAutoStatusMeta"), skips = $("agentAutoStatusSkips");
+  if (!meta && !skips) return;
+  let st;
+  try {
+    const r = await fetch(`${API}/agents/auto-update-status`, { credentials: "same-origin" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    st = await r.json();
+  } catch (e) {
+    if (meta) meta.innerHTML = `<span class="muted">运行情况暂不可用（${esc(String(e.message || e))}）</span>`;
+    if (skips) skips.innerHTML = "";
+    return;
+  }
+  const parts = [];
+  parts.push(`<span>目标版本 <b class="mono">${esc(st.target_version || "-")}</b></span>`);
+  if (st.comparable === false) {
+    parts.push(`<span class="agent-auto-status-warn">服务端版本号不可比较（构建时未注入 vX.Y.Z），自动升级不会触发</span>`);
+  }
+  parts.push(`<span>上次周期扫描 <b>${st.last_scan_at ? esc(fmtDateTime(st.last_scan_at)) : "尚未扫描"}</b></span>`);
+  if (meta) meta.innerHTML = parts.join("");
+  if (!skips) return;
+  const list = Array.isArray(st.skips) ? st.skips : [];
+  if (!list.length) {
+    skips.innerHTML = `<div class="hint" style="margin-top:8px">暂无跳过记录（所有在线主机均已满足自动升级条件或已完成升级）</div>`;
+    return;
+  }
+  const rows = list.slice(0, 50).map(s => {
+    const name = s.hostname || (s.host_id ? s.host_id.slice(0, 8) : "-");
+    const detail = s.detail ? ` <span class="muted">${esc(s.detail)}</span>` : "";
+    return `<tr><td class="mono">${esc(name)}</td><td>${esc(s.reason || "-")}${detail}</td><td class="mono">${s.at ? esc(fmtDateTime(s.at)) : "-"}</td></tr>`;
+  }).join("");
+  skips.innerHTML = `<div class="agent-auto-skips-title">最近未升级的主机与原因</div>
+    <div style="overflow:auto;max-height:220px"><table class="agent-auto-skips-tbl"><thead><tr><th>主机</th><th>原因</th><th>时间</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 function normalizeInstallServerURL(u) {
   return String(u || "").trim().replace(/\/+$/, "").toLowerCase();

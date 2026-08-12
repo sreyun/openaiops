@@ -114,6 +114,10 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h10M4 18h14"/><path d="M18 10l2 2-2 2"/></svg>
             <span data-i18n="nav.sql_toolkit">SQL 工具</span>
           </a>
+          <a class="nav-item" data-view="cicd" title="CI/CD 流水线（GitLab / GitHub / Gitee）">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M6 9v3a3 3 0 0 0 3 3h6"/><path d="M18 15v-3a3 3 0 0 0-3-3H9"/></svg>
+            <span>CI/CD</span>
+          </a>
         </div>
       </div>
 
@@ -1485,6 +1489,39 @@
           <div id="sqlChangeList" class="fwd-list"></div>
         </div>
       </section>
+
+      <!-- CI/CD 流水线（GitLab / GitHub Actions / Gitee Go） -->
+      <section class="view" id="view-cicd">
+        <div class="section-title"><span>CI/CD 流水线</span><span class="tag">GitLab / GitHub Actions / Gitee Go：查看 · 触发 · 重跑/取消 · 失败 AI 诊断</span>
+          <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn" id="cicdManageConnsBtn" type="button">连接管理</button>
+            <button class="btn primary admin-only" id="cicdTriggerBtn" type="button">▶ 触发流水线</button>
+            <button class="btn" id="cicdRefreshBtn" type="button">刷新</button>
+          </div>
+        </div>
+        <div class="cicd-kpis" id="cicdKpis"></div>
+        <div class="cicd-toolbar">
+          <div class="select-wrap"><select id="cicdConnFilter"></select></div>
+          <div class="select-wrap"><select id="cicdStatusFilter">
+            <option value="">全部状态</option>
+            <option value="success">成功</option>
+            <option value="failed">失败</option>
+            <option value="running">运行中</option>
+            <option value="pending">等待中</option>
+            <option value="canceled">已取消</option>
+            <option value="skipped">已跳过</option>
+          </select></div>
+          <span class="hint" id="cicdSyncErrors" style="flex:1;min-width:0"></span>
+        </div>
+        <div id="cicdRunsList" class="fwd-list"></div>
+        <div class="ds-empty" id="cicdRunsEmpty" style="display:none"><span class="ds-empty-icon">🔁</span>还没有流水线记录。先在「连接管理」接入 GitLab / GitHub / Gitee 项目（需要可读流水线的访问令牌），即可在这里统一查看、触发与失败诊断。</div>
+        <div class="cicd-conn-panel" id="cicdConnPanel" style="display:none">
+          <div class="section-title" style="margin-top:0"><span>连接管理</span><span class="tag">访问令牌加密存储、读取脱敏；变更仅管理员可操作</span>
+            <div style="margin-left:auto"><button class="btn primary admin-only" id="cicdAddConnBtn" type="button">+ 添加连接</button></div>
+          </div>
+          <div id="cicdConnList" class="fwd-list"></div>
+        </div>
+      </section>
     </div>
   </main>
 </div>
@@ -1624,6 +1661,65 @@
     </div>
   </div>
 </div>
+
+<!-- ===== CI/CD 运行详情（阶段 + 日志） ===== -->
+<div class="mask" id="cicdDetailMask" data-close>
+  <div class="modal" style="max-width:860px">
+    <div class="modal-head"><h3 id="cicdDetailTitle">运行详情</h3><button type="button" class="btn ghost close" data-close-btn aria-label="关闭">✕</button></div>
+    <div class="modal-body">
+      <div id="cicdDetailMeta" class="hint" style="margin-bottom:8px"></div>
+      <div id="cicdDetailJobs" class="fwd-list" style="margin-bottom:10px"></div>
+      <pre id="cicdDetailLog" class="cmd" style="max-height:320px;overflow:auto;white-space:pre-wrap;word-break:break-all;margin:0;display:none"></pre>
+    </div>
+    <div class="modal-foot" style="justify-content:space-between">
+      <label class="switch" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="cicdDetailIncident"> 同时登记 SRE 事件</label>
+      <button class="btn admin-only" id="cicdDetailDiagnoseBtn" type="button">🤖 收集失败证据</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== CI/CD 连接 添加/编辑 ===== -->
+<div class="mask" id="cicdConnMask" data-close>
+  <div class="modal">
+    <div class="modal-head"><h3 id="cicdConnModalTitle">添加 CI/CD 连接</h3><button type="button" class="btn ghost close" data-close-btn aria-label="关闭">✕</button></div>
+    <div class="modal-body">
+      <input type="hidden" id="cicdConnId">
+      <div class="grid2">
+        <div class="field"><label>名称</label><input type="text" id="cicdConnName" placeholder="如 生产 GitLab"></div>
+        <div class="field"><label>提供方</label><div class="select-wrap"><select id="cicdConnProvider"><option value="gitlab">GitLab</option><option value="github">GitHub</option><option value="gitee">Gitee</option></select></div></div>
+      </div>
+      <div class="grid2">
+        <div class="field"><label>项目路径</label><input type="text" id="cicdConnProject" class="mono" placeholder="GitLab: group/repo；GitHub/Gitee: owner/repo"></div>
+        <div class="field"><label>实例地址（空 = 官方云）</label><input type="text" id="cicdConnBaseURL" class="mono" placeholder="https://gitlab.corp.example"></div>
+      </div>
+      <div class="field"><label>访问令牌（Token）</label><input type="password" id="cicdConnToken" autocomplete="new-password" placeholder="编辑时留空 = 保持原值"></div>
+      <div class="grid2">
+        <div class="field"><label>默认分支</label><input type="text" id="cicdConnRef" class="mono" placeholder="main"></div>
+        <div class="field"><label>流水线路径覆盖（可选）</label><input type="text" id="cicdConnPipelinePath" class="mono" placeholder="Gitee Go 自定义；支持 {owner}/{repo}"></div>
+      </div>
+      <div class="field"><label>CA 证书 PEM（可选，内网 CA 签发的自托管实例）</label><textarea id="cicdConnCACert" rows="2" class="mono" style="width:100%" placeholder="-----BEGIN CERTIFICATE-----"></textarea></div>
+      <label class="switch" style="display:flex;margin:4px 0"><input type="checkbox" id="cicdConnInsecure"> 跳过 TLS 证书校验（自签名证书）</label>
+      <label class="switch" style="display:flex;margin:4px 0"><input type="checkbox" id="cicdConnWatch" checked> 监听失败并产生平台告警</label>
+      <label class="switch" style="display:flex;margin:4px 0"><input type="checkbox" id="cicdConnAutoIncident"> 失败自动登记 SRE 事件（接入 AI 诊断闭环）</label>
+      <label class="switch" style="display:flex;margin:4px 0"><input type="checkbox" id="cicdConnEnabled" checked> 启用</label>
+      <div class="ai-card-test" style="margin-top:8px"><span id="cicdConnTestResult" class="ai-test-result"></span><button class="btn sm" id="cicdConnTestBtn" type="button">测试连接</button></div>
+    </div>
+    <div class="modal-foot"><button class="btn primary" id="cicdConnSaveBtn" type="button">保存</button></div>
+  </div>
+</div>
+
+<!-- ===== CI/CD 触发流水线 ===== -->
+<div class="mask" id="cicdTriggerMask" data-close>
+  <div class="modal" style="max-width:520px">
+    <div class="modal-head"><h3>触发流水线</h3><button type="button" class="btn ghost close" data-close-btn aria-label="关闭">✕</button></div>
+    <div class="modal-body">
+      <div class="field"><label>连接</label><div class="select-wrap"><select id="cicdTriggerConn"></select></div></div>
+      <div class="field"><label>分支 / Ref（空 = 连接默认分支）</label><input type="text" id="cicdTriggerRef" class="mono" placeholder="main"></div>
+      <div class="field"><label>Workflow（仅 GitHub Actions，可选）</label><input type="text" id="cicdTriggerWorkflow" class="mono" placeholder="deploy.yml"></div>
+    </div>
+    <div class="modal-foot"><button class="btn primary" id="cicdTriggerGoBtn" type="button">触发</button></div>
+  </div>
+</div>
 <div class="mask" id="installMask" data-close>
   <div class="modal">
     <div class="modal-head">
@@ -1688,6 +1784,16 @@
           <div class="field"><label data-i18n="agent_update.exempt_hosts">豁免主机 ID（逗号分隔）</label><input type="text" id="agentAutoUpdateExemptHosts" class="mono" placeholder="host-id-1,host-id-2"></div>
           <button class="btn sm" type="button" id="agentAutoUpdateSaveBtn" data-i18n="agent_update.save_policy">保存自动更新策略</button>
           <div class="hint" data-i18n="agent_update.policy_hint">默认开启：在线且版本落后的主机在上报周期内会被服务端入队更新；Agent 经中继上报时从中继下载；仍受远程门禁与维护窗口约束。</div>
+          <!-- 自动升级运行情况：目标版本 / 周期扫描心跳 / 每主机跳过原因（为什么没升级） -->
+          <div class="agent-auto-status" id="agentAutoStatusPanel">
+            <div class="agent-auto-status-head">
+              <span class="agent-auto-status-title">自动升级运行情况</span>
+              <button class="btn sm" type="button" id="agentAutoStatusRefreshBtn">刷新</button>
+            </div>
+            <div class="hint">服务端每 5 分钟扫描在线且版本落后的主机并自动入队；维护窗口外到达的上报会在下一轮扫描补上。指纹未绑定的老主机首次带指纹上报时自动绑定（TOFU）。</div>
+            <div class="agent-auto-status-meta" id="agentAutoStatusMeta"></div>
+            <div id="agentAutoStatusSkips"></div>
+          </div>
         </div>
       </div>
       <div class="field">

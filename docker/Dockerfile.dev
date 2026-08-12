@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
 # 本地开发构建：server 仅编目标平台；agent 仍交叉编译全平台到 /dist，
 # 保证 macOS / Windows / Linux 一键安装（/dl/）在开发镜像里也能用。
-# 默认走国内华为云 SWR 同步仓；海外可传 BASE_REGISTRY=docker.io。
-ARG BASE_REGISTRY=swr.cn-east-3.myhuaweicloud.com/sreyun/docker.io
+# 开发默认走 Docker Hub；生产 Dockerfile 仍可用 SWR 镜像仓。
+ARG BASE_REGISTRY=docker.io
 ARG GO_VERSION=1.26
 
 FROM --platform=$BUILDPLATFORM ${BASE_REGISTRY}/golang:${GO_VERSION}-alpine AS builder
@@ -32,16 +32,32 @@ RUN set -e; LD="-s -w -X main.appVersion=${VERSION}"; \
     GOOS=windows GOARCH=amd64 GOFLAGS=-mod=vendor go build -ldflags="$LD" -o /out/dist/aiops-agent.exe                   ./cmd/agent; \
     GOOS=windows GOARCH=arm64 GOFLAGS=-mod=vendor go build -ldflags="$LD" -o /out/dist/aiops-agent-windows-arm64.exe     ./cmd/agent
 
+# Windows Server 2012 / 2012 R2 requires a Go 1.20 build. Modern Go binaries
+# refuse to start on those kernels, so the development image must carry the
+# same pinned compatibility artifact as the production image.
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.20-bullseye AS win2012-builder
+WORKDIR /src
+ARG VERSION=dev
+ENV GOPROXY=https://proxy.golang.org,https://goproxy.cn,direct
+COPY shared/ shared/
+COPY cmd/agent/ cmd/agent/
+COPY config.example.yaml cmd/agent/config_example.yaml
+COPY scripts/win2012/go.mod scripts/win2012/go.sum scripts/win2012/rewrite_slog.sh ./
+RUN bash -c 'set -e; \
+    bash ./rewrite_slog.sh ./cmd/agent; \
+    go mod download; \
+    CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
+      go build -trimpath -ldflags="-s -w -X main.appVersion=${VERSION}" \
+      -o /out/aiops-agent-windows-amd64-win2012.exe ./cmd/agent'
+
 # ---- Server image ----
-FROM ${BASE_REGISTRY}/alpine:3.20 AS server
+FROM ${BASE_REGISTRY}/alpine:3.23 AS server
 ARG TARGETARCH
 ARG NUCLEI_VERSION=3.3.9
-RUN set -eux; \
-    sed -i \
-      -e 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' \
-      -e 's|nl.alpinelinux.org|mirrors.aliyun.com|g' \
-      /etc/apk/repositories; \
-    apk add --no-cache ca-certificates tzdata zip curl unzip \
+# postgresql18-client：备份/还原依赖 pg_dump / pg_restore；客户端版本必须 ≥ 数据库版本
+# （默认 pgvector:pg18），高版本客户端可向下兼容 dump 旧版服务端。
+ARG PG_CLIENT_PKG=postgresql18-client
+RUN apk add --no-cache ca-certificates tzdata zip curl unzip ${PG_CLIENT_PKG} \
  && curl -fsSL "https://github.com/projectdiscovery/nuclei/releases/download/v${NUCLEI_VERSION}/nuclei_${NUCLEI_VERSION}_linux_${TARGETARCH}.zip" -o /tmp/nuclei.zip \
  && unzip -j /tmp/nuclei.zip nuclei -d /usr/local/bin \
  && chmod +x /usr/local/bin/nuclei \
@@ -50,25 +66,25 @@ RUN set -eux; \
 WORKDIR /app
 COPY --from=builder /out/aiops-server /app/aiops-server
 COPY --from=builder /out/dist/ /app/dist/
+COPY --from=win2012-builder /out/aiops-agent-windows-amd64-win2012.exe /app/dist/aiops-agent-windows-amd64-win2012.exe
 COPY config.example.yaml /app/dist/config.example.yaml
 COPY plugins/ /tmp/plugins/
-RUN mkdir -p /app/dist && cd /tmp && zip -r /app/dist/plugins.zip plugins/ && rm -rf /tmp/plugins
+RUN mkdir -p /app/dist && cd /tmp && zip -r /app/dist/plugins.zip plugins/ && rm -rf /tmp/plugins \
+ && sha256sum /app/dist/aiops-agent-windows-amd64-win2012.exe | awk '{print $1"  aiops-agent-windows-amd64-win2012.exe"}' \
+      > /app/dist/aiops-agent-windows-amd64-win2012.exe.sha256
 
 EXPOSE 8529
 HEALTHCHECK --interval=15s --timeout=5s --retries=3 CMD wget -qO- http://127.0.0.1:8529/healthz || exit 1
 VOLUME ["/app/data"]
+# 备份目录落盘到持久化卷，避免容器重建后丢失
+ENV AIOPS_BACKUP_DIR=/app/data/backups
 ENTRYPOINT ["/app/aiops-server"]
 CMD ["-addr", ":8529", "-config", "/app/data/server_config.json", "-dist", "/app/dist"]
 
 # ---- Agent image ----
 # Demo-safe default: long-running process is unprivileged uid 10001 (aiops).
 FROM ${BASE_REGISTRY}/alpine:3.20 AS agent
-RUN set -eux; \
-    sed -i \
-      -e 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' \
-      -e 's|nl.alpinelinux.org|mirrors.aliyun.com|g' \
-      /etc/apk/repositories; \
-    apk add --no-cache ca-certificates tzdata python3 py3-pip su-exec \
+RUN apk add --no-cache ca-certificates tzdata python3 py3-pip su-exec \
  && addgroup -S -g 10001 aiops \
  && adduser -S -u 10001 -G aiops -h /home/aiops -s /bin/sh aiops \
  && mkdir -p /home/aiops \
@@ -77,10 +93,7 @@ WORKDIR /app
 COPY --from=builder /out/aiops-agent /app/aiops-agent
 COPY plugins/ /app/plugins/
 COPY docker/agent-entrypoint.sh /entrypoint.sh
-RUN pip3 install --no-cache-dir --break-system-packages \
-      -i https://mirrors.aliyun.com/pypi/simple/ \
-      --trusted-host mirrors.aliyun.com \
-      psutil 2>/dev/null || true \
+RUN pip3 install --no-cache-dir --break-system-packages psutil 2>/dev/null || true \
  && mkdir -p /app/data \
  && chown -R aiops:aiops /app \
  && chmod 0755 /entrypoint.sh /app/aiops-agent

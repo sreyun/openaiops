@@ -56,7 +56,7 @@ func resolveDist(flagVal string) string {
 }
 
 var expectedAgentDistNames = []string{
-	"aiops-agent.exe", // windows/amd64 (legacy name kept for install.ps1 back-compat)
+	"aiops-agent.exe",                       // windows/amd64 (legacy name kept for install.ps1 back-compat)
 	"aiops-agent-windows-amd64-win2012.exe", // Server 2012/R2 + Win8 (Go 1.20)
 	"aiops-agent-windows-arm64.exe",
 	"aiops-agent-linux-amd64", "aiops-agent-linux-arm64",
@@ -405,20 +405,21 @@ func main() {
 
 	server.term.loadRecordings(recordingsDirFor(*cfgPath)) // terminal replays survive restart (file-backed)
 	server.desk.setRecDir(filepath.Join(filepath.Dir(recordingsDirFor(*cfgPath)), "desktop-recordings"))
-	server.term.pg = pg                                    // 终端会话录制永久留存到 PG（入库审计，不受内存 100 条上限影响）
-	server.bindPG(pg)                                      // load + periodically persist incidents / work orders / sessions
+	server.term.pg = pg // 终端会话录制永久留存到 PG（入库审计，不受内存 100 条上限影响）
+	server.bindPG(pg)   // load + periodically persist incidents / work orders / sessions
 
-	go notifier.Run(10 * time.Second)           // periodic alert evaluation + dedup push
-	go server.checks.Run(5 * time.Second)       // custom HTTP/TCP synthetic checks
-	go server.apimon.Run(5 * time.Second)       // API 性能监控：按业务系统批量探测接口
-	go server.scrapes.Run(15 * time.Second)     // 指标抓取：agentless 抓 exporter 摄入 VM
-	go server.promrules.Run(30 * time.Second)   // 指标告警规则：PromQL 评估 → 告警 → incident/AI
-	go server.runScheduler(30 * time.Second)    // timed playbook triggers (interval/daily/weekly)
-	go server.runSLOEvaluator(60 * time.Second) // SLO error-budget evaluation → burn incidents
-	go server.ai.runInspectionLoop()            // scheduled AI/heuristic health inspection
-	go server.runDutyReportLoop()               // daily AI duty morning report → message center
-	go server.vm.run()                          // optional VictoriaMetrics remote-write pump
-	server.initForecastLearn()                  // 预测台账对比实测 → 校准因子 + AI 自学习记忆
+	go notifier.Run(10 * time.Second)                      // periodic alert evaluation + dedup push
+	go server.checks.Run(5 * time.Second)                  // custom HTTP/TCP synthetic checks
+	go server.apimon.Run(5 * time.Second)                  // API 性能监控：按业务系统批量探测接口
+	go server.scrapes.Run(15 * time.Second)                // 指标抓取：agentless 抓 exporter 摄入 VM
+	go server.promrules.Run(30 * time.Second)              // 指标告警规则：PromQL 评估 → 告警 → incident/AI
+	go server.runScheduler(30 * time.Second)               // timed playbook triggers (interval/daily/weekly)
+	go server.runSLOEvaluator(60 * time.Second)            // SLO error-budget evaluation → burn incidents
+	go server.ai.runInspectionLoop()                       // scheduled AI/heuristic health inspection
+	go server.runDutyReportLoop()                          // daily AI duty morning report → message center
+	go server.vm.run()                                     // optional VictoriaMetrics remote-write pump
+	go server.startAgentAutoUpdateScanner(5 * time.Minute) // 周期性扫描在线且版本落后的 agent 主动入队升级
+	server.initForecastLearn()                             // 预测台账对比实测 → 校准因子 + AI 自学习记忆
 
 	logProductionSecurityBaseline(cfg)
 	store.onAudit = server.exportAuditEntry
