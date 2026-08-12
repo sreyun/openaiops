@@ -236,6 +236,29 @@ func (s *Server) listBackupsFS() ([]BackupMeta, error) {
 }
 
 func (s *Server) createPGBackup(operator, note string) (BackupMeta, error) {
+	meta, err := s.createPGBackupNoPrune(operator, note)
+	if err != nil {
+		return meta, err
+	}
+	s.pruneBackups(s.cfg.BackupCfg().RetainCount)
+	return meta, nil
+}
+
+// createPGBackupProtecting is createPGBackup but retention must not delete the
+// listed dump IDs. Used by restore: the pre-restore safety dump can push the
+// restore target past retain_count, and pruning it before pg_restore would leave
+// an empty freshly-recreated database.
+func (s *Server) createPGBackupProtecting(operator, note string, protectIDs ...string) (BackupMeta, error) {
+	meta, err := s.createPGBackupNoPrune(operator, note)
+	if err != nil {
+		return meta, err
+	}
+	s.pruneBackups(s.cfg.BackupCfg().RetainCount, protectIDs...)
+	return meta, nil
+}
+
+// createPGBackupNoPrune performs pg_dump + catalog insert without retention.
+func (s *Server) createPGBackupNoPrune(operator, note string) (BackupMeta, error) {
 	dsn := strings.TrimSpace(os.Getenv("AIOPS_POSTGRES_DSN"))
 	if dsn == "" {
 		s.cfg.mu.RLock()
@@ -283,24 +306,53 @@ func (s *Server) createPGBackup(operator, note string) (BackupMeta, error) {
 			meta.Note += ";remote_ok"
 		}
 	}
-	s.pruneBackups(cfg.RetainCount)
 	return meta, nil
 }
 
-func (s *Server) pruneBackups(retain int) {
+// pruneBackups deletes oldest dumps beyond retain. protectIDs are never removed
+// (even when they fall outside the newest-retain window).
+func (s *Server) pruneBackups(retain int, protectIDs ...string) {
 	if retain <= 0 {
 		return
 	}
 	list, err := s.listBackups()
-	if err != nil || len(list) <= retain {
+	if err != nil {
 		return
 	}
-	for _, m := range list[retain:] {
+	for _, m := range backupsToPrune(list, retain, protectIDs...) {
 		_ = os.Remove(m.Path)
 		if s.pg != nil {
 			_, _ = s.pg.db.Exec(`DELETE FROM backup_meta WHERE id=$1`, m.ID)
 		}
 	}
+}
+
+// backupsToPrune returns the oldest entries that exceed retain, excluding protectIDs.
+// list must be newest-first (as returned by listBackups).
+func backupsToPrune(list []BackupMeta, retain int, protectIDs ...string) []BackupMeta {
+	if retain <= 0 || len(list) == 0 {
+		return nil
+	}
+	protect := make(map[string]struct{}, len(protectIDs))
+	for _, id := range protectIDs {
+		id = strings.TrimSpace(id)
+		if id != "" {
+			protect[id] = struct{}{}
+		}
+	}
+	kept := 0
+	var out []BackupMeta
+	for _, m := range list {
+		if _, ok := protect[m.ID]; ok {
+			continue
+		}
+		if kept < retain {
+			kept++
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 // restorePGBackup restores a custom-format dump using the drop-and-recreate
@@ -341,9 +393,15 @@ func (s *Server) restorePGBackup(id, operator string) error {
 		return fmt.Errorf("未配置 PostgreSQL DSN")
 	}
 	// 1) 破坏性操作前先打一份保护性备份，还原失败也能找回当前状态。
-	safety, err := s.createPGBackup(operator, "pre-restore safety backup")
+	// Protect the dump being restored: createPGBackup's retention prune runs
+	// after inserting the safety dump and would otherwise delete an older
+	// restore target that has fallen past retain_count.
+	safety, err := s.createPGBackupProtecting(operator, "pre-restore safety backup", meta.ID)
 	if err != nil {
 		return fmt.Errorf("还原前保护性备份失败（已中止还原）: %w", err)
+	}
+	if _, err := os.Stat(meta.Path); err != nil {
+		return fmt.Errorf("还原目标备份在保护性备份后不可用（已中止还原，数据库未改动）: %w", err)
 	}
 	// 2) 连接维护库 postgres，删除并重建目标库（FORCE 断开存量连接，含服务端自身连接池）。
 	if err := pgRecreateDatabase(dsn); err != nil {
