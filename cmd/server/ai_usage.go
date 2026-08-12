@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -16,38 +17,43 @@ import (
 // partial failure never leaves the two copies divergent (this is a billing-
 // adjacent write path).
 func (p *pgStore) insertAICallEvent(st aiCallStat) {
-	if p == nil || p.db == nil {
-		return
+	if err := p.appendAICallEventDual(context.Background(), st); err != nil {
+		slog.Warn("PG AI call append failed", "operation", "append", "error_class", auditAppendErrorClass(err))
 	}
-	_ = p.withPgTx(context.Background(), func(tx *sql.Tx) error {
-		_, err := tx.Exec(`
+}
+
+func (p *pgStore) appendAICallEventDual(ctx context.Context, st aiCallStat) error {
+	if st.Ts <= 0 {
+		st.Ts = time.Now().Unix()
+	}
+	return p.withPgTx(ctx, func(tx *sql.Tx) error {
+		var id int64
+		err := tx.QueryRowContext(ctx, `
 INSERT INTO ai_call_events(
   ts, task, model, actor, latency_ms, ok, error,
   memory_hits, skill_hits, reply_chars, approx_tokens,
   prompt_tokens, completion_tokens, cost_estimate, usage_source, prompt_version, route_reason
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+RETURNING id`,
 			st.Ts, nullStr(st.Task), nullStr(st.Model), nullStr(st.Actor),
 			st.LatencyMs, st.OK, nullStr(st.Error),
 			st.MemHits, st.SkillHits, st.ReplyChars, st.ApproxTokens,
-			st.PromptTokens, st.CompletionTokens, st.CostEstimate, nullStr(st.UsageSource), nullStr(st.PromptVersion), nullStr(st.RouteReason))
+			st.PromptTokens, st.CompletionTokens, st.CostEstimate, nullStr(st.UsageSource), nullStr(st.PromptVersion), nullStr(st.RouteReason)).Scan(&id)
 		if err != nil {
-			slog.Warn("PG ? AI ??????", "err", err)
-			return nil // non-fatal: keep observability best-effort
+			return fmt.Errorf("insert legacy AI call mirror: %w", err)
 		}
-		// Dual-track partitioned table (best-effort, same txn).
-		_, err = tx.Exec(`
+		_, err = tx.ExecContext(ctx, `
 INSERT INTO ai_call_events_p(
-  ts, task, model, actor, latency_ms, ok, error,
+  id, ts, task, model, actor, latency_ms, ok, error,
   memory_hits, skill_hits, reply_chars, approx_tokens,
   prompt_tokens, completion_tokens, cost_estimate, usage_source, prompt_version, route_reason
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
-			st.Ts, nullStr(st.Task), nullStr(st.Model), nullStr(st.Actor),
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+			id, st.Ts, nullStr(st.Task), nullStr(st.Model), nullStr(st.Actor),
 			st.LatencyMs, st.OK, nullStr(st.Error),
 			st.MemHits, st.SkillHits, st.ReplyChars, st.ApproxTokens,
 			st.PromptTokens, st.CompletionTokens, st.CostEstimate, nullStr(st.UsageSource), nullStr(st.PromptVersion), nullStr(st.RouteReason))
 		if err != nil {
-			slog.Warn("PG ? AI ????p", "err", err)
-			return nil
+			return fmt.Errorf("insert partition AI call mirror: %w", err)
 		}
 		return nil
 	})

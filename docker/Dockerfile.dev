@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
 # 本地开发构建：server 仅编目标平台；agent 仍交叉编译全平台到 /dist，
 # 保证 macOS / Windows / Linux 一键安装（/dl/）在开发镜像里也能用。
-# 开发默认走 Docker Hub；生产 Dockerfile 仍可用 SWR 镜像仓。
-ARG BASE_REGISTRY=docker.io
+# 默认走国内华为云 SWR 同步仓；海外可传 BASE_REGISTRY=docker.io。
+ARG BASE_REGISTRY=swr.cn-east-3.myhuaweicloud.com/sreyun/docker.io
 ARG GO_VERSION=1.26
 
 FROM --platform=$BUILDPLATFORM ${BASE_REGISTRY}/golang:${GO_VERSION}-alpine AS builder
@@ -36,7 +36,12 @@ RUN set -e; LD="-s -w -X main.appVersion=${VERSION}"; \
 FROM ${BASE_REGISTRY}/alpine:3.20 AS server
 ARG TARGETARCH
 ARG NUCLEI_VERSION=3.3.9
-RUN apk add --no-cache ca-certificates tzdata zip curl unzip \
+RUN set -eux; \
+    sed -i \
+      -e 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' \
+      -e 's|nl.alpinelinux.org|mirrors.aliyun.com|g' \
+      /etc/apk/repositories; \
+    apk add --no-cache ca-certificates tzdata zip curl unzip \
  && curl -fsSL "https://github.com/projectdiscovery/nuclei/releases/download/v${NUCLEI_VERSION}/nuclei_${NUCLEI_VERSION}_linux_${TARGETARCH}.zip" -o /tmp/nuclei.zip \
  && unzip -j /tmp/nuclei.zip nuclei -d /usr/local/bin \
  && chmod +x /usr/local/bin/nuclei \
@@ -58,7 +63,12 @@ CMD ["-addr", ":8529", "-config", "/app/data/server_config.json", "-dist", "/app
 # ---- Agent image ----
 # Demo-safe default: long-running process is unprivileged uid 10001 (aiops).
 FROM ${BASE_REGISTRY}/alpine:3.20 AS agent
-RUN apk add --no-cache ca-certificates tzdata python3 py3-pip su-exec \
+RUN set -eux; \
+    sed -i \
+      -e 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' \
+      -e 's|nl.alpinelinux.org|mirrors.aliyun.com|g' \
+      /etc/apk/repositories; \
+    apk add --no-cache ca-certificates tzdata python3 py3-pip su-exec \
  && addgroup -S -g 10001 aiops \
  && adduser -S -u 10001 -G aiops -h /home/aiops -s /bin/sh aiops \
  && mkdir -p /home/aiops \
@@ -67,7 +77,10 @@ WORKDIR /app
 COPY --from=builder /out/aiops-agent /app/aiops-agent
 COPY plugins/ /app/plugins/
 COPY docker/agent-entrypoint.sh /entrypoint.sh
-RUN pip3 install --no-cache-dir --break-system-packages psutil 2>/dev/null || true \
+RUN pip3 install --no-cache-dir --break-system-packages \
+      -i https://mirrors.aliyun.com/pypi/simple/ \
+      --trusted-host mirrors.aliyun.com \
+      psutil 2>/dev/null || true \
  && mkdir -p /app/data \
  && chown -R aiops:aiops /app \
  && chmod 0755 /entrypoint.sh /app/aiops-agent

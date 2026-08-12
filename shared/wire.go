@@ -129,7 +129,10 @@ type Report struct {
 	Arch        string             `json:"arch"`
 	IP          string             `json:"ip,omitempty"`
 	Kernel      string             `json:"kernel,omitempty"`
-	Category    string             `json:"category,omitempty"`
+	Category string `json:"category,omitempty"`
+	// FolderID is the asset-tree node id from install (any depth). Prefer this over
+	// Category for placement; Category remains the leaf label / legacy L1 hint.
+	FolderID string `json:"folder_id,omitempty"`
 	// AgentVersion is the running agent binary version (ldflags -X main.appVersion).
 	AgentVersion string `json:"agent_version,omitempty"`
 	// ServerURL is the agent's configured primary report base (relay or cloud).
@@ -449,6 +452,9 @@ type ContainerInfo struct {
 	Ports   string `json:"ports,omitempty"`
 	Created string `json:"created,omitempty"`
 	Runtime string `json:"runtime,omitempty"` // docker | podman
+	// ComposeProject / ComposeService come from standard Compose labels when present.
+	ComposeProject string `json:"compose_project,omitempty"`
+	ComposeService string `json:"compose_service,omitempty"`
 }
 
 // ContainerReport is the payload agents POST for host container inventory.

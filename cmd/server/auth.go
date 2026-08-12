@@ -43,8 +43,12 @@ func isPublicPath(r *http.Request) bool {
 		"/api/v1/prom/write",                 // Prometheus remote_write 接收：外部 exporter/telegraf/OTel 推送，在 handler 内做 Bearer 令牌鉴权
 		"/api/v1/integrations/content-audit", // LLM Gateway/SDK structured audit ingest; dedicated Bearer token in handler
 		"/api/v1/agent/logs",                 // fingerprint-gated log ingest (checked in the handler)
+		"/api/v1/brand",                      // public console branding metadata
 		"/status",                            // public Status Page (HTML)
-		"/api/v1/public/status":               // public Status Page (JSON; optional token in handler)
+		"/api/v1/public/status":              // public Status Page (JSON; optional token in handler)
+		return true
+	}
+	if strings.HasPrefix(p, "/api/v1/brand/logo/") {
 		return true
 	}
 	// Agent-facing hardware/netflow/hyperv/snmp ingest are fingerprint-gated, not
@@ -192,6 +196,17 @@ func (s *Server) routeAllowed(r *http.Request, role string) bool {
 			return rank >= roleRank(RoleOperator)
 		}
 		return rank >= roleRank(RoleAdmin)
+	}
+	// CI/CD: reads → viewer+; pipeline control (trigger/retry/cancel/diagnose) →
+	// operator+; connection CRUD holds access tokens for the SCM, so → admin.
+	if strings.HasPrefix(p, "/api/v1/cicd/") {
+		if r.Method == http.MethodGet {
+			return rank >= roleRank(RoleViewer)
+		}
+		if strings.HasPrefix(p, "/api/v1/cicd/connections") {
+			return rank >= roleRank(RoleAdmin)
+		}
+		return rank >= roleRank(RoleOperator)
 	}
 	// K8s: cluster config writes + connectivity test → admin; scale/restart → operator+; GET → viewer+.
 	if strings.HasPrefix(p, "/api/v1/k8s/") {

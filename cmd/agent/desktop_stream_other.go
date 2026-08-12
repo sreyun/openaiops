@@ -18,8 +18,11 @@ func openDeskInput() (deskInput, error) {
 
 func deskGOOS() string { return runtime.GOOS }
 
+func linuxIsKylinFamily() bool { return false }
+
 func deskH264Usable() bool       { return false }
 func deskPreferredCodec() string { return "" }
+func deskNeedsRawH264() bool     { return false }
 
 func deskLegacyCaptureHost() bool { return false }
 func deskAVFScreenIndex() int    { return -1 }

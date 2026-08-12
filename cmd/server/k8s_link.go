@@ -4,30 +4,41 @@ import (
 	"strings"
 )
 
+type k8sHostIndex struct {
+	byName map[string]*Host
+	byIP   map[string]*Host
+}
+
 // matchHostForK8sNode finds a managed host by node name or addresses (InternalIP/Hostname).
-func (s *Server) matchHostForK8sNode(nodeName string, addrs []string) *Host {
-	byName := map[string]*Host{}
-	byIP := map[string]*Host{}
+func (s *Server) buildK8sHostIndex() k8sHostIndex {
+	idx := k8sHostIndex{
+		byName: map[string]*Host{},
+		byIP:   map[string]*Host{},
+	}
 	for _, h := range s.store.ListHosts() {
 		if h.Hostname != "" {
-			byName[strings.ToLower(h.Hostname)] = h
+			idx.byName[strings.ToLower(h.Hostname)] = h
 		}
 		if h.IP != "" {
-			byIP[h.IP] = h
+			idx.byIP[h.IP] = h
 		}
 	}
+	return idx
+}
+
+func (s *Server) matchHostForK8sNodeWithIndex(nodeName string, addrs []string, idx k8sHostIndex) *Host {
 	if nodeName != "" {
 		ln := strings.ToLower(nodeName)
-		if h := byName[ln]; h != nil {
+		if h := idx.byName[ln]; h != nil {
 			return h
 		}
 		// short hostname vs FQDN (either side)
 		if i := strings.IndexByte(ln, '.'); i > 0 {
-			if h := byName[ln[:i]]; h != nil {
+			if h := idx.byName[ln[:i]]; h != nil {
 				return h
 			}
 		}
-		for name, h := range byName {
+		for name, h := range idx.byName {
 			if i := strings.IndexByte(name, '.'); i > 0 && name[:i] == ln {
 				return h
 			}
@@ -41,14 +52,18 @@ func (s *Server) matchHostForK8sNode(nodeName string, addrs []string) *Host {
 		if a == "" {
 			continue
 		}
-		if h := byIP[a]; h != nil {
+		if h := idx.byIP[a]; h != nil {
 			return h
 		}
-		if h := byName[strings.ToLower(a)]; h != nil {
+		if h := idx.byName[strings.ToLower(a)]; h != nil {
 			return h
 		}
 	}
 	return nil
+}
+
+func (s *Server) matchHostForK8sNode(nodeName string, addrs []string) *Host {
+	return s.matchHostForK8sNodeWithIndex(nodeName, addrs, s.buildK8sHostIndex())
 }
 
 func k8sNodeAddresses(obj map[string]any) (ips []string, hostnames []string) {
@@ -93,6 +108,13 @@ func (s *Server) enrichK8sNodeRow(it map[string]any, row map[string]any) {
 
 func (s *Server) hostIDForK8sNodeName(nodeName string) (string, string) {
 	if h := s.matchHostForK8sNode(nodeName, nil); h != nil {
+		return h.ID, h.Hostname
+	}
+	return "", ""
+}
+
+func (s *Server) hostIDForK8sNodeNameWithIndex(nodeName string, idx k8sHostIndex) (string, string) {
+	if h := s.matchHostForK8sNodeWithIndex(nodeName, nil, idx); h != nil {
 		return h.ID, h.Hostname
 	}
 	return "", ""

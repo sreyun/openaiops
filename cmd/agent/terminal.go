@@ -1084,12 +1084,13 @@ func windowsSystemRoot() string {
 // cmd.exe (ipconfig, chcp, ping, …). LocalSystem services often inherit an
 // empty or truncated PATH.
 func windowsEssentialPathDirs(root string) []string {
-	sys32 := filepath.Join(root, "System32")
+	root = strings.TrimRight(strings.ReplaceAll(root, "/", `\`), `\`)
+	sys32 := root + `\System32`
 	return []string{
 		sys32,
 		root,
-		filepath.Join(sys32, "Wbem"),
-		filepath.Join(sys32, "WindowsPowerShell", "v1.0"),
+		sys32 + `\Wbem`,
+		sys32 + `\WindowsPowerShell\v1.0`,
 	}
 }
 

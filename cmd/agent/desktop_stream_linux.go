@@ -15,8 +15,10 @@ import (
 	"strings"
 )
 
-// Linux desktop: prefer ffmpeg x11grab; fallbacks: import / scrot / gnome-screenshot / grim (Wayland).
-// Input via xdotool (X11), ydotool (Wayland), or wtype (keyboard-only).
+// Linux / 麒麟 / UOS desktop capture:
+//   - X11: prefer continuous ffmpeg x11grab H.264; JPEG fallbacks via x11grab/import/scrot
+//   - Wayland (含麒麟 Wayland 会话): prefer grim → raw H.264 pipe（避免每帧 spawn 解码 PNG）
+// Input via xdotool (X11/XWayland), ydotool / wtype (Wayland).
 
 type linuxCapture struct {
 	display      string
@@ -29,7 +31,7 @@ type linuxCapture struct {
 
 func openDeskCapture() (deskCapture, error) {
 	display := os.Getenv("DISPLAY")
-	wayland := os.Getenv("WAYLAND_DISPLAY") != "" || os.Getenv("XDG_SESSION_TYPE") == "wayland"
+	wayland := linuxWaylandSession()
 	if display == "" && !wayland {
 		display = ":0"
 	}
@@ -57,11 +59,67 @@ func openDeskCapture() (deskCapture, error) {
 	}
 	c := &linuxCapture{display: display, w: w, h: h, wayland: wayland}
 	if _, err := c.Capture(); err != nil {
-		hint := fmt.Sprintf("抓屏失败（DISPLAY=%q WAYLAND=%v）: %v", display, wayland, err)
-		hint += "；请安装 ffmpeg（X11）或 grim（Wayland），并确保 Agent 运行在图形会话中"
-		return nil, fmt.Errorf("%s", hint)
+		return nil, fmt.Errorf("%s", linuxCaptureFailHint(display, wayland, err))
+	}
+	if wayland {
+		slog.Info("Linux 远程桌面：Wayland 会话", "distro", linuxDistroID(), "grim", lookPathOK("grim"), "ffmpeg", ffmpegAvailable())
+	} else {
+		slog.Info("Linux 远程桌面：X11 会话", "display", display, "distro", linuxDistroID(), "ffmpeg", ffmpegAvailable())
 	}
 	return c, nil
+}
+
+func lookPathOK(bin string) bool {
+	_, err := exec.LookPath(bin)
+	return err == nil
+}
+
+// linuxDistroID reads ID= from /etc/os-release (kylin / uos / ubuntu / …).
+func linuxDistroID() string {
+	raw, err := os.ReadFile("/etc/os-release")
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "ID=") {
+			v := strings.TrimPrefix(line, "ID=")
+			return strings.Trim(v, `"'`)
+		}
+	}
+	return ""
+}
+
+func linuxIsKylinFamily() bool {
+	id := strings.ToLower(linuxDistroID())
+	switch id {
+	case "kylin", "uos", "deepin", "openkylin":
+		return true
+	}
+	// Some builds use ID_LIKE
+	raw, err := os.ReadFile("/etc/os-release")
+	if err != nil {
+		return false
+	}
+	low := strings.ToLower(string(raw))
+	return strings.Contains(low, "kylin") || strings.Contains(low, "uniontech")
+}
+
+func linuxCaptureFailHint(display string, wayland bool, err error) string {
+	hint := fmt.Sprintf("抓屏失败（DISPLAY=%q WAYLAND=%v distro=%s）: %v", display, wayland, linuxDistroID(), err)
+	if wayland {
+		hint += "；Wayland 请安装 grim（及可选 slurp），并确保 Agent 在图形用户会话中运行"
+		if linuxIsKylinFamily() {
+			hint += "；麒麟/UOS 可用：sudo apt install grim wl-clipboard ydotool 或从软件商店安装对应包"
+		}
+	} else {
+		hint += "；X11 请安装 ffmpeg（推荐）或 scrot/imagemagick，并确保 DISPLAY/XAUTHORITY 有效"
+		if linuxIsKylinFamily() {
+			hint += "；麒麟/UOS 可用：sudo apt install ffmpeg xdotool xclip"
+		}
+	}
+	hint += "；勿在纯 SSH/无头环境启动远程桌面"
+	return hint
 }
 
 func (c *linuxCapture) Size() (int, int) { return c.w, c.h }
@@ -153,14 +211,22 @@ func (c *linuxCapture) captureFFmpeg() (image.Image, error) {
 	if c.cropX != 0 || c.cropY != 0 {
 		grab = fmt.Sprintf("%s+%d,%d", c.display, c.cropX, c.cropY)
 	}
-	cmd := exec.Command("ffmpeg", "-loglevel", "error",
-		"-f", "x11grab", "-video_size", fmt.Sprintf("%dx%d", c.w, c.h),
-		"-i", grab, "-vframes", "1", "-f", "image2pipe", "-vcodec", "mjpeg", "-")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("ffmpeg x11grab: %v (%s)", err, strings.TrimSpace(string(out)))
+	// Single-frame MJPEG to stdout — keep draw_mouse and avoid CombinedOutput
+	// mixing stderr diagnostics into the image bytes.
+	cmd := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error",
+		"-f", "x11grab", "-draw_mouse", "1",
+		"-framerate", "30",
+		"-video_size", fmt.Sprintf("%dx%d", c.w, c.h),
+		"-i", grab,
+		"-frames:v", "1",
+		"-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "3", "-")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("ffmpeg x11grab: %v (%s)", err, strings.TrimSpace(stderr.String()))
 	}
-	return jpeg.Decode(bytes.NewReader(out))
+	return jpeg.Decode(bytes.NewReader(stdout.Bytes()))
 }
 
 func (c *linuxCapture) captureImport() (image.Image, error) {
@@ -173,14 +239,19 @@ func (c *linuxCapture) captureImport() (image.Image, error) {
 }
 
 func (c *linuxCapture) captureScrot() (image.Image, error) {
-	tmp := "/tmp/aiops-desk-scrot.png"
-	cmd := exec.Command("scrot", "-o", tmp)
+	tmp, err := os.CreateTemp("", "aiops-desk-scrot-*.png")
+	if err != nil {
+		return nil, err
+	}
+	path := tmp.Name()
+	_ = tmp.Close()
+	defer os.Remove(path)
+	cmd := exec.Command("scrot", "-o", path)
 	cmd.Env = append(os.Environ(), "DISPLAY="+c.display)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("scrot: %v (%s)", err, strings.TrimSpace(string(out)))
 	}
-	raw, err := os.ReadFile(tmp)
-	_ = os.Remove(tmp)
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -188,14 +259,19 @@ func (c *linuxCapture) captureScrot() (image.Image, error) {
 }
 
 func (c *linuxCapture) captureGnome() (image.Image, error) {
-	tmp := "/tmp/aiops-desk-gnome.png"
-	cmd := exec.Command("gnome-screenshot", "-f", tmp)
+	tmp, err := os.CreateTemp("", "aiops-desk-gnome-*.png")
+	if err != nil {
+		return nil, err
+	}
+	path := tmp.Name()
+	_ = tmp.Close()
+	defer os.Remove(path)
+	cmd := exec.Command("gnome-screenshot", "-f", path)
 	cmd.Env = append(os.Environ(), "DISPLAY="+c.display)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("gnome-screenshot: %v (%s)", err, strings.TrimSpace(string(out)))
 	}
-	raw, err := os.ReadFile(tmp)
-	_ = os.Remove(tmp)
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -203,19 +279,42 @@ func (c *linuxCapture) captureGnome() (image.Image, error) {
 }
 
 func (c *linuxCapture) captureGrim() (image.Image, error) {
+	// JPEG is much cheaper to decode than PNG under high FPS / unlock typing.
+	args := []string{"-t", "jpeg"}
+	if c.outputName != "" {
+		args = append(args, "-o", c.outputName)
+	}
+	args = append(args, "-")
+	cmd := exec.Command("grim", args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		// Older grim without -t jpeg — fall back to PNG stdout.
+		return c.captureGrimPNG()
+	}
+	if img, err := jpeg.Decode(bytes.NewReader(stdout.Bytes())); err == nil {
+		return img, nil
+	}
+	return c.captureGrimPNG()
+}
+
+func (c *linuxCapture) captureGrimPNG() (image.Image, error) {
 	args := []string{"-"}
 	if c.outputName != "" {
 		args = []string{"-o", c.outputName, "-"}
 	}
 	cmd := exec.Command("grim", args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("grim: %v (%s)", err, strings.TrimSpace(string(out)))
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("grim: %v (%s)", err, strings.TrimSpace(stderr.String()))
 	}
-	if img, err := png.Decode(bytes.NewReader(out)); err == nil {
+	if img, err := png.Decode(bytes.NewReader(stdout.Bytes())); err == nil {
 		return img, nil
 	}
-	return jpeg.Decode(bytes.NewReader(out))
+	return jpeg.Decode(bytes.NewReader(stdout.Bytes()))
 }
 
 type linuxInput struct {
@@ -231,10 +330,10 @@ func openDeskInput() (deskInput, error) {
 	if display == "" {
 		display = ":0"
 	}
-	wayland := os.Getenv("WAYLAND_DISPLAY") != "" || os.Getenv("XDG_SESSION_TYPE") == "wayland"
-	hasXdo := exec.Command("sh", "-c", "command -v xdotool").Run() == nil
-	hasYdo := exec.Command("sh", "-c", "command -v ydotool").Run() == nil
-	hasWtype := exec.Command("sh", "-c", "command -v wtype").Run() == nil
+	wayland := linuxWaylandSession()
+	hasXdo := lookPathOK("xdotool")
+	hasYdo := lookPathOK("ydotool")
+	hasWtype := lookPathOK("wtype")
 
 	in := &linuxInput{display: display}
 	switch {
@@ -253,7 +352,11 @@ func openDeskInput() (deskInput, error) {
 	case hasXdo:
 		in.mouseTool, in.keyTool = "xdotool", "xdotool"
 	default:
-		return nil, fmt.Errorf("no input tool found (install xdotool for X11, or ydotool/wtype for Wayland)")
+		hint := "no input tool found (install xdotool for X11, or ydotool/wtype for Wayland)"
+		if linuxIsKylinFamily() {
+			hint = "未找到键鼠注入工具；麒麟/UOS 请安装 xdotool（X11）或 ydotool/wtype（Wayland）：sudo apt install xdotool ydotool"
+		}
+		return nil, fmt.Errorf("%s", hint)
 	}
 	if in.mouseTool == "ydotool" || in.keyTool == "ydotool" {
 		// ydotoold must be running; surface a clear hint once instead of silent failures.
@@ -477,16 +580,38 @@ func linuxEVKey(vk int) int {
 func deskGOOS() string { return "linux" }
 
 func deskH264Usable() bool {
-	// Encoder uses ffmpeg x11grab — require a real X display (X11 or XWayland).
 	if !ffmpegAvailable() {
 		return false
 	}
-	if os.Getenv("DISPLAY") == "" {
+	// Continuous x11grab (X11 / XWayland).
+	if os.Getenv("DISPLAY") != "" {
+		return true
+	}
+	// Pure Wayland: grim frames → ffmpeg rawvideo H.264.
+	if linuxWaylandSession() && lookPathOK("grim") {
+		return true
+	}
+	return false
+}
+
+func deskPreferredCodec() string {
+	if deskH264Usable() {
+		return "h264"
+	}
+	return ""
+}
+
+// deskNeedsRawH264: Wayland (含麒麟) 用 grim 喂帧；纯无 DISPLAY 同理。
+// X11 直连 x11grab，无需 raw。
+func deskNeedsRawH264() bool {
+	if !ffmpegAvailable() {
 		return false
 	}
-	return true
+	if linuxWaylandSession() && lookPathOK("grim") {
+		return true
+	}
+	return os.Getenv("DISPLAY") == "" && lookPathOK("grim")
 }
-func deskPreferredCodec() string { return "" } // x11grab JPEG is acceptable
 
 func deskLegacyCaptureHost() bool { return false }
 func deskAVFScreenIndex() int    { return -1 }

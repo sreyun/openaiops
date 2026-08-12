@@ -7,19 +7,19 @@ import (
 
 // LocateResult is a cross-layer resource localization summary for AI / topology.
 type LocateResult struct {
-	Ref           string         `json:"ref"`
-	Kind          string         `json:"kind"`
-	HostID        string         `json:"host_id,omitempty"`
-	Hostname      string         `json:"hostname,omitempty"`
-	HyperVHostID  string         `json:"hyperv_host_id,omitempty"`
-	VMName        string         `json:"vm_name,omitempty"`
-	Containers    []string       `json:"containers,omitempty"`
-	PodsHint      []string       `json:"pods_hint,omitempty"`
-	HardwareHint  string         `json:"hardware_hint,omitempty"`
-	OpenAlerts    int            `json:"open_alerts"`
-	TopologySummary string       `json:"topology_summary,omitempty"`
-	Summary       string         `json:"summary"`
-	Chain         []string       `json:"chain,omitempty"`
+	Ref             string   `json:"ref"`
+	Kind            string   `json:"kind"`
+	HostID          string   `json:"host_id,omitempty"`
+	Hostname        string   `json:"hostname,omitempty"`
+	HyperVHostID    string   `json:"hyperv_host_id,omitempty"`
+	VMName          string   `json:"vm_name,omitempty"`
+	Containers      []string `json:"containers,omitempty"`
+	PodsHint        []string `json:"pods_hint,omitempty"`
+	HardwareHint    string   `json:"hardware_hint,omitempty"`
+	OpenAlerts      int      `json:"open_alerts"`
+	TopologySummary string   `json:"topology_summary,omitempty"`
+	Summary         string   `json:"summary"`
+	Chain           []string `json:"chain,omitempty"`
 }
 
 // locateResource resolves host / vm / container / pod / svc refs into a layered chain.
@@ -119,8 +119,8 @@ func (s *Server) locateResource(ref string) LocateResult {
 		if len(parts) == 3 && s.cfg != nil {
 			if c, ok := s.cfg.GetK8sCluster(parts[0]); ok && c.Enabled {
 				if cli, err := newK8sRESTClient(c); err == nil {
-					items, _ := cli.ListPods(parts[1], 200)
-					for _, it := range items {
+					res, _ := cli.ListPods(parts[1], 200, "")
+					for _, it := range res.Items {
 						_, name := k8sMetaName(it)
 						if name != parts[2] {
 							continue

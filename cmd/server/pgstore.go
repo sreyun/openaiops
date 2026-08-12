@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -124,13 +126,14 @@ func openPGStore(dsn string) (*pgStore, error) {
 		return nil, sql.ErrConnDone
 	}
 	ps := &pgStore{db: db, flowJobs: make(chan flowJob, 512), flowSpill: make(chan flowJob, 256)}
-	// 先创建分区表（ai_call_events_p 等），再运行版本迁移（v9+ 依赖这些表）
-	ps.migrateDualTrackPartitions()
-	if err := ps.migrate(); err != nil {
+	if err := runMigrationPhases(ps.migrateBootstrap, ps.migrateDualTrackPartitions, ps.runVersionedMigrations); err != nil {
 		db.Close()
 		return nil, err
 	}
-	ps.hydrateAuditChainTip()
+	if err := ps.backfillPartitionTwins(context.Background()); err != nil {
+		db.Close()
+		return nil, err
+	}
 	ps.ensureAIExperimentsTable()
 	// 2 个后台工作协程串行化 Flow 明细写入：HTTP 摄入只入队即返回，写库不再占住请求连接。
 	for i := 0; i < 2; i++ {
@@ -138,6 +141,15 @@ func openPGStore(dsn string) (*pgStore, error) {
 	}
 	go ps.flowSpillWorker()
 	return ps, nil
+}
+
+func runMigrationPhases(bootstrap, dualTrack, versioned func() error) error {
+	for _, phase := range []func() error{bootstrap, dualTrack, versioned} {
+		if err := phase(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // flowIngestWorker 从队列取批次并批量写库（见 insertFlowRecords）。
@@ -214,7 +226,7 @@ func (p *pgStore) netflowQueueStats() map[string]any {
 	}
 }
 
-func (p *pgStore) migrate() error {
+func (p *pgStore) migrateBootstrap() error {
 	// 必须先于建表：老库里 flow_records 已存在时，下面的
 	// CREATE TABLE IF NOT EXISTS 会直接跳过，分区永远不会生效。
 	if err := p.migrateFlowRecordsToPartitioned(); err != nil {
@@ -687,7 +699,7 @@ func (p *pgStore) migrate() error {
 	if err != nil {
 		return err
 	}
-	return p.runVersionedMigrations()
+	return nil
 }
 
 // migrateFlowRecordsToPartitioned converts a pre-existing non-partitioned
@@ -905,13 +917,27 @@ func (p *pgStore) saveConfigBlob(raw []byte) error {
 // --- audit log (append-only, unbounded in PG; the store keeps a recent cache) ---
 
 func (p *pgStore) appendAudit(e LogEntry) {
-	p.appendAuditChained(e)
+	seq, err := p.appendAuditChained(context.Background(), e)
+	if err != nil {
+		slog.Warn("PG audit append failed",
+			"seq", seq,
+			"operation", "append",
+			"secret_degraded", auditChainSecretDegraded(),
+			"error_class", auditAppendErrorClass(err))
+	}
+}
+
+func auditAppendErrorClass(err error) string {
+	if errors.Is(err, sql.ErrConnDone) {
+		return "storage_unavailable"
+	}
+	return "database_error"
 }
 
 func (p *pgStore) loadRecentAudit(limit int) ([]LogEntry, error) {
-	rows, err := p.db.Query(`SELECT data FROM (SELECT id,data FROM audit_log_p ORDER BY id DESC LIMIT $1) t ORDER BY id ASC`, limit)
+	rows, err := p.db.Query(`SELECT data FROM (SELECT id,ts,data FROM audit_log_p ORDER BY ts DESC, id DESC LIMIT $1) t ORDER BY ts ASC, id ASC`, limit)
 	if err != nil {
-		rows, err = p.db.Query(`SELECT data FROM (SELECT id,data FROM audit_log ORDER BY id DESC LIMIT $1) t ORDER BY id ASC`, limit)
+		rows, err = p.db.Query(`SELECT data FROM (SELECT id,ts,data FROM audit_log ORDER BY ts DESC, id DESC LIMIT $1) t ORDER BY ts ASC, id ASC`, limit)
 	}
 	if err != nil {
 		return nil, err
@@ -979,28 +1005,39 @@ func (p *pgStore) listTermRecordings(limit int) []termSessionInfo {
 // --- plugin events ---
 
 func (p *pgStore) appendEvent(e storedEvent) {
-	raw, err := json.Marshal(e)
-	if err != nil {
-		return
-	}
-	ts := e.Timestamp
-	if ts <= 0 {
-		ts = time.Now().Unix()
-	}
 	start := time.Now()
-	if _, err := p.db.Exec(`INSERT INTO events(ts,data) VALUES($1,$2)`, ts, raw); err != nil {
-		slog.Warn("PG 写事件失败", "err", err)
+	if err := p.appendEventDual(context.Background(), e); err != nil {
+		slog.Warn("PG event append failed", "operation", "append", "error_class", auditAppendErrorClass(err))
 	}
 	observePGSlow("INSERT events", start)
-	if _, err := p.db.Exec(`INSERT INTO events_p(ts,data) VALUES($1,$2)`, ts, raw); err != nil {
-		slog.Debug("PG 写事件分区表失败", "err", err)
+}
+
+func (p *pgStore) appendEventDual(ctx context.Context, e storedEvent) error {
+	if e.Timestamp <= 0 {
+		e.Timestamp = time.Now().Unix()
 	}
+	raw, err := json.Marshal(e)
+	if err != nil {
+		return fmt.Errorf("encode event mirror: %w", err)
+	}
+	return p.withPgTx(ctx, func(tx *sql.Tx) error {
+		var id int64
+		if err := tx.QueryRowContext(ctx,
+			`INSERT INTO events(ts,data) VALUES($1,$2) RETURNING id`, e.Timestamp, raw).Scan(&id); err != nil {
+			return fmt.Errorf("insert legacy event mirror: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO events_p(id,ts,data) VALUES($1,$2,$3)`, id, e.Timestamp, raw); err != nil {
+			return fmt.Errorf("insert partition event mirror: %w", err)
+		}
+		return nil
+	})
 }
 
 func (p *pgStore) loadRecentEvents(limit int) ([]storedEvent, error) {
-	rows, err := p.db.Query(`SELECT data FROM (SELECT id,data FROM events_p ORDER BY id DESC LIMIT $1) t ORDER BY id ASC`, limit)
+	rows, err := p.db.Query(`SELECT data FROM (SELECT id,ts,data FROM events_p ORDER BY ts DESC, id DESC LIMIT $1) t ORDER BY ts ASC, id ASC`, limit)
 	if err != nil {
-		rows, err = p.db.Query(`SELECT data FROM (SELECT id,data FROM events ORDER BY id DESC LIMIT $1) t ORDER BY id ASC`, limit)
+		rows, err = p.db.Query(`SELECT data FROM (SELECT id,ts,data FROM events ORDER BY ts DESC, id DESC LIMIT $1) t ORDER BY ts ASC, id ASC`, limit)
 	}
 	if err != nil {
 		return nil, err
@@ -3797,11 +3834,16 @@ func (p *pgStore) cleanupAuditAndEvents(retainDays int) {
 	if months < 2 {
 		months = 2
 	}
-	p.cleanupOldTSPartitions("audit_log_p", months)
-	p.cleanupOldTSPartitions("events_p", months)
+	for _, parent := range retainedPartitionParents() {
+		p.cleanupOldTSPartitions(parent, months)
+	}
 	// Legacy events table only (audit legacy never deleted).
 	cut := time.Now().AddDate(0, 0, -retainDays).Unix()
 	_, _ = p.db.Exec(`DELETE FROM events WHERE ts > 0 AND ts < $1`, cut)
+}
+
+func retainedPartitionParents() []string {
+	return []string{"events_p"}
 }
 
 // cleanupAlertHistory removes old alert_history rows when the table uses ts column.

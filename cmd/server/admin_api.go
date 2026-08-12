@@ -185,6 +185,16 @@ func (s *Server) handleInstallScript(w http.ResponseWriter, r *http.Request) {
 	// double quotes; sanitize so a crafted ?category= (or a forged X-Forwarded-Host
 	// feeding serverURL) can't inject commands into the script a victim pipes to sh.
 	category := sanitizeCategory(r.URL.Query().Get("category"))
+	folderID := sanitizeFolderID(r.URL.Query().Get("folder_id"))
+	if folderID != "" && folderID != HostFolderUngroupedID {
+		folders, _ := s.cfg.hostFoldersSnapshot()
+		n := findFolderNode(folders, folderID)
+		if n == nil {
+			folderID = "" // deleted / unknown — keep category-only legacy path
+		} else if category == "" {
+			category = sanitizeCategory(n.Name)
+		}
+	}
 	server := sanitizeServerURL(s.serverURL(r))
 	// Multi-server: the dashboard may pass a JSON array of {server,token} objects
 	// so one agent pushes to multiple backends. Sanitized+re-serialized here so
@@ -211,9 +221,9 @@ func (s *Server) handleInstallScript(w http.ResponseWriter, r *http.Request) {
 		if audit.CaptureBackend == "native" {
 			audit.CaptureBackend = "auto"
 		}
-		body = renderScriptWithAudit(installPs1Template, server, token, category, serversJSON, logPaths, audit)
+		body = renderScriptWithAudit(installPs1Template, server, token, category, folderID, serversJSON, logPaths, audit)
 	} else {
-		body = renderScriptWithAudit(installShTemplate, server, token, category, serversJSON, logPaths, audit)
+		body = renderScriptWithAudit(installShTemplate, server, token, category, folderID, serversJSON, logPaths, audit)
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	_, _ = io.WriteString(w, body)
@@ -226,12 +236,13 @@ func (s *Server) handleInstallScript(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRelayInstallScript(w http.ResponseWriter, r *http.Request) {
 	token := sanitizeToken(r.URL.Query().Get("token"))
 	category := sanitizeCategory(r.URL.Query().Get("category"))
+	folderID := sanitizeFolderID(r.URL.Query().Get("folder_id"))
 	server := sanitizeServerURL(s.serverURL(r))
 	var body string
 	if strings.HasSuffix(r.URL.Path, ".ps1") {
-		body = renderScript(relayInstallPs1Template, server, token, category, "", "")
+		body = renderScript(relayInstallPs1Template, server, token, category, folderID, "", "")
 	} else {
-		body = renderScript(relayInstallShTemplate, server, token, category, "", "")
+		body = renderScript(relayInstallShTemplate, server, token, category, folderID, "", "")
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	_, _ = io.WriteString(w, body)

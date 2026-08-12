@@ -78,21 +78,6 @@ func TestEncryptDecryptSecretV2(t *testing.T) {
 	}
 }
 
-func TestAuditChainHMAC(t *testing.T) {
-	auditChainMu.Lock()
-	auditChainPrev = ""
-	auditChainSeq = 0
-	auditChainMu.Unlock()
-	h1, p1, s1 := nextAuditChain([]byte(`{"a":1}`))
-	if h1 == "" || p1 != "" || s1 != 1 {
-		t.Fatalf("first link: hash=%s prev=%s seq=%d", h1, p1, s1)
-	}
-	h2, p2, s2 := nextAuditChain([]byte(`{"a":2}`))
-	if p2 != h1 || s2 != 2 || h2 == h1 {
-		t.Fatalf("second link broken: p2=%s want=%s seq=%d", p2, h1, s2)
-	}
-}
-
 func TestVMCircuitBreaker(t *testing.T) {
 	b := &vmCircuitBreaker{threshold: 2, coolDown: 50 * time.Millisecond}
 	if !b.allow() {

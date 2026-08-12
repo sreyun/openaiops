@@ -25,7 +25,8 @@ func collectContainers() ([]shared.ContainerInfo, string, string) {
 	if cli == "" {
 		return nil, "", "docker/podman not found"
 	}
-	format := "{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.State}}|{{.Ports}}|{{.CreatedAt}}"
+	// Label placeholders: Docker Compose + common Podman compose project label.
+	format := "{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.State}}|{{.Ports}}|{{.CreatedAt}}|{{.Label \"com.docker.compose.project\"}}|{{.Label \"com.docker.compose.service\"}}|{{.Label \"io.podman.compose.project\"}}"
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, cli, "ps", "-a", "--format", format)
@@ -39,7 +40,7 @@ func collectContainers() ([]shared.ContainerInfo, string, string) {
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "|", 7)
+		parts := strings.SplitN(line, "|", 10)
 		if len(parts) < 5 {
 			continue
 		}
@@ -57,6 +58,19 @@ func collectContainers() ([]shared.ContainerInfo, string, string) {
 		if len(parts) > 6 {
 			c.Created = strings.TrimSpace(parts[6])
 		}
+		project := ""
+		service := ""
+		if len(parts) > 7 {
+			project = strings.TrimSpace(parts[7])
+		}
+		if len(parts) > 8 {
+			service = strings.TrimSpace(parts[8])
+		}
+		if project == "" && len(parts) > 9 {
+			project = strings.TrimSpace(parts[9])
+		}
+		c.ComposeProject = project
+		c.ComposeService = service
 		if len(c.ID) > 12 {
 			c.ID = c.ID[:12]
 		}

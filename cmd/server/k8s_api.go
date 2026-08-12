@@ -8,6 +8,22 @@ import (
 	"strings"
 )
 
+const (
+	k8sListDefaultLimit = 50
+	k8sListMaxLimit     = 200
+)
+
+func k8sListLimit(r *http.Request) int {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 {
+		return k8sListDefaultLimit
+	}
+	if limit > k8sListMaxLimit {
+		return k8sListMaxLimit
+	}
+	return limit
+}
+
 func (s *Server) k8sClusterOrErr(w http.ResponseWriter, r *http.Request) (K8sClusterConfig, bool) {
 	id := strings.TrimSpace(r.PathValue("id"))
 	c, ok := s.cfg.GetK8sCluster(id)
@@ -174,15 +190,15 @@ func (s *Server) handleK8sPods(w http.ResponseWriter, r *http.Request) {
 	if ns == "" {
 		ns = cfg.DefaultNS
 	}
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	if limit <= 0 {
-		limit = 500
-	}
-	items, err := cli.ListPods(ns, limit)
+	limit := k8sListLimit(r)
+	cont := r.URL.Query().Get("continue")
+	res, err := cli.ListPods(ns, limit, cont)
 	if err != nil {
 		writeK8sGatewayErr(w, err)
 		return
 	}
+	idx := s.buildK8sHostIndex()
+	items := res.Items
 	rows := make([]map[string]any, 0, len(items))
 	for _, it := range items {
 		pns, name := k8sMetaName(it)
@@ -199,14 +215,20 @@ func (s *Server) handleK8sPods(w http.ResponseWriter, r *http.Request) {
 			"node": node, "ip": ip,
 		}
 		if node != "" {
-			if hid, hname := s.hostIDForK8sNodeName(node); hid != "" {
+			if hid, hname := s.hostIDForK8sNodeNameWithIndex(node, idx); hid != "" {
 				row["linked_host_id"] = hid
 				row["linked_host_name"] = hname
 			}
 		}
 		rows = append(rows, row)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": rows})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":     rows,
+		"limit":     limit,
+		"continue":  res.Continue,
+		"truncated": res.Continue != "",
+		"remaining": res.RemainingApprox,
+	})
 }
 
 func (s *Server) handleK8sDeployments(w http.ResponseWriter, r *http.Request) {
@@ -222,15 +244,14 @@ func (s *Server) handleK8sDeployments(w http.ResponseWriter, r *http.Request) {
 	if ns == "" {
 		ns = cfg.DefaultNS
 	}
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	if limit <= 0 {
-		limit = 500
-	}
-	items, err := cli.ListDeployments(ns, limit)
+	limit := k8sListLimit(r)
+	cont := r.URL.Query().Get("continue")
+	res, err := cli.ListDeployments(ns, limit, cont)
 	if err != nil {
 		writeK8sGatewayErr(w, err)
 		return
 	}
+	items := res.Items
 	rows := make([]map[string]any, 0, len(items))
 	for _, it := range items {
 		dns, name := k8sMetaName(it)
@@ -240,7 +261,13 @@ func (s *Server) handleK8sDeployments(w http.ResponseWriter, r *http.Request) {
 			"replicas": d, "ready": ready, "available": avail,
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": rows})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":     rows,
+		"limit":     limit,
+		"continue":  res.Continue,
+		"truncated": res.Continue != "",
+		"remaining": res.RemainingApprox,
+	})
 }
 
 func (s *Server) handleK8sEvents(w http.ResponseWriter, r *http.Request) {
@@ -503,8 +530,8 @@ func (s *Server) handleK8sOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	nodes, _ := cli.ListNodes()
-	pods, _ := cli.ListPods(cfg.DefaultNS, 500)
-	deploys, _ := cli.ListDeployments(cfg.DefaultNS, 500)
+	pods, _ := cli.ListPods(cfg.DefaultNS, 200, "")
+	deploys, _ := cli.ListDeployments(cfg.DefaultNS, 200, "")
 	readyNodes := 0
 	for _, n := range nodes {
 		if k8sNodeReady(n) == "Ready" {
@@ -512,7 +539,7 @@ func (s *Server) handleK8sOverview(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	runningPods := 0
-	for _, p := range pods {
+	for _, p := range pods.Items {
 		if k8sPodPhase(p) == "Running" {
 			runningPods++
 		}
@@ -521,7 +548,7 @@ func (s *Server) handleK8sOverview(w http.ResponseWriter, r *http.Request) {
 		"reachable":   true,
 		"version":     ver,
 		"nodes":       map[string]any{"total": len(nodes), "ready": readyNodes},
-		"pods":        map[string]any{"total": len(pods), "running": runningPods},
-		"deployments": map[string]any{"total": len(deploys)},
+		"pods":        map[string]any{"total": len(pods.Items), "running": runningPods},
+		"deployments": map[string]any{"total": len(deploys.Items)},
 	})
 }

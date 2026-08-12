@@ -30,10 +30,10 @@ const (
 )
 
 type k8sEndpoint struct {
-	Server   string
-	Token    string
-	CACert   string // PEM
-	Insecure bool
+	Server        string
+	Token         string
+	CACert        string // PEM
+	Insecure      bool
 	ClientCertPEM string
 	ClientKeyPEM  string
 }
@@ -42,6 +42,12 @@ type k8sRESTClient struct {
 	base   string
 	token  string
 	client *http.Client
+}
+
+type k8sListResult struct {
+	Items           []map[string]any
+	Continue        string
+	RemainingApprox int
 }
 
 func resolveK8sEndpoint(cfg K8sClusterConfig) (k8sEndpoint, error) {
@@ -247,7 +253,7 @@ func (c *k8sRESTClient) ListNodes() ([]map[string]any, error) {
 	return doc.Items, nil
 }
 
-func (c *k8sRESTClient) ListPods(namespace string, limit int) ([]map[string]any, error) {
+func (c *k8sRESTClient) ListPods(namespace string, limit int, cont string) (k8sListResult, error) {
 	path := "/api/v1/pods"
 	if ns := strings.TrimSpace(namespace); ns != "" && ns != "*" && !strings.EqualFold(ns, "all") {
 		path = "/api/v1/namespaces/" + url.PathEscape(ns) + "/pods"
@@ -256,16 +262,27 @@ func (c *k8sRESTClient) ListPods(namespace string, limit int) ([]map[string]any,
 	if limit > 0 {
 		q.Set("limit", fmt.Sprintf("%d", limit))
 	}
+	if cont = strings.TrimSpace(cont); cont != "" {
+		q.Set("continue", cont)
+	}
 	var doc struct {
+		Metadata struct {
+			Continue           string `json:"continue"`
+			RemainingItemCount any    `json:"remainingItemCount"`
+		} `json:"metadata"`
 		Items []map[string]any `json:"items"`
 	}
 	if err := c.getJSON(path, q, &doc); err != nil {
-		return nil, err
+		return k8sListResult{}, err
 	}
-	return doc.Items, nil
+	return k8sListResult{
+		Items:           doc.Items,
+		Continue:        doc.Metadata.Continue,
+		RemainingApprox: k8sInt(doc.Metadata.RemainingItemCount),
+	}, nil
 }
 
-func (c *k8sRESTClient) ListDeployments(namespace string, limit int) ([]map[string]any, error) {
+func (c *k8sRESTClient) ListDeployments(namespace string, limit int, cont string) (k8sListResult, error) {
 	path := "/apis/apps/v1/deployments"
 	if ns := strings.TrimSpace(namespace); ns != "" && ns != "*" && !strings.EqualFold(ns, "all") {
 		path = "/apis/apps/v1/namespaces/" + url.PathEscape(ns) + "/deployments"
@@ -274,13 +291,38 @@ func (c *k8sRESTClient) ListDeployments(namespace string, limit int) ([]map[stri
 	if limit > 0 {
 		q.Set("limit", fmt.Sprintf("%d", limit))
 	}
+	if cont = strings.TrimSpace(cont); cont != "" {
+		q.Set("continue", cont)
+	}
 	var doc struct {
+		Metadata struct {
+			Continue           string `json:"continue"`
+			RemainingItemCount any    `json:"remainingItemCount"`
+		} `json:"metadata"`
 		Items []map[string]any `json:"items"`
 	}
 	if err := c.getJSON(path, q, &doc); err != nil {
-		return nil, err
+		return k8sListResult{}, err
 	}
-	return doc.Items, nil
+	return k8sListResult{
+		Items:           doc.Items,
+		Continue:        doc.Metadata.Continue,
+		RemainingApprox: k8sInt(doc.Metadata.RemainingItemCount),
+	}, nil
+}
+
+func k8sInt(v any) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case json.Number:
+		i, _ := n.Int64()
+		return int(i)
+	default:
+		return 0
+	}
 }
 
 func (c *k8sRESTClient) ListEvents(namespace string, limit int) ([]map[string]any, error) {
@@ -694,7 +736,7 @@ func CreateNamespace(cfg K8sClusterConfig, name string) (string, error) {
 type kubeconfigFile struct {
 	APIVersion     string `yaml:"apiVersion"`
 	CurrentContext string `yaml:"current-context"`
-	Clusters []struct {
+	Clusters       []struct {
 		Name    string `yaml:"name"`
 		Cluster struct {
 			Server                   string `yaml:"server"`

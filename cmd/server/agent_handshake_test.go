@@ -169,10 +169,10 @@ func TestAgentHandshakeEndToEnd(t *testing.T) {
 // there for external shell/PowerShell syntax checking.
 func TestInstallScriptsRobustness(t *testing.T) {
 	server, token := "https://mon.example.com", "tok-123"
-	shIn := renderScript(installShTemplate, server, token, "prod", "", "")
-	ps1In := renderScript(installPs1Template, server, token, "prod", "", "")
-	shUn := renderScript(uninstallShTemplate, server, token, "prod", "", "")
-	ps1Un := renderScript(uninstallPs1Template, server, token, "prod", "", "")
+	shIn := renderScript(installShTemplate, server, token, "prod", "", "", "")
+	ps1In := renderScript(installPs1Template, server, token, "prod", "", "", "")
+	shUn := renderScript(uninstallShTemplate, server, token, "prod", "", "", "")
+	ps1Un := renderScript(uninstallPs1Template, server, token, "prod", "", "", "")
 
 	must := func(name, hay string, needles ...string) {
 		for _, n := range needles {

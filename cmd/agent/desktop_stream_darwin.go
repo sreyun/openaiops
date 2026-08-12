@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"image"
 	"image/jpeg"
@@ -10,7 +11,6 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -246,21 +246,27 @@ func (c *darwinCapture) Capture() (image.Image, error) {
 	c.mu.Lock()
 	mon := c.monitor
 	c.mu.Unlock()
-	tmp := filepath.Join(os.TempDir(), fmt.Sprintf("aiops-desk-%d-%d.jpg", os.Getpid(), mon))
+	tmp, err := os.CreateTemp("", fmt.Sprintf("aiops-desk-%d-*.jpg", mon))
+	if err != nil {
+		return nil, err
+	}
+	path := tmp.Name()
+	_ = tmp.Close()
+	defer os.Remove(path)
+
 	args := []string{"-x", "-t", "jpg"}
 	if mon > 0 {
 		args = append(args, "-D", strconv.Itoa(mon))
 	}
-	args = append(args, tmp)
+	args = append(args, path)
 	cmd := exec.Command("screencapture", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		_ = os.Remove(tmp)
+		_ = os.Remove(path)
 		msg := strings.TrimSpace(string(out))
 		if msg == "" {
 			msg = err.Error()
 		}
 		capErr := fmt.Errorf("screencapture failed: %s", msg)
-		// Permission-class failures: remember so reconnects do not re-prompt TCC.
 		low := strings.ToLower(msg + " " + err.Error())
 		if strings.Contains(low, "not authorized") || strings.Contains(low, "permission") ||
 			strings.Contains(low, "could not create") || strings.Contains(low, "unable to capture") {
@@ -268,20 +274,13 @@ func (c *darwinCapture) Capture() (image.Image, error) {
 		}
 		return nil, capErr
 	}
-	f, err := os.Open(tmp)
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	img, err := jpeg.Decode(f)
-	f.Close()
-	_ = os.Remove(tmp)
+	img, err := jpeg.Decode(bytes.NewReader(raw))
 	if err != nil {
-		// some macOS versions write PNG despite -t jpg
-		f2, err2 := os.Open(tmp)
-		if err2 == nil {
-			img, err = png.Decode(f2)
-			f2.Close()
-		}
+		img, err = png.Decode(bytes.NewReader(raw))
 		if err != nil {
 			return nil, err
 		}
@@ -539,6 +538,8 @@ func (i *darwinInput) DeskInputMeta() deskInputMeta {
 
 func deskGOOS() string { return "darwin" }
 
+func linuxIsKylinFamily() bool { return false }
+
 // darwinScreenCaptureIndex resolves the avfoundation device index of
 // "Capture screen 0". Lazy + once: ffmpeg -list_devices itself triggers the
 // Screen Recording TCC dialog, so we must not call it on every reconnect or
@@ -601,28 +602,52 @@ func darwinScreenCaptureIndex() int {
 func deskAVFScreenIndex() int { return darwinScreenCaptureIndex() }
 
 func deskH264Usable() bool {
-	// Do not trigger list_devices here — that was a major reconnect TCC spam
-	// source. Only report usable after an explicit probe (prefer path / startH264).
+	if !ffmpegAvailable() {
+		return false
+	}
+	// Prefer continuous avfoundation when probed; otherwise raw screencapture→ffmpeg.
 	if !darwinScrIdxProbed {
 		return false
 	}
-	return darwinScreenCaptureIndex() >= 0
+	if darwinScreenCaptureIndex() >= 0 {
+		return true
+	}
+	darwinCapCacheMu.Lock()
+	ok := darwinPermOK
+	darwinCapCacheMu.Unlock()
+	return ok
 }
 
 func deskPreferredCodec() string {
-	// Prefer JPEG until Screen Recording is confirmed OK. After that, probe
-	// ffmpeg once (sync.Once) and advertise H.264 when available — never on
-	// every reconnect before permission is settled.
+	// Prefer JPEG until Screen Recording is confirmed OK. After that, prefer
+	// H.264 (avfoundation continuous, or raw pipe when AVF index missing).
 	darwinCapCacheMu.Lock()
 	ok := darwinPermOK
 	darwinCapCacheMu.Unlock()
 	if !ok {
 		return ""
 	}
-	if darwinScreenCaptureIndex() >= 0 {
-		return "h264"
+	_ = darwinScreenCaptureIndex() // probe once
+	if !ffmpegAvailable() {
+		return ""
 	}
-	return ""
+	return "h264"
+}
+
+// deskNeedsRawH264: when avfoundation "Capture screen" is unavailable, feed
+// screencapture JPEG/PNG frames into ffmpeg rawvideo (same idea as Windows
+// secure-desktop worker / Linux Wayland grim path).
+func deskNeedsRawH264() bool {
+	if !ffmpegAvailable() {
+		return false
+	}
+	darwinCapCacheMu.Lock()
+	ok := darwinPermOK
+	darwinCapCacheMu.Unlock()
+	if !ok {
+		return false
+	}
+	return darwinScreenCaptureIndex() < 0
 }
 
 func deskLegacyCaptureHost() bool { return false }

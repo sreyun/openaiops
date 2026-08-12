@@ -1691,8 +1691,14 @@
         </div>
       </div>
       <div class="field">
-        <label data-i18n="install.category_label">一级分组（可选，安装后自动归入该分组）</label>
-        <input type="text" id="installCategory" data-i18n-placeholder="install.category_placeholder" placeholder="如 生产 / DB / 办公终端">
+        <label data-i18n="install.category_label">主机分组（可选，安装后归入所选节点）</label>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <select id="installFolderId" style="flex:1;min-width:200px">
+            <option value="" data-i18n="install.category_placeholder">不分组（可选任意节点）</option>
+          </select>
+          <button type="button" class="btn sm" id="installNewFolderBtn" data-i18n="install.new_folder_btn">新建子分组</button>
+        </div>
+        <div class="hint" data-i18n="install.category_hint">安装后归入资产树所选节点（任意深度）。先选父节点再点新建可建子分组；未选父节点则建一级分组。</div>
       </div>
       <!-- 日志采集（可选）：可折叠子区块，默认展开 -->
       <div class="field log-collect">
@@ -1768,11 +1774,14 @@
         <div class="relay-info" data-i18n="install.multi_info">
           当前面板会自动作为第一个服务端写入命令；下方只需填写额外服务端。采集只跑一次、结果广播，各服务端独立鉴权与重试。
         </div>
+        <div class="hint" data-i18n="install.multi_host_id_note">各面板各自一张主机卡与独立 host_id；勿假设在线状态或身份在各面板间同步。</div>
         <div class="field">
           <label data-i18n="install.server_list_label">额外服务端（每行一个，格式：URL [Token]）</label>
           <textarea id="multiServerList" rows="4" style="width:100%;font-family:monospace;font-size:12px" placeholder="https://server-b:8529 token-b&#10;https://server-c:8529 token-c"></textarea>
           <div class="hint" data-i18n="install.server_list_hint">当前面板已自动包含。请至少再填一个额外服务端（URL [Token]，Token 可选）。</div>
+          <div class="hint" data-i18n="install.multi_fail_hint">若仅一端离线，请在 Agent 日志中查找带 server= 的「上报失败」记录并核对 Token/网络。</div>
           <div class="hint warn-hint" id="multiServerWarn" style="display:none" data-i18n="install.multi_need_two">请至少再填写一个额外服务端，否则仍是单服务端安装。</div>
+          <div class="hint warn-hint" id="multiServerUrlWarn" style="display:none" data-i18n="install.invalid_extra_server">额外服务端 URL 无效，请使用 http(s)://host[:port]</div>
         </div>
       </div>
       <div id="normalInstallSection" class="field">
@@ -1795,6 +1804,8 @@
             <button class="btn" id="copyRelayGatewayBtn" data-i18n="install.copy">复制</button>
           </div>
           <div class="hint" data-i18n="install.gateway_cmd_hint">安装后自动启动中继服务，监听下方端口，转发所有请求到云监控中心。Linux 使用 sudo -E 以保留 AIOPS_RELAY_SECRET。</div>
+          <div class="hint" data-i18n="install.relay_secret_hint">服务端与网关须配置相同 AIOPS_RELAY_SECRET（未设置则不校验）；密钥不一致会导致中继鉴权失败。</div>
+          <div class="hint" data-i18n="install.gateway_category_hint">网关中继安装不写入分组/Token；一级分组请写在②内网安装命令。</div>
         </div>
         <div class="grid2">
           <div class="field">
@@ -1813,6 +1824,7 @@
             <button class="btn" id="copyRelayInternalBtn" data-i18n="install.copy">复制</button>
           </div>
           <div class="hint" data-i18n="install.internal_cmd_hint">内网机器通过网关中继连接云监控中心，无需直连公网。填写网关 IP 后命令会自动更新。</div>
+          <div class="hint" data-i18n="install.relay_rewrite_note">经中继拉取的脚本会把 server 改写为网关地址，并去掉 servers[]（与中继互斥）。</div>
         </div>
       </div>
       <div class="field">

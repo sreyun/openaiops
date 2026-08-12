@@ -15,7 +15,8 @@
 # 特点：
 #   - aiops-server / aiops-agent 用 docker/Dockerfile.dev 本地构建
 #     （server 本机架构；agent 仍交叉编译全平台到 /dl，保证 macOS/Windows 一键安装可用）
-#   - postgres / VictoriaMetrics 改用 Docker Hub（无需登录 SWR，Apple Silicon 友好）
+#   - 基础镜像默认走国内源 BASE_REGISTRY（华为云 SWR）；海外可在 .env 设 BASE_REGISTRY=docker.io
+#   - postgres / VictoriaMetrics 默认也可用国内镜像变量覆盖（见 .env.example）
 #   - 默认启用本机 Agent（覆盖正式环境的 agent profile）
 #   - Web 端口仅绑定 127.0.0.1:18529；请用 scripts/dev-up.sh 在 :8529 启 hostproxy
 #     注入 X-Real-IP（否则审计日志只能看到 Docker 网关如 192.168.97.1）
@@ -30,7 +31,7 @@ services:
       target: server
       args:
         VERSION: ${AIOPS_DEV_VERSION:-dev}
-        BASE_REGISTRY: ${BASE_REGISTRY:-docker.io}
+        BASE_REGISTRY: ${BASE_REGISTRY:-swr.cn-east-3.myhuaweicloud.com/sreyun/docker.io}
         GO_VERSION: ${GO_VERSION:-1.26}
     # 不直接对外暴露 8529：Docker Desktop 会把来源改写成网桥网关 IP。
     # 改由本机 hostproxy（scripts/dev-up.sh）监听 :8529 并注入真实访客 IP。
@@ -41,10 +42,10 @@ services:
       - AIOPS_TRUST_PROXY=true
 
   victoriametrics:
-    image: ${VM_IMAGE:-victoriametrics/victoria-metrics:latest}
+    image: ${VM_IMAGE:-swr.cn-east-3.myhuaweicloud.com/sreyun/victoria-metrics:latest}
 
   postgres:
-    image: ${POSTGRES_IMAGE:-pgvector/pgvector:pg18}
+    image: ${POSTGRES_IMAGE:-swr.cn-east-3.myhuaweicloud.com/sreyun/pgvector:pg18}
 
   aiops-agent:
     # 清除正式编排的 agent profile，开发环境默认启用本机 Agent
@@ -56,5 +57,24 @@ services:
       target: agent
       args:
         VERSION: ${AIOPS_DEV_VERSION:-dev}
-        BASE_REGISTRY: ${BASE_REGISTRY:-docker.io}
+        BASE_REGISTRY: ${BASE_REGISTRY:-swr.cn-east-3.myhuaweicloud.com/sreyun/docker.io}
         GO_VERSION: ${GO_VERSION:-1.26}
+
+  # 营销官网（SQLite 永久保存访问/登记信息；基础镜像走国内源）
+  aiops-website:
+    image: aiops-website:dev
+    build:
+      context: ./website
+      dockerfile: Dockerfile
+      args:
+        BASE_REGISTRY: ${BASE_REGISTRY:-swr.cn-east-3.myhuaweicloud.com/sreyun/docker.io}
+    container_name: aiops-website
+    ports:
+      - "127.0.0.1:${WEBSITE_PORT:-8090}:8090"
+    environment:
+      - TZ=${TZ:-Asia/Shanghai}
+      - WEBSITE_ADMIN_PASSWORD=${WEBSITE_ADMIN_PASSWORD:-aiops2026}
+      - WEBSITE_DB=/app/data/website.db
+    volumes:
+      - ./website/data:/app/data
+    restart: unless-stopped

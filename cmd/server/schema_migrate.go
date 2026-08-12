@@ -14,7 +14,7 @@ type schemaMigration struct {
 }
 
 // enterpriseOpsMigrations covers On-call pages, change records, and backup metadata.
-// Bootstrap tables remain in migrate()'s CREATE IF NOT EXISTS block (v0 compatible).
+// Bootstrap tables remain in migrateBootstrap's CREATE IF NOT EXISTS block (v0 compatible).
 var enterpriseOpsMigrations = []schemaMigration{
 	{
 		Version: 1,

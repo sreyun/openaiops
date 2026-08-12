@@ -539,6 +539,7 @@ type ServerConfig struct {
 	Retention              RetentionConfig             `json:"retention,omitempty"`
 	Backup             BackupConfig        `json:"backup,omitempty"`
 	StatusPage         StatusPageConfig    `json:"status_page,omitempty"`
+	Brand              BrandConfig         `json:"brand,omitempty"`
 	TicketSLA          TicketSLAPolicy     `json:"ticket_sla,omitempty"`
 	CmdPolicy          CmdPolicyConfig     `json:"cmd_policy,omitempty"`
 	// LoopForceAllowNonAdmin：默认 false，闭环 force=true 仅管理员可用。
@@ -573,6 +574,8 @@ type ServerConfig struct {
 	// DataSources is the list of external observability data sources (Loki /
 	// Prometheus) operators connect for AI query, log search and alert queries.
 	DataSources []DataSource `json:"data_sources,omitempty"`
+	// CICDConnections are GitLab CI / GitHub Actions / Gitee Go integrations.
+	CICDConnections []CICDConnection `json:"cicd_connections,omitempty"`
 	// K8sClusters is the list of Kubernetes clusters the server talks to
 	// directly (API Server + Token or pasted kubeconfig). Secrets are encrypted at rest.
 	K8sClusters []K8sClusterConfig `json:"k8s_clusters,omitempty"`
@@ -1300,6 +1303,7 @@ func (cs *ConfigStore) Set(c ServerConfig) error {
 	c.Retention = cs.cfg.Retention
 	c.Backup = cs.cfg.Backup
 	c.StatusPage = cs.cfg.StatusPage
+	c.Brand = cs.cfg.Brand
 	c.TicketSLA = cs.cfg.TicketSLA
 	c.CmdPolicy = cs.cfg.CmdPolicy
 	c.AI = cs.cfg.AI                             // managed via AI config endpoint

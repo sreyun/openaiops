@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,11 +12,24 @@ import (
 )
 
 func (c *linuxCapture) Monitors() []deskMonitorInfo {
+	if list := linuxMonitorsXrandr(); len(list) > 0 {
+		return list
+	}
+	if list := linuxMonitorsWlrRandr(); len(list) > 0 {
+		return list
+	}
+	if list := linuxMonitorsGrim(); len(list) > 0 {
+		return list
+	}
+	w, h := c.Size()
+	return []deskMonitorInfo{{ID: 1, Name: "default", Width: w, Height: h, Primary: true}}
+}
+
+func linuxMonitorsXrandr() []deskMonitorInfo {
 	// xrandr --listmonitors → " 0: +*DP-1 1920/508x1080/286+0+0  DP-1"
 	out, err := exec.Command("xrandr", "--listmonitors").Output()
 	if err != nil {
-		w, h := c.Size()
-		return []deskMonitorInfo{{ID: 1, Name: "default", Width: w, Height: h, Primary: true}}
+		return nil
 	}
 	var list []deskMonitorInfo
 	for _, line := range strings.Split(string(out), "\n") {
@@ -23,7 +37,6 @@ func (c *linuxCapture) Monitors() []deskMonitorInfo {
 		if line == "" || strings.HasPrefix(line, "Monitors:") {
 			continue
 		}
-		// "0: +*HDMI-1 1920/..." 
 		parts := strings.Fields(line)
 		if len(parts) < 3 {
 			continue
@@ -40,11 +53,120 @@ func (c *linuxCapture) Monitors() []deskMonitorInfo {
 		}
 		list = append(list, deskMonitorInfo{ID: id, Name: name, Width: w, Height: h, X: x, Y: y, Primary: primary})
 	}
-	if len(list) == 0 {
-		w, h := c.Size()
-		return []deskMonitorInfo{{ID: 1, Name: "default", Width: w, Height: h, Primary: true}}
+	return list
+}
+
+// linuxMonitorsWlrRandr parses `wlr-randr` (wlroots / 部分麒麟 Wayland).
+func linuxMonitorsWlrRandr() []deskMonitorInfo {
+	out, err := exec.Command("wlr-randr").Output()
+	if err != nil {
+		return nil
+	}
+	var list []deskMonitorInfo
+	var cur *deskMonitorInfo
+	flush := func() {
+		if cur != nil && cur.Width > 0 && cur.Height > 0 {
+			list = append(list, *cur)
+		}
+		cur = nil
+	}
+	id := 1
+	for _, line := range strings.Split(string(out), "\n") {
+		raw := line
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// Output name lines are unindented: "HDMI-A-1 \"…\""
+		if len(raw) > 0 && raw[0] != ' ' && raw[0] != '\t' && !strings.Contains(line, "px,") {
+			flush()
+			name := strings.Fields(line)[0]
+			cur = &deskMonitorInfo{ID: id, Name: name, Primary: strings.Contains(line, "(current)") || id == 1}
+			id++
+			continue
+		}
+		if cur == nil {
+			continue
+		}
+		// "  1920x1080 px, …" or "current 1920x1080@…"
+		if strings.Contains(line, "x") && (strings.Contains(line, "px") || strings.Contains(line, "@") || strings.Contains(line, "current")) {
+			for _, tok := range strings.Fields(line) {
+				tok = strings.TrimSuffix(tok, ",")
+				if !strings.Contains(tok, "x") {
+					continue
+				}
+				wh := strings.SplitN(strings.Split(tok, "@")[0], "x", 2)
+				if len(wh) != 2 {
+					continue
+				}
+				w, e1 := strconv.Atoi(wh[0])
+				h, e2 := strconv.Atoi(wh[1])
+				if e1 == nil && e2 == nil && w > 0 && h > 0 {
+					cur.Width, cur.Height = w, h
+					break
+				}
+			}
+		}
+		if strings.Contains(line, "position") || strings.HasPrefix(line, "Position:") {
+			// "Position: 1920,0" or "  position: 1920,0"
+			rest := line
+			if i := strings.Index(strings.ToLower(line), "position"); i >= 0 {
+				rest = line[i:]
+			}
+			rest = strings.TrimPrefix(strings.ToLower(rest), "position:")
+			rest = strings.TrimSpace(rest)
+			parts := strings.Split(rest, ",")
+			if len(parts) >= 2 {
+				x, _ := strconv.Atoi(strings.TrimSpace(parts[0]))
+				y, _ := strconv.Atoi(strings.TrimSpace(parts[1]))
+				cur.X, cur.Y = x, y
+			}
+		}
+		if strings.Contains(strings.ToLower(line), "enabled") && strings.Contains(strings.ToLower(line), "yes") {
+			cur.Primary = cur.Primary || cur.ID == 1
+		}
+	}
+	flush()
+	if len(list) > 0 {
+		list[0].Primary = true
 	}
 	return list
+}
+
+// linuxMonitorsGrim uses `grim -g` listing via swaymsg/hyprctl when available.
+func linuxMonitorsGrim() []deskMonitorInfo {
+	// hyprctl monitors -j is common on newer 麒麟/社区 Wayland spins.
+	if out, err := exec.Command("hyprctl", "monitors", "-j").Output(); err == nil {
+		if list := parseHyprMonitorsJSON(string(out)); len(list) > 0 {
+			return list
+		}
+	}
+	return nil
+}
+
+func parseHyprMonitorsJSON(s string) []deskMonitorInfo {
+	type m struct {
+		Name   string `json:"name"`
+		Width  int    `json:"width"`
+		Height int    `json:"height"`
+		X      int    `json:"x"`
+		Y      int    `json:"y"`
+	}
+	var arr []m
+	if err := json.Unmarshal([]byte(s), &arr); err != nil || len(arr) == 0 {
+		return nil
+	}
+	out := make([]deskMonitorInfo, 0, len(arr))
+	for i, v := range arr {
+		if v.Width <= 0 || v.Height <= 0 {
+			continue
+		}
+		out = append(out, deskMonitorInfo{
+			ID: i + 1, Name: v.Name, Width: v.Width, Height: v.Height,
+			X: v.X, Y: v.Y, Primary: i == 0,
+		})
+	}
+	return out
 }
 
 func parseXrandrGeom(s string) (w, h, x, y int) {

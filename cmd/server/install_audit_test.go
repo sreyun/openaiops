@@ -65,7 +65,7 @@ func TestRenderInstallAuditConfig(t *testing.T) {
 		ContentAuditExcludePaths: `["/health*","/metrics*","/ready*","/live*"]`, ContentAuditMaxEventsPerMin: 1200,
 	}
 	for name, tmpl := range map[string]string{"sh": installShTemplate, "ps1": installPs1Template} {
-		out := renderScriptWithAudit(tmpl, "https://monitor.example", "tok", "prod", "", "[]", opts)
+		out := renderScriptWithAudit(tmpl, "https://monitor.example", "tok", "prod", "", "", "[]", opts)
 		cfg, err := extractInstallConfigYAML(out)
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
@@ -97,7 +97,7 @@ func TestRenderInstallAuditConfig(t *testing.T) {
 }
 
 func TestBuildInstallConfigYAMLAnnotated(t *testing.T) {
-	cfg := buildInstallConfigYAML("http://s:8529", "tok", "prod", "", "[]", installAuditOptions{}, false)
+	cfg := buildInstallConfigYAML("http://s:8529", "tok", "prod", "", "", "[]", installAuditOptions{}, false)
 	if !strings.Contains(cfg, `server: "http://s:8529"`) {
 		t.Fatal("missing active server")
 	}

@@ -384,21 +384,71 @@ func sanitizeCategory(s string) string {
 	return s
 }
 
-func sanitizeServerURL(u string) string {
-	u = strings.TrimSpace(u)
-	if len(u) > 256 {
-		u = u[:256]
+// sanitizeFolderID keeps install/report folder ids safe for URL + config embedding.
+// Accepts the ungrouped sentinel or ids matching hf-[hex] / alphanumeric-hyphen form.
+func sanitizeFolderID(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
 	}
-	return strings.Map(func(r rune) rune {
+	if s == HostFolderUngroupedID {
+		return HostFolderUngroupedID
+	}
+	s = strings.Map(func(r rune) rune {
 		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-			return r
-		case strings.ContainsRune(":/._-", r):
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
 			return r
 		default:
 			return -1
 		}
-	}, u)
+	}, s)
+	if len(s) > 64 {
+		s = s[:64]
+	}
+	return s
+}
+
+// sanitizeServerURL validates an install/public server URL for safe embedding
+// into install scripts. Only http(s) scheme+host(+port) is kept; userinfo,
+// path, query and fragment are rejected. IPv6 hosts are re-emitted with brackets.
+func sanitizeServerURL(u string) string {
+	u = strings.TrimSpace(u)
+	if u == "" || len(u) > 256 {
+		return ""
+	}
+	parsed, err := url.Parse(u)
+	if err != nil {
+		return ""
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return ""
+	}
+	if parsed.User != nil {
+		return ""
+	}
+	host := parsed.Hostname()
+	if host == "" || strings.ContainsAny(host, "/?#@ \\") {
+		return ""
+	}
+	port := parsed.Port()
+	var out string
+	if strings.Contains(host, ":") {
+		// IPv6 literal from Hostname() is unbracketed.
+		if port != "" {
+			out = scheme + "://[" + host + "]:" + port
+		} else {
+			out = scheme + "://[" + host + "]"
+		}
+	} else if port != "" {
+		out = scheme + "://" + host + ":" + port
+	} else {
+		out = scheme + "://" + host
+	}
+	if len(out) > 256 {
+		return ""
+	}
+	return out
 }
 
 // sanitizeUsername validates the login username: 2–32 chars of ASCII letters,

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"image"
+	"image/draw"
 	"image/jpeg"
 	"io"
 	"log/slog"
@@ -84,23 +85,91 @@ type deskInput interface {
 }
 
 type deskQuality struct {
-	Scale   float64 `json:"scale"`   // 0.25–1.0
-	Quality int     `json:"quality"` // JPEG 1–100
-	FPS     int     `json:"fps"`     // 1–24
-	Codec   string  `json:"codec"`   // jpeg | h264
-	Monitor int     `json:"monitor"` // display id
+	Scale         float64  `json:"scale"`
+	Quality       int      `json:"quality"`
+	FPS           int      `json:"fps"`
+	Codec         string   `json:"codec"` // jpeg | h264 | h265
+	Monitor       int      `json:"monitor"`
+	ClientW       int      `json:"client_w,omitempty"`
+	ClientH       int      `json:"client_h,omitempty"`
+	DPR           float64  `json:"dpr,omitempty"`
+	Sharpness     float64  `json:"sharpness,omitempty"`
+	AutoScale     bool     `json:"auto_scale,omitempty"`
+	ClientCodecs  []string `json:"client_codecs,omitempty"` // browser MSE capabilities
 }
 
 func defaultDeskQuality() deskQuality {
-	q := deskQuality{Scale: 1.0, Quality: 88, FPS: 15, Codec: "jpeg"}
-	// Server 2012 / Win8 GDI + slower JPEG path: keep frames small so the
-	// reverse channel doesn't stall → browser "重连中" + black flashes.
+	// Prefer client-driven auto scale; until the browser reports viewport, use a
+	// sharp-enough default (not the old soft 0.75 that looked blurry when upscaled).
+	q := deskQuality{Scale: 0.9, Quality: 80, FPS: 20, Codec: "jpeg", Sharpness: 1.2, AutoScale: true}
 	if deskLegacyCaptureHost() {
 		q.Scale = 0.7
-		q.Quality = 72
-		q.FPS = 8
+		q.Quality = 68
+		q.FPS = 12
+		q.Sharpness = 1.0
 	}
 	return q
+}
+
+// encodeScale picks the JPEG/H.264 downscale factor.
+// When the browser sends client_w/h, we match the remote framebuffer to the
+// visible stage (× DPR × sharpness) so 4K hosts aren't forced through a fixed
+// 0.7× blur, and small viewports don't waste bandwidth on unused pixels.
+func (q deskQuality) encodeScale(sw, sh int) float64 {
+	if sw < 8 {
+		sw = 8
+	}
+	scale := q.Scale
+	if scale <= 0 {
+		scale = 0.85
+	}
+	if q.AutoScale && q.ClientW >= 160 {
+		sharp := q.Sharpness
+		if sharp <= 0 {
+			sharp = 1.15
+		}
+		if sharp > 2 {
+			sharp = 2
+		}
+		dpr := q.DPR
+		if dpr < 1 {
+			dpr = 1
+		}
+		if dpr > 2.5 {
+			dpr = 2.5
+		}
+		// Cap physical encode width so Retina 2× doesn't explode bandwidth.
+		targetW := float64(q.ClientW) * dpr * sharp
+		maxW := float64(q.ClientW) * 2.0 * sharp
+		if targetW > maxW {
+			targetW = maxW
+		}
+		auto := targetW / float64(sw)
+		if auto > 1 {
+			auto = 1
+		}
+		if auto < 0.4 {
+			auto = 0.4
+		}
+		scale = auto
+		// Also respect height so ultrawide stages don't over-encode height.
+		if q.ClientH >= 120 {
+			targetH := float64(q.ClientH) * dpr * sharp
+			if ah := targetH / float64(maxInt(sh, 8)); ah > 0 && ah < scale {
+				if ah < 0.4 {
+					ah = 0.4
+				}
+				scale = ah
+			}
+		}
+	}
+	if scale > 1 {
+		scale = 1
+	}
+	if scale < 0.25 {
+		scale = 0.25
+	}
+	return scale
 }
 
 func (a *Agent) runDesktopChannelFor(t *serverTarget) {
@@ -295,16 +364,35 @@ func (a *Agent) runDesktopSession(server, sid, lang string) {
 	// avfoundation once (ffmpeg -list_devices). Calling deskH264Usable first
 	// used to return false forever when probe was deferred.
 	prefer := deskPreferredCodec()
-	h264OK := deskH264Usable()
+	if v := deskPreferredVideoCodec(); v != "" {
+		// Hardware HEVC / better encoder catalog can upgrade platform prefer.
+		prefer = v
+	}
+	h264OK := deskH264Usable() || len(deskH264Encoders()) > 0
+	h265OK := deskHEVCUsable()
+	if (prefer == "h264" || prefer == "h265") && (h264OK || h265OK) && (q.Codec == "" || q.Codec == "jpeg") {
+		q.Codec = prefer
+	}
 	codecs := []string{"jpeg"}
 	if h264OK {
 		codecs = append(codecs, "h264")
+	}
+	if h265OK {
+		codecs = append(codecs, "h265")
+	}
+	encNames := []string{}
+	for _, e := range deskH264Encoders() {
+		encNames = append(encNames, e.Name)
+	}
+	for _, e := range deskH265Encoders() {
+		encNames = append(encNames, e.Name)
 	}
 	metaMap := map[string]any{
 		"w": sw, "h": sh, "os": runtimeGOOS(),
 		"scale": q.Scale, "quality": q.Quality, "fps": q.FPS,
 		"codec": q.Codec, "codecs": codecs, "prefer": prefer,
-		"h264": h264OK, "clipboard": clipOK, "monitors": mons,
+		"h264": h264OK, "h265": h265OK, "encoders": encNames,
+		"clipboard": clipOK, "monitors": mons,
 		"view_only": viewOnly,
 	}
 	for k, v := range deskMetaExtras(inp, viewOnly) {
@@ -316,6 +404,7 @@ func (a *Agent) runDesktopSession(server, sid, lang string) {
 	}
 	feats["clipboard"] = clipOK
 	feats["h264"] = h264OK
+	feats["h265"] = h265OK
 	feats["dnd"] = true
 	feats["monitors"] = true
 	metaMap["features"] = feats
@@ -338,14 +427,16 @@ func (a *Agent) runDesktopSession(server, sid, lang string) {
 	var h264Scale float64
 	var h264FPS int
 	var h264MonID int
-	var h264JPEGAt time.Time // occasional JPEG while on H.264 for session replay
+	var h264Qual int
+	var h264Codec string
+	var h264JPEGAt time.Time // occasional JPEG while on video for session replay
 	stopH264 := func() {
 		h264Mu.Lock()
 		if h264 != nil {
 			_ = h264.Close()
 			h264 = nil
 		}
-		h264Scale, h264FPS, h264MonID = 0, 0, 0
+		h264Scale, h264FPS, h264MonID, h264Qual, h264Codec = 0, 0, 0, 0, ""
 		h264Mu.Unlock()
 	}
 	defer stopH264()
@@ -383,7 +474,12 @@ func (a *Agent) runDesktopSession(server, sid, lang string) {
 		blankWarned := false
 		const blankWarnAt = 40
 		var deskMetaAt time.Time
+		var lastFP uint64
+		var sameFP int
 		for !stop.Load() {
+			actMu.Lock()
+			inputHot := time.Since(lastActive) < 1800*time.Millisecond
+			actMu.Unlock()
 			qMu.Lock()
 			cq := q
 			qMu.Unlock()
@@ -391,37 +487,64 @@ func (a *Agent) runDesktopSession(server, sid, lang string) {
 			if fps < 1 {
 				fps = 1
 			}
-			if fps > 24 {
-				fps = 24
+			if fps > 30 {
+				fps = 30
+			}
+			secureNow := deskIsSecureName(deskCurrentDesktop(cap))
+			// Lock / password / Update UI: prioritize responsiveness over bandwidth.
+			if secureNow || inputHot {
+				if fps < 22 {
+					fps = 22
+				}
+				if fps > 28 {
+					fps = 28
+				}
 			}
 			interval := time.Second / time.Duration(fps)
-			codec := cq.Codec
-			if codec == "h264" && !h264OK {
+			codec := deskNegotiateVideoCodec(cq.Codec, cq.ClientCodecs)
+			if codec == "" {
 				codec = "jpeg"
 			}
+			encScale := cq.encodeScale(sw, sh)
+			vOpt := deskVideoOpts{
+				Codec:         codec,
+				Quality:       cq.Quality,
+				FPS:           fps,
+				Scale:         encScale,
+				AllowSoftHEVC: codec == "h265",
+			}
 
-			if codec == "h264" {
+			if codec == "h264" || codec == "h265" {
 				monMu.Lock()
 				mon := currentMon
 				monMu.Unlock()
+				useRaw := deskNeedsRawH264()
 				h264Mu.Lock()
-				needRestart := h264 != nil && (h264Scale != cq.Scale || h264FPS != fps || h264MonID != mon.ID)
+				needRestart := h264 != nil && (h264Scale != encScale || h264FPS != fps || h264MonID != mon.ID ||
+					h264.IsRaw() != useRaw || h264Qual != cq.Quality || h264Codec != codec)
 				needStart := h264 == nil || needRestart
 				h264Mu.Unlock()
 				if needRestart {
 					stopH264()
 				}
 				if needStart {
-					p, err := startH264Pipe(mon, cq.Scale, fps)
+					var p *h264Pipe
+					var err error
+					if useRaw {
+						rw := int(float64(mon.Width) * encScale)
+						rh := int(float64(mon.Height) * encScale)
+						p, err = startDeskVideoRawPipe(rw, rh, vOpt)
+					} else {
+						p, err = startDeskVideoPipe(mon, vOpt)
+					}
 					if err != nil {
 						codec = "jpeg"
 					} else {
 						h264Mu.Lock()
 						h264 = p
-						h264Scale, h264FPS, h264MonID = cq.Scale, fps, mon.ID
+						h264Scale, h264FPS, h264MonID = encScale, fps, mon.ID
+						h264Qual, h264Codec = cq.Quality, codec
 						h264Mu.Unlock()
-						// Each reader owns its buffer — a shared buffer raced when the
-						// codec/monitor switched and two readers briefly overlapped.
 						go func(pipe *h264Pipe) {
 							rbuf := make([]byte, 64*1024)
 							for !stop.Load() {
@@ -434,8 +557,6 @@ func (a *Agent) runDesktopSession(server, sid, lang string) {
 									}
 								}
 								if err != nil {
-									// ffmpeg exited/crashed — clear the pipe so the next
-									// loop iteration restarts it (or falls back to JPEG).
 									stopH264()
 									return
 								}
@@ -443,21 +564,17 @@ func (a *Agent) runDesktopSession(server, sid, lang string) {
 						}(p)
 					}
 				}
-				if codec == "h264" {
-					// Keep mouse origin / size meta fresh during long H.264 sessions
-					// (JPEG path does this every frame; H.264 would otherwise drift
-					// after DPI/monitor layout changes).
+				if (codec == "h264" || codec == "h265") && !useRaw {
+					// gdigrab/x11grab/avfoundation owns capture; keep meta + sparse JPEG for replay.
 					syncDeskOrigin(cap, inp)
 					if nw, nh := cap.Size(); nw > 0 && nh > 0 && (nw != sw || nh != sh) {
 						sw, sh = nw, nh
 						js, _ := json.Marshal(map[string]any{"w": sw, "h": sh, "monitors": cap.Monitors()})
 						_ = writeTx(deskTxFrame('S', js))
 					}
-					// Emit a sparse JPEG keyframe so session replay still works
-					// when the live stream is H.264-only.
 					if time.Since(h264JPEGAt) > 2*time.Second {
 						if img, err := cap.Capture(); err == nil {
-							scaled := scaleImage(img, cq.Scale)
+							scaled := scaleImage(img, encScale)
 							var jbuf bytes.Buffer
 							if jpeg.Encode(&jbuf, scaled, &jpeg.Options{Quality: 40}) == nil && jbuf.Len() < 2<<20 {
 								_ = writeTx(deskTxFrame('K', jbuf.Bytes()))
@@ -468,6 +585,7 @@ func (a *Agent) runDesktopSession(server, sid, lang string) {
 					time.Sleep(interval)
 					continue
 				}
+				// Raw video: fall through to Capture() then WriteFrame below.
 			} else {
 				stopH264()
 			}
@@ -504,6 +622,28 @@ func (a *Agent) runDesktopSession(server, sid, lang string) {
 				})
 				_ = writeTx(deskTxFrame('S', js))
 			}
+
+			// Raw path H.264/H.265: feed capture frames into ffmpeg stdin.
+			if (codec == "h264" || codec == "h265") && deskNeedsRawH264() {
+				h264Mu.Lock()
+				pipe := h264
+				h264Mu.Unlock()
+				if pipe != nil && pipe.IsRaw() {
+					if err := pipe.WriteFrame(img); err != nil {
+						stopH264()
+					} else if time.Since(h264JPEGAt) > 2*time.Second {
+						scaled := scaleImage(img, mathMin(cq.Scale, 0.5))
+						var jbuf bytes.Buffer
+						if jpeg.Encode(&jbuf, scaled, &jpeg.Options{Quality: 40}) == nil && jbuf.Len() < 2<<20 {
+							_ = writeTx(deskTxFrame('K', jbuf.Bytes()))
+							h264JPEGAt = time.Now()
+						}
+					}
+					time.Sleep(interval)
+					continue
+				}
+			}
+
 			if !blankWarned {
 				// Dark Winlogon / lock UI is often near-uniform; don't scare the operator
 				// when we are correctly attached to the secure desktop — UI shows lock_hint.
@@ -516,7 +656,7 @@ func (a *Agent) runDesktopSession(server, sid, lang string) {
 					if blankFrames++; blankFrames >= blankWarnAt {
 						blankWarned = true
 						msg, _ := json.Marshal(map[string]string{
-							"error": "画面为纯色/无内容：目标会话未真正渲染桌面（无人登录、控制台断开、Session 0 抓屏、或 Windows 应用程序控制导致桌面 worker 未启动）。请：1) 用 RDP/控制台登录并解锁桌面；2) 以管理员安装 Agent 服务（aiops-agent --install-service）；3) 若安装时报 Application Control 拦截，先放行后再装。 (Solid-color capture: session isn't rendering — nobody logged in, disconnected console, Session 0 capture, or desktop worker blocked by Application Control. Log in via RDP and unlock; install Agent as a Windows service; allowlist the binary if App Control blocked it.)",
+							"error": deskBlankFrameHint(),
 							"level": "warn",
 						})
 						_ = writeTx(deskTxFrame('E', msg))
@@ -525,45 +665,99 @@ func (a *Agent) runDesktopSession(server, sid, lang string) {
 					blankFrames = 0
 				}
 			}
-			scaled := scaleImage(img, cq.Scale)
+			// Idle desktops: skip identical frames. Lock/password UI must never
+			// stall — sparse fingerprints miss password-dot updates, so encode
+			// every tick while the operator is typing or on a secure desktop.
+			if inputHot || secureNow {
+				lastFP = 0
+				sameFP = 0
+			} else {
+				fp := deskFrameFingerprint(img)
+				if fp != 0 && fp == lastFP {
+					sameFP++
+					maxSkip := maxInt(1, cq.FPS) // ~1s idle heartbeat
+					if sameFP <= maxSkip {
+						time.Sleep(interval)
+						continue
+					}
+					sameFP = 0
+				} else {
+					lastFP = fp
+					sameFP = 0
+				}
+			}
+			// Quality: raise when typing/unlocking so password dots stay crisp.
+			encQual := cq.Quality
+			if inputHot || secureNow {
+				if encQual < 82 {
+					encQual = 82
+				}
+			}
+			if encQual < 20 {
+				encQual = 20
+			}
+			if encQual > 95 {
+				encQual = 95
+			}
+			// Prefer the viewport-matched scale; only crush further on huge frames
+			// when the browser has NOT reported a client size (legacy clients).
+			useScale := encScale
+			if !cq.AutoScale || cq.ClientW < 160 {
+				bounds := img.Bounds()
+				estPixels := float64(bounds.Dx()) * float64(bounds.Dy()) * useScale * useScale
+				if estPixels > 3_500_000 && useScale > 0.65 {
+					useScale = 0.65
+				} else if estPixels > 2_800_000 && useScale > 0.8 {
+					useScale = 0.8
+				}
+			}
+			scaled := scaleImage(img, useScale)
 			var jbuf bytes.Buffer
-			qual := cq.Quality
-			if qual < 20 {
-				qual = 20
-			}
-			if qual > 95 {
-				qual = 95
-			}
-			if err := jpeg.Encode(&jbuf, scaled, &jpeg.Options{Quality: qual}); err != nil {
+			if err := jpeg.Encode(&jbuf, scaled, &jpeg.Options{Quality: encQual}); err != nil {
 				time.Sleep(interval)
 				continue
 			}
 			jpegBytes := jbuf.Bytes()
-			// Oversized frames were silently dropped (black flash / "stuck" UI).
-			// Adaptively re-encode instead of skipping — critical on high-res
-			// Server 2012 desktops where q88@1.0 often exceeds 4 MiB.
-			const softMax = 1500 << 10 // 1.5 MiB soft target
-			const hardMax = 4 << 20    // absolute wire cap
+			// Soft cap: allow larger frames during interactive unlock so we don't
+			// re-encode 4× and add multi-hundred-ms lag after each keystroke.
+			softMax := 1400 << 10 // 1.4 MiB
+			if inputHot || secureNow {
+				softMax = 1800 << 10
+			}
+			const hardMax = 4 << 20
 			if len(jpegBytes) > softMax {
-				for _, attempt := range []struct {
+				attempts := []struct {
 					scale float64
 					qual  int
 				}{
-					{cq.Scale * 0.85, qual},
-					{cq.Scale * 0.7, 55},
-					{0.55, 45},
-					{0.4, 40},
-				} {
-					aq := attempt.qual
-					if aq > 65 {
-						aq = 65
+					{useScale * 0.9, encQual},
+					{useScale * 0.75, 70},
+					{0.55, 58},
+					{0.4, 48},
+				}
+				// Interactive unlock: only gentle shrink — never crush to mush.
+				if inputHot || secureNow {
+					attempts = []struct {
+						scale float64
+						qual  int
+					}{
+						{useScale * 0.95, encQual},
+						{useScale * 0.88, maxInt(encQual-4, 78)},
 					}
-					if aq < 30 {
-						aq = 30
+				}
+				for _, attempt := range attempts {
+					aq := attempt.qual
+					if !(inputHot || secureNow) {
+						if aq > 78 {
+							aq = 78
+						}
+					}
+					if aq < 36 {
+						aq = 36
 					}
 					sc := attempt.scale
-					if sc < 0.25 {
-						sc = 0.25
+					if sc < 0.3 {
+						sc = 0.3
 					}
 					alt := scaleImage(img, sc)
 					var altBuf bytes.Buffer
@@ -839,15 +1033,95 @@ func scaleImage(src image.Image, scale float64) image.Image {
 	if nw < 8 || nh < 8 {
 		return src
 	}
+	return scaleImageNN(src, nw, nh)
+}
+
+// scaleImageNN is a fast nearest-neighbor scaler. The previous At/Set path was
+// ~10–30× slower on large Server desktops and dominated CPU before JPEG encode.
+func scaleImageNN(src image.Image, nw, nh int) *image.RGBA {
+	b := src.Bounds()
+	sw, sh := b.Dx(), b.Dy()
 	dst := image.NewRGBA(image.Rect(0, 0, nw, nh))
+	rgba, ok := src.(*image.RGBA)
+	if !ok {
+		// One conversion then sample — still far cheaper than per-pixel At/Set.
+		tmp := image.NewRGBA(image.Rect(0, 0, sw, sh))
+		draw.Draw(tmp, tmp.Bounds(), src, b.Min, draw.Src)
+		rgba = tmp
+	}
+	srcPix := rgba.Pix
+	srcStride := rgba.Stride
+	dstPix := dst.Pix
+	dstStride := dst.Stride
+	xOff := rgba.Rect.Min.X
+	yOff := rgba.Rect.Min.Y
 	for y := 0; y < nh; y++ {
-		sy := b.Min.Y + y*b.Dy()/nh
+		sy := yOff + y*sh/nh
+		srcRow := (sy - rgba.Rect.Min.Y) * srcStride
+		dstRow := y * dstStride
 		for x := 0; x < nw; x++ {
-			sx := b.Min.X + x*b.Dx()/nw
-			dst.Set(x, y, src.At(sx, sy))
+			sx := xOff + x*sw/nw
+			si := srcRow + (sx-rgba.Rect.Min.X)*4
+			di := dstRow + x*4
+			copy(dstPix[di:di+4], srcPix[si:si+4])
 		}
 	}
 	return dst
+}
+
+// deskFrameFingerprint samples a sparse grid so identical / near-static frames
+// (Update UI spinner pauses, idle desktop) skip a full JPEG encode+tx cycle.
+func deskFrameFingerprint(img image.Image) uint64 {
+	b := img.Bounds()
+	w, h := b.Dx(), b.Dy()
+	if w < 8 || h < 8 {
+		return 0
+	}
+	var h64 uint64 = 14695981039346656037
+	const prime uint64 = 1099511628211
+	const grid = 16
+	rgba, ok := img.(*image.RGBA)
+	for gy := 0; gy < grid; gy++ {
+		y := b.Min.Y + (gy*h)/grid
+		for gx := 0; gx < grid; gx++ {
+			x := b.Min.X + (gx*w)/grid
+			var r, g, bl, a uint32
+			if ok {
+				i := (y-rgba.Rect.Min.Y)*rgba.Stride + (x-rgba.Rect.Min.X)*4
+				if i >= 0 && i+3 < len(rgba.Pix) {
+					r = uint32(rgba.Pix[i])
+					g = uint32(rgba.Pix[i+1])
+					bl = uint32(rgba.Pix[i+2])
+					a = uint32(rgba.Pix[i+3])
+				}
+			} else {
+				r, g, bl, a = img.At(x, y).RGBA()
+				r >>= 8
+				g >>= 8
+				bl >>= 8
+				a >>= 8
+			}
+			h64 ^= uint64(r) | uint64(g)<<8 | uint64(bl)<<16 | uint64(a)<<24
+			h64 *= prime
+			h64 ^= uint64(x*131 + y)
+			h64 *= prime
+		}
+	}
+	return h64
+}
+
+func mathMin(a, b float64) float64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func derefInt(p *int, fallback int) int {
+	if p == nil || *p <= 0 {
+		return fallback
+	}
+	return *p
 }
 
 func readDeskFrames(r io.Reader, inp deskInput, lang string, q *deskQuality, qMu *sync.Mutex, touch func(), fileTxChan chan<- []byte, screenW, screenH *int, applyMonitor func(int)) {
@@ -904,34 +1178,60 @@ func readDeskFrames(r io.Reader, inp deskInput, lang string, q *deskQuality, qMu
 				if nq.FPS > 0 {
 					q.FPS = nq.FPS
 				}
-				if deskLegacyCaptureHost() {
-					if q.FPS > 10 {
-						q.FPS = 10
-					}
-					if q.Scale > 0.85 {
-						q.Scale = 0.85
-					}
-					if q.Quality > 80 {
-						q.Quality = 80
-					}
+				if nq.ClientW > 0 {
+					q.ClientW = nq.ClientW
+				}
+				if nq.ClientH > 0 {
+					q.ClientH = nq.ClientH
+				}
+				if nq.DPR > 0 {
+					q.DPR = nq.DPR
+				}
+				if nq.Sharpness > 0 {
+					q.Sharpness = nq.Sharpness
+				}
+				// Presence of client_w enables auto scale even if the flag is omitted.
+				if nq.AutoScale || nq.ClientW > 0 {
+					q.AutoScale = true
 				}
 				if nq.Codec != "" {
 					q.Codec = nq.Codec
 				}
+				if len(nq.ClientCodecs) > 0 {
+					q.ClientCodecs = append([]string(nil), nq.ClientCodecs...)
+				}
+				if deskLegacyCaptureHost() {
+					if q.FPS > 14 {
+						q.FPS = 14
+					}
+					if q.Scale > 0.92 {
+						q.Scale = 0.92
+					}
+					if q.Quality > 85 {
+						q.Quality = 85
+					}
+					if q.Sharpness > 1.15 {
+						q.Sharpness = 1.15
+					}
+				}
 				applied := *q
+				eff := applied.encodeScale(derefInt(screenW, 1920), derefInt(screenH, 1080))
 				mon := nq.Monitor
 				qMu.Unlock()
 				if mon > 0 && applyMonitor != nil {
 					applyMonitor(mon)
 				}
-				// Ack so the browser can confirm the encoder accepted the preset
-				// (previously operators could not tell "UI changed" from "agent applied").
 				ack, _ := json.Marshal(map[string]any{
 					"quality_ack": true,
 					"scale":       applied.Scale,
+					"encode_scale": eff,
 					"quality":     applied.Quality,
 					"fps":         applied.FPS,
 					"codec":       applied.Codec,
+					"auto_scale":  applied.AutoScale,
+					"client_w":    applied.ClientW,
+					"client_h":    applied.ClientH,
+					"sharpness":   applied.Sharpness,
 				})
 				select {
 				case fileTxChan <- deskTxFrame('S', ack):

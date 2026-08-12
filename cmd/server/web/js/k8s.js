@@ -4,7 +4,21 @@ let K8S_CLUSTERS = [];
 let K8S_TAB = "overview";
 let K8S_SCALE_CTX = null;
 const K8S_FILTER = { q: "", phase: "all" }; // phase: all|running|pending|failed|other
-let K8S_CACHE = { nodes: [], pods: [], deployments: [], events: [] };
+const K8S_PAGE_LIMIT = 50;
+let K8S_CACHE = {
+  nodes: [],
+  pods: [],
+  podsContinue: "",
+  podsPageContinue: "",
+  podsContinueStack: [],
+  podsTruncated: false,
+  deployments: [],
+  deploymentsContinue: "",
+  deploymentsPageContinue: "",
+  deploymentsContinueStack: [],
+  deploymentsTruncated: false,
+  events: [],
+};
 let K8S_RENDER_SEQ = 0;
 let K8S_ABORT = null;
 let K8S_EDIT_ID = ""; // currently editing cluster id ("" = create)
@@ -62,6 +76,67 @@ function k8sMatch(hay, q) {
   return typeof matchesSearchTokens === "function"
     ? matchesSearchTokens(hay, q)
     : String(hay).toLowerCase().includes(String(q).toLowerCase());
+}
+
+function k8sResetPager(kind) {
+  K8S_CACHE[`${kind}Continue`] = "";
+  K8S_CACHE[`${kind}PageContinue`] = "";
+  K8S_CACHE[`${kind}ContinueStack`] = [];
+  K8S_CACHE[`${kind}Truncated`] = false;
+}
+
+function k8sPagedResourcePath(id, resource, cont) {
+  const params = new URLSearchParams({ limit: String(K8S_PAGE_LIMIT) });
+  const ns = k8sNamespace();
+  if (ns) params.set("namespace", ns);
+  if (cont) params.set("continue", cont);
+  return `/k8s/clusters/${encodeURIComponent(id)}/${resource}?${params}`;
+}
+
+function k8sPagerHTML(kind) {
+  const stack = K8S_CACHE[`${kind}ContinueStack`] || [];
+  const hasPrev = stack.length > 0;
+  const hasNext = !!K8S_CACHE[`${kind}Continue`];
+  const truncated = !!K8S_CACHE[`${kind}Truncated`];
+  if (!hasPrev && !hasNext && !truncated) return "";
+  const hint = hasNext || truncated
+    ? k8sT("k8s.page_more_hint", "当前页最多 50 项，还有更多资源可继续翻页；搜索 / Phase 仅过滤当前页。")
+    : k8sT("k8s.page_local_hint", "搜索 / Phase 仅过滤当前页。");
+  return `<div class="rtx-toolbar k8s-toolbar" style="justify-content:flex-end;margin-top:10px">
+    <span class="muted">${esc(hint)}</span>
+    <button type="button" class="btn sm" data-k8s-page="${esc(kind)}:prev"${hasPrev ? "" : " disabled"}>${esc(k8sT("common.prev", "上一页"))}</button>
+    <button type="button" class="btn sm" data-k8s-page="${esc(kind)}:next"${hasNext ? "" : " disabled"}>${esc(k8sT("common.next", "下一页"))}</button>
+  </div>`;
+}
+
+function k8sWirePager(kind) {
+  const panel = $("k8sPanel");
+  if (!panel) return;
+  panel.querySelectorAll(`[data-k8s-page^="${kind}:"]`).forEach(b => {
+    b.addEventListener("click", () => {
+      const dir = (b.getAttribute("data-k8s-page") || "").split(":")[1];
+      k8sGoResourcePage(kind, dir);
+    });
+  });
+}
+
+async function k8sGoResourcePage(kind, dir) {
+  const stackKey = `${kind}ContinueStack`;
+  const contKey = `${kind}Continue`;
+  const pageKey = `${kind}PageContinue`;
+  if (!Array.isArray(K8S_CACHE[stackKey])) K8S_CACHE[stackKey] = [];
+  if (dir === "next") {
+    const cont = K8S_CACHE[contKey] || "";
+    if (!cont) return;
+    K8S_CACHE[stackKey].push(K8S_CACHE[pageKey] || "");
+    await renderK8sPanel({ kind, continueToken: cont });
+    return;
+  }
+  if (dir === "prev") {
+    if (!K8S_CACHE[stackKey].length) return;
+    const cont = K8S_CACHE[stackKey].pop() || "";
+    await renderK8sPanel({ kind, continueToken: cont });
+  }
 }
 
 function k8sToolbarHTML(opts) {
@@ -279,8 +354,10 @@ function paintK8sPods() {
   }
   const id = k8sClusterId();
   panel.innerHTML = k8sToolbarHTML({ phase: true, count: `${items.length}/${K8S_CACHE.pods.length}` }) +
-    `<div style="margin:0 0 10px"><button type="button" class="btn sm ai-assist-btn" id="k8sPodsAI"><span class="ai-assist-btn-ic">🤖</span>${esc(k8sT("ai.analyze", "AI 分析"))}</button></div>` + body;
+    `<div style="margin:0 0 10px"><button type="button" class="btn sm ai-assist-btn" id="k8sPodsAI"><span class="ai-assist-btn-ic">🤖</span>${esc(k8sT("ai.analyze", "AI 分析"))}</button></div>` +
+    body + k8sPagerHTML("pods");
   k8sWireToolbar(paintK8sPods);
+  k8sWirePager("pods");
   panel.querySelectorAll("[data-k8s-log]").forEach(b => {
     b.addEventListener("click", () => {
       const [ns, name] = (b.getAttribute("data-k8s-log") || "").split("|");
@@ -353,8 +430,10 @@ function paintK8sDeployments() {
     }).join("");
     body = `<div class="nf-table-wrap k8s-table-wrap"><table class="data-table k8s-table"><thead><tr>${th}</tr></thead><tbody>${tr}</tbody></table></div>`;
   }
-  panel.innerHTML = k8sToolbarHTML({ count: `${items.length}/${K8S_CACHE.deployments.length}` }) + body;
+  panel.innerHTML = k8sToolbarHTML({ count: `${items.length}/${K8S_CACHE.deployments.length}` }) +
+    body + k8sPagerHTML("deployments");
   k8sWireToolbar(paintK8sDeployments);
+  k8sWirePager("deployments");
   panel.querySelectorAll("[data-k8s-scale]").forEach(b => {
     b.addEventListener("click", () => {
       const [ns, name, reps] = (b.getAttribute("data-k8s-scale") || "").split("|");
@@ -443,7 +522,7 @@ function paintK8sEvents() {
   k8sWireToolbar(paintK8sEvents);
 }
 
-async function renderK8sPanel() {
+async function renderK8sPanel(pageReq) {
   const panel = $("k8sPanel");
   if (!panel) return;
   const seq = k8sBeginFetch();
@@ -473,6 +552,7 @@ async function renderK8sPanel() {
   panel.innerHTML = `<div class="loading-dots">${esc(k8sT("sec.loading", "加载中…"))}</div>`;
   k8sSetStatus(k8sT("k8s.status_loading", "连接中…"), "warn");
   const nsQ = k8sNamespace() ? `?namespace=${encodeURIComponent(k8sNamespace())}` : "";
+  const pager = pageReq && pageReq.kind === K8S_TAB ? pageReq : null;
   try {
     if (K8S_TAB === "overview") {
       const j = await k8sFetch(`/k8s/clusters/${encodeURIComponent(id)}/overview`);
@@ -504,17 +584,27 @@ async function renderK8sPanel() {
       return;
     }
     if (K8S_TAB === "pods") {
-      const j = await k8sFetch(`/k8s/clusters/${encodeURIComponent(id)}/pods${nsQ}`);
+      if (!pager) k8sResetPager("pods");
+      const cont = pager ? (pager.continueToken || "") : "";
+      const j = await k8sFetch(k8sPagedResourcePath(id, "pods", cont));
       if (k8sIsStale(seq)) return;
       K8S_CACHE.pods = j.items || [];
+      K8S_CACHE.podsPageContinue = cont;
+      K8S_CACHE.podsContinue = j.continue || "";
+      K8S_CACHE.podsTruncated = !!j.truncated;
       k8sSetStatus(k8sT("k8s.status_ok", "已连接"), "ok");
       paintK8sPods();
       return;
     }
     if (K8S_TAB === "deployments") {
-      const j = await k8sFetch(`/k8s/clusters/${encodeURIComponent(id)}/deployments${nsQ}`);
+      if (!pager) k8sResetPager("deployments");
+      const cont = pager ? (pager.continueToken || "") : "";
+      const j = await k8sFetch(k8sPagedResourcePath(id, "deployments", cont));
       if (k8sIsStale(seq)) return;
       K8S_CACHE.deployments = j.items || [];
+      K8S_CACHE.deploymentsPageContinue = cont;
+      K8S_CACHE.deploymentsContinue = j.continue || "";
+      K8S_CACHE.deploymentsTruncated = !!j.truncated;
       k8sSetStatus(k8sT("k8s.status_ok", "已连接"), "ok");
       paintK8sDeployments();
       return;

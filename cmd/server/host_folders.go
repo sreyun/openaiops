@@ -252,9 +252,16 @@ func (cs *ConfigStore) ensureHostFoldersMigrated(hosts []*Host) bool {
 		cs.cfg.HostFolderAssign = assign
 		return true
 	}
-	// Incremental: hosts with a category but no folder assignment → L1 find-or-create
+	// Incremental: hosts with a category but no folder assignment → L1 find-or-create.
+	// Skip when already assigned (including explicit __ungrouped__).
 	for _, h := range hosts {
-		if _, ok := cs.cfg.HostFolderAssign[h.ID]; ok {
+		if fid, ok := cs.cfg.HostFolderAssign[h.ID]; ok && fid != "" {
+			continue
+		}
+		// Explicit empty category override means "stay ungrouped".
+		if ov, ok := cs.cfg.Categories[h.ID]; ok && strings.TrimSpace(ov) == "" {
+			cs.cfg.HostFolderAssign[h.ID] = HostFolderUngroupedID
+			dirty = true
 			continue
 		}
 		cat := ""
@@ -400,8 +407,9 @@ func (cs *ConfigStore) deleteHostFolder(id string) error {
 			continue
 		}
 		if target == "" {
-			delete(cs.cfg.HostFolderAssign, hid)
-			delete(cs.cfg.Categories, hid)
+			// Explicit ungrouped sentinel — avoid bounce-back from Agent.Category.
+			cs.cfg.HostFolderAssign[hid] = HostFolderUngroupedID
+			cs.cfg.Categories[hid] = ""
 		} else {
 			cs.cfg.HostFolderAssign[hid] = target
 			if n := findFolderNode(out, target); n != nil {
@@ -412,6 +420,40 @@ func (cs *ConfigStore) deleteHostFolder(id string) error {
 	cs.cfg.HostFolders = out
 	cs.mu.Unlock()
 	return cs.save()
+}
+
+// applyAgentFolderHint places a host from Agent report: valid folder_id wins
+// (any tree depth or explicit ungrouped); otherwise legacy category creates/joins L1
+// only when the host still has no HostFolderAssign entry.
+func (cs *ConfigStore) applyAgentFolderHint(hostID, folderID, category string) error {
+	hostID = strings.TrimSpace(hostID)
+	if hostID == "" {
+		return nil
+	}
+	folderID = sanitizeFolderID(folderID)
+	if folderID != "" {
+		if folderID == HostFolderUngroupedID {
+			return cs.assignHostFolder(hostID, HostFolderUngroupedID)
+		}
+		cs.mu.RLock()
+		ok := findFolderNode(cs.cfg.HostFolders, folderID) != nil
+		cs.mu.RUnlock()
+		if ok {
+			return cs.assignHostFolder(hostID, folderID)
+		}
+		// Deleted / unknown id → fall through to category L1 migration.
+	}
+	category = sanitizeFolderName(category)
+	if category == "" {
+		return nil
+	}
+	cs.mu.RLock()
+	_, hasAssign := cs.cfg.HostFolderAssign[hostID]
+	cs.mu.RUnlock()
+	if hasAssign {
+		return nil
+	}
+	return cs.setCategoryWithFolder(hostID, category)
 }
 
 func (cs *ConfigStore) assignHostFolder(hostID, folderID string) error {
@@ -426,8 +468,10 @@ func (cs *ConfigStore) assignHostFolder(hostID, folderID string) error {
 		cs.cfg.Categories = map[string]string{}
 	}
 	if folderID == "" || folderID == HostFolderUngroupedID {
-		delete(cs.cfg.HostFolderAssign, hostID)
-		delete(cs.cfg.Categories, hostID)
+		// Explicit ungrouped: keep a sentinel assignment so ensureHostFoldersMigrated
+		// will not re-file the host from a lingering Agent category string.
+		cs.cfg.HostFolderAssign[hostID] = HostFolderUngroupedID
+		cs.cfg.Categories[hostID] = ""
 		cs.mu.Unlock()
 		return cs.save()
 	}

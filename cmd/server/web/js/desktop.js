@@ -6,7 +6,7 @@ let DESK_META = {
   os: "", desktop: "", secureDesktop: false, inputDesktopOk: true, lockHint: "",
   features: { cad: false, type_text: false, chords: false, wake: false, input: true }
 };
-let DESK_QUALITY = { scale: 1.0, quality: 88, fps: 15, codec: "jpeg", monitor: 0 };
+let DESK_QUALITY = { quality: 82, fps: 20, sharpness: 1.35, auto_scale: true, codec: "jpeg", monitor: 0 };
 let DESK_DOWNLOAD = null;
 let DESK_MSE = null; // { mediaSource, sourceBuffer, queue, video, gen }
 let DESK_GOT_FRAME = false;
@@ -50,7 +50,7 @@ async function doOpenDesktop(id, name) {
     os: "", desktop: "", secureDesktop: false, inputDesktopOk: true, lockHint: "",
     features: { cad: false, type_text: false, chords: false, wake: false, input: true }
   };
-  DESK_QUALITY = { scale: 1.0, quality: 88, fps: 15, codec: "jpeg", monitor: 0 };
+  DESK_QUALITY = { quality: 82, fps: 20, sharpness: 1.35, auto_scale: true, codec: "jpeg", monitor: 0 };
   DESK_HOST = { id, name };
   renderDesktopShell(id, name);
   const chip = $("deskGateChip");
@@ -131,6 +131,7 @@ function renderDesktopShell(id, name) {
               <select id="deskCodec" class="desk-select">
                 <option value="jpeg" selected>JPEG</option>
                 <option value="h264">H.264</option>
+                <option value="h265">H.265</option>
               </select>
             </label>
             <div class="desk-lock-tools" id="deskLockTools" title="${esc(I18N.t("desktop.lock_tools_hint", "锁屏快捷操作"))}">
@@ -331,6 +332,10 @@ function deskActiveSurface() {
 
 function onDeskStageResize() {
   fitDeskSurface(deskActiveSurface());
+  if (DESK_WS && DESK_WS.readyState === 1) {
+    clearTimeout(window._deskQResizeTimer);
+    window._deskQResizeTimer = setTimeout(() => sendDeskQuality(), 180);
+  }
 }
 
 function ensureDeskStageResizeObserver() {
@@ -365,16 +370,63 @@ function setDesktopStatus(msg, isErr) {
 }
 
 function qualityPreset(name) {
-  // FPS tuned for interactive remote ops (mouse/keyboard). Full-res JPEG at 15fps
-  // is fine on LAN; use「流畅」when WAN/bandwidth is tight.
-  if (name === "fast") return { scale: 0.45, quality: 50, fps: 20 };
-  if (name === "clear") return { scale: 1.0, quality: 88, fps: 15 };
-  return { scale: 0.7, quality: 72, fps: 12 };
+  // Encode scale is auto-matched to the browser stage (client_w/h × dpr × sharpness).
+  if (name === "fast") return { quality: 68, fps: 24, sharpness: 1.0, auto_scale: true };
+  if (name === "clear") return { quality: 90, fps: 16, sharpness: 1.6, auto_scale: true };
+  return { quality: 82, fps: 20, sharpness: 1.35, auto_scale: true };
 }
+
+function readDeskClientSize() {
+  const stage = $("deskStage");
+  const dpr = Math.min(2.5, Math.max(1, window.devicePixelRatio || 1));
+  if (!stage) return { client_w: 1280, client_h: 720, dpr };
+  const r = stage.getBoundingClientRect();
+  return {
+    client_w: Math.max(320, Math.round(r.width || stage.clientWidth || 1280)),
+    client_h: Math.max(200, Math.round(r.height || stage.clientHeight || 720)),
+    dpr
+  };
+}
+
+function probeDeskClientCodecs() {
+  const codecs = [];
+  let mseH264 = 'video/mp4; codecs="avc1.42E01E"';
+  let mseH265 = 'video/mp4; codecs="hvc1.1.6.L93.B0"';
+  if (typeof MediaSource === "undefined" || !MediaSource.isTypeSupported) {
+    return { codecs, mseH264, mseH265 };
+  }
+  if (MediaSource.isTypeSupported(mseH264) || MediaSource.isTypeSupported('video/mp4; codecs="avc1.4D401F"')) {
+    codecs.push("h264");
+  }
+  const h265Try = [
+    'video/mp4; codecs="hvc1.1.6.L93.B0"',
+    'video/mp4; codecs="hev1.1.6.L93.B0"',
+  ];
+  for (const c of h265Try) {
+    if (MediaSource.isTypeSupported(c)) {
+      codecs.push("h265");
+      mseH265 = c;
+      break;
+    }
+  }
+  return { codecs, mseH264, mseH265 };
+}
+const DESK_CLIENT_CODEC = probeDeskClientCodecs();
 
 function sendDeskQuality() {
   if (!DESK_WS || DESK_WS.readyState !== 1) return;
-  const payload = new TextEncoder().encode(JSON.stringify(DESK_QUALITY));
+  const client = readDeskClientSize();
+  const payloadObj = {
+    ...DESK_QUALITY,
+    auto_scale: true,
+    client_w: client.client_w,
+    client_h: client.client_h,
+    dpr: client.dpr,
+    client_codecs: DESK_CLIENT_CODEC.codecs
+  };
+  // Prefer Agent auto-scale; drop legacy fixed scale so it doesn't fight viewport fit.
+  delete payloadObj.scale;
+  const payload = new TextEncoder().encode(JSON.stringify(payloadObj));
   const buf = new Uint8Array(1 + payload.length);
   buf[0] = "Q".charCodeAt(0);
   buf.set(payload, 1);
@@ -592,9 +644,15 @@ function connectDesktopWS(id, name) {
           const qLabel = ($("deskQuality") && $("deskQuality").selectedOptions[0])
             ? $("deskQuality").selectedOptions[0].text
             : "";
-          const detail = `${Math.round((meta.scale || 0) * 100)}% · q${meta.quality || "?"} · ${meta.fps || "?"}fps`;
-          toast(I18N.t("desktop.quality_applied") + (qLabel ? ": " + qLabel : "") + ` (${detail})`, "ok");
-          setDesktopStatus(I18N.t("desktop.connected") + " · " + detail, false);
+          const enc = meta.encode_scale || meta.scale || 0;
+          const detail = [
+            enc ? (Math.round(enc * 100) + "%") : "",
+            meta.quality ? ("q" + meta.quality) : "",
+            meta.fps ? (meta.fps + "fps") : "",
+            (meta.client_w && meta.client_h) ? (meta.client_w + "×" + meta.client_h) : ""
+          ].filter(Boolean).join(" · ");
+          toast(I18N.t("desktop.quality_applied") + (qLabel ? ": " + qLabel : "") + (detail ? ` (${detail})` : ""), "ok");
+          setDesktopStatus(I18N.t("desktop.connected") + (detail ? " · " + detail : ""), false);
         }
         if (meta.view_only != null) DESK_META.viewOnly = !!meta.view_only;
         applyDeskInputMeta(meta);
@@ -611,25 +669,37 @@ function connectDesktopWS(id, name) {
         }
         const codecSel = $("deskCodec");
         if (codecSel) {
-          // Reflect the agent's capability: when H.264 is unavailable (e.g. the
-          // Windows secure-desktop worker forces GDI capture so the lock screen
-          // isn't a black ffmpeg frame), force JPEG and disable the option so it
-          // can't be re-selected back into a black stream.
           const h264opt = codecSel.querySelector('option[value="h264"]');
+          const h265opt = codecSel.querySelector('option[value="h265"]');
           if (meta.h264 === false) {
-            codecSel.value = "jpeg";
-            DESK_QUALITY.codec = "jpeg";
+            if (DESK_QUALITY.codec === "h264") {
+              DESK_QUALITY.codec = (meta.h265 && DESK_CLIENT_CODEC.codecs.indexOf("h265") >= 0) ? "h265" : "jpeg";
+              codecSel.value = DESK_QUALITY.codec;
+            }
             if (h264opt) h264opt.disabled = true;
           } else if (h264opt) {
             h264opt.disabled = false;
           }
+          if (meta.h265 === false) {
+            if (DESK_QUALITY.codec === "h265") {
+              DESK_QUALITY.codec = meta.h264 !== false ? "h264" : "jpeg";
+              codecSel.value = DESK_QUALITY.codec;
+            }
+            if (h265opt) h265opt.disabled = true;
+          } else if (h265opt) {
+            h265opt.disabled = DESK_CLIENT_CODEC.codecs.indexOf("h265") < 0;
+          }
         }
-        // Agent-preferred codec (e.g. macOS: continuous H.264 vastly outperforms
-        // per-frame screencapture). Auto-switch once, before the first frame.
-        if (meta.prefer === "h264" && meta.h264 && !DESK_GOT_FRAME && DESK_QUALITY.codec !== "h264") {
-          DESK_QUALITY.codec = "h264";
-          if (codecSel) codecSel.value = "h264";
-          sendDeskQuality();
+        if (!DESK_GOT_FRAME && meta.prefer) {
+          if (meta.prefer === "h265" && meta.h265 && DESK_CLIENT_CODEC.codecs.indexOf("h265") >= 0 && DESK_QUALITY.codec !== "h265") {
+            DESK_QUALITY.codec = "h265";
+            if (codecSel) codecSel.value = "h265";
+            sendDeskQuality();
+          } else if (meta.prefer === "h264" && meta.h264 && DESK_QUALITY.codec !== "h264") {
+            DESK_QUALITY.codec = "h264";
+            if (codecSel) codecSel.value = "h264";
+            sendDeskQuality();
+          }
         }
         if (meta.error) {
           DESK_PHASE = "error";
@@ -646,7 +716,7 @@ function connectDesktopWS(id, name) {
     if (typ === "K" && canvas) {
       // Sparse JPEG keyframes may arrive while live-viewing H.264 (for replay).
       // Don't interrupt the video surface once H.264 is showing.
-      if (DESK_QUALITY.codec === "h264" && $("deskVideo") && $("deskVideo").style.display !== "none") {
+      if ((DESK_QUALITY.codec === "h264" || DESK_QUALITY.codec === "h265") && $("deskVideo") && $("deskVideo").style.display !== "none") {
         return;
       }
       jpegPending = new Blob([payload.slice()], { type: "image/jpeg" });
@@ -846,7 +916,9 @@ function appendDeskH264(chunk) {
     ms.addEventListener("sourceopen", () => {
       if (!DESK_MSE || DESK_MSE.gen !== gen) return;
       try {
-        const sb = ms.addSourceBuffer('video/mp4; codecs="avc1.42E01E"');
+        const sb = ms.addSourceBuffer(
+          DESK_QUALITY.codec === "h265" ? DESK_CLIENT_CODEC.mseH265 : DESK_CLIENT_CODEC.mseH264
+        );
         DESK_MSE.sourceBuffer = sb;
         sb.mode = "sequence";
         sb.addEventListener("updateend", flushDeskMSE);
@@ -1376,12 +1448,12 @@ function onDesktopUIChange(e) {
     clearTimeout(window._deskQToastTimer);
     window._deskQToastTimer = setTimeout(() => {
       toast(I18N.t("desktop.quality_applied") + ": " + label
-        + ` (${Math.round(p.scale * 100)}% · q${p.quality})`, "ok");
+        + ` (q${p.quality} · ${p.fps}fps)`, "ok");
     }, 1200);
     return;
   }
   if (e.target && e.target.id === "deskCodec") {
-    DESK_QUALITY.codec = e.target.value === "h264" ? "h264" : "jpeg";
+    DESK_QUALITY.codec = e.target.value === "h265" ? "h265" : (e.target.value === "h264" ? "h264" : "jpeg");
     if (DESK_QUALITY.codec === "jpeg") closeDeskMSE();
     sendDeskQuality();
     if (DESK_WS && DESK_WS.readyState === 1) {

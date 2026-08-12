@@ -37,6 +37,7 @@ type config struct {
 	Python         string         `json:"python"`
 	StateFile      string         `json:"state_file"`
 	Category       string         `json:"category"`
+	FolderID       string         `json:"folder_id,omitempty"` // asset-tree node id (any depth); preferred over category for placement
 	Token          string         `json:"token"`                     // legacy single-server token
 	Relay          bool           `json:"relay"`                     // gateway relay mode: proxy all requests to --server
 	Listen         string         `json:"listen,omitempty"`          // relay listen address (e.g. ":8529")
@@ -145,6 +146,7 @@ func main() {
 	flag.StringVar(&cfg.PluginsDir, "plugins-dir", cfg.PluginsDir, "Python 插件目录")
 	flag.StringVar(&cfg.Python, "python", cfg.Python, "运行 .py 插件的解释器")
 	flag.StringVar(&cfg.Category, "category", cfg.Category, "主机分类标签，如 生产/测试/DB/办公终端")
+	flag.StringVar(&cfg.FolderID, "folder-id", cfg.FolderID, "主机资产树分组 ID（任意深度节点，优先于 category）")
 	flag.StringVar(&cfg.Token, "token", cfg.Token, "安装 Token（由服务端安装命令注入，可选）")
 	flag.BoolVar(&cfg.Relay, "relay", cfg.Relay, "网关中继模式：监听本地端口，转发所有请求到 --server 指定的云监控中心")
 	flag.StringVar(&cfg.Listen, "listen", cfg.Listen, "Relay 监听地址，如 :8529")
@@ -251,6 +253,9 @@ func main() {
 	}
 	if v := os.Getenv("AIOPS_CATEGORY"); v != "" && !explicitFlags["category"] {
 		cfg.Category = v
+	}
+	if v := os.Getenv("AIOPS_FOLDER_ID"); v != "" && !explicitFlags["folder-id"] {
+		cfg.FolderID = v
 	}
 	if v := os.Getenv("AIOPS_PLUGINS_DIR"); v != "" && !explicitFlags["plugins-dir"] {
 		cfg.PluginsDir = v
@@ -438,6 +443,7 @@ func main() {
 		time.Duration(cfg.PluginInterval)*time.Second,
 		collector, runner, hostID, cfg.Category,
 	)
+	agent.identity.FolderID = strings.TrimSpace(cfg.FolderID)
 	agent.logPaths = cfg.LogPaths
 	agent.logEncrypt = cfg.LogEncrypt
 	agent.stateFile = cfg.StateFile // 认回规范 host_id 后要写回身份文件

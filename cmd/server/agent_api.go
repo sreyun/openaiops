@@ -168,6 +168,10 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": Tr(r, "agent.fingerprint_failed")})
 		return
 	}
+	// Install-time grouping: folder_id (any depth) preferred; else legacy L1 category.
+	if err := s.cfg.applyAgentFolderHint(h.ID, rep.FolderID, rep.Category); err != nil {
+		slog.Debug("agent folder hint skipped", "host", shortID(h.ID), "err", err)
+	}
 	// Optional fleet auto-update (default off). Runs async; never blocks report ACK.
 	go s.maybeAutoUpdateHost(h.ID)
 	// Mirror the sample to VictoriaMetrics when enabled (non-blocking, best-effort).

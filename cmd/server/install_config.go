@@ -17,7 +17,7 @@ var configExampleYAML []byte
 // buildInstallConfigYAML produces the post-install config.yaml:
 // active connection settings first, then the full option reference as comments
 // so operators can uncomment sections without hunting docs.
-func buildInstallConfigYAML(server, token, category, serversJSON, logPaths string, audit installAuditOptions, windows bool) string {
+func buildInstallConfigYAML(server, token, category, folderID, serversJSON, logPaths string, audit installAuditOptions, windows bool) string {
 	if strings.TrimSpace(logPaths) == "" {
 		logPaths = "[]"
 	}
@@ -45,6 +45,9 @@ func buildInstallConfigYAML(server, token, category, serversJSON, logPaths strin
 		fmt.Fprintf(&b, "token: %q\n", token)
 	}
 	fmt.Fprintf(&b, "category: %q\n", category)
+	if strings.TrimSpace(folderID) != "" {
+		fmt.Fprintf(&b, "folder_id: %q\n", folderID)
+	}
 	fmt.Fprintf(&b, "log_paths: %s\n", logPaths)
 	b.WriteString("report_interval: 30\n")
 	b.WriteString("plugin_interval: 60\n")
@@ -101,7 +104,7 @@ func commentYAMLAsReference(src string) string {
 	return b.String()
 }
 
-func installConfigB64(server, token, category, serversJSON, logPaths string, audit installAuditOptions, windows bool) string {
-	yaml := buildInstallConfigYAML(server, token, category, serversJSON, logPaths, audit, windows)
+func installConfigB64(server, token, category, folderID, serversJSON, logPaths string, audit installAuditOptions, windows bool) string {
+	yaml := buildInstallConfigYAML(server, token, category, folderID, serversJSON, logPaths, audit, windows)
 	return base64.StdEncoding.EncodeToString([]byte(yaml))
 }

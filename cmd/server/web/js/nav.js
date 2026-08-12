@@ -306,13 +306,15 @@ safeAddEventListener("tokenToggleBtn", "click", function() {
   TOKEN_REVEALED = !TOKEN_REVEALED;
   updateTokenDisplay();
   this.title = TOKEN_REVEALED ? I18N.t("ui.hide_token") : I18N.t("ui.show_token");
+  if (typeof renderInstallCmd === "function") renderInstallCmd();
 });
 safeAddEventListener("copyCmdBtn", "click", function() {
   if (MULTI_SERVER_MODE && buildMultiServerTargets().length < 2) {
     toast(I18N.t("install.multi_need_two"), "err");
     return;
   }
-  copyWithFeedback(this, $("installCmd").textContent, I18N.t("toast.copy_install"));
+  const raw = this.dataset.rawCmd || $("installCmd").textContent;
+  copyWithFeedback(this, raw, I18N.t("toast.copy_install"));
 });
 // 点击命令区域本身也可复制
 safeAddEventListener("installCmd", "click", function() {
@@ -322,7 +324,13 @@ safeAddEventListener("installCmd", "click", function() {
   range.selectNodeContents(this);
   sel.addRange(range);
 });
-safeAddEventListener("installCategory", "input", renderInstallCmd);
+safeAddEventListener("installFolderId", "change", function() {
+  if (typeof syncInstallNewFolderBtn === "function") syncInstallNewFolderBtn();
+  renderInstallCmd();
+});
+safeAddEventListener("installNewFolderBtn", "click", function() {
+  if (typeof createInstallChildFolder === "function") createInstallChildFolder();
+});
 safeAddEventListener("installLogPaths", "input", renderInstallCmd); // 日志路径变化即时更新安装命令
 ["installSNIEnabled", "installContentAudit", "installCaptureBackend", "installContentAuditBodyMode"].forEach(id => safeAddEventListener(id, "change", renderInstallCmd));
 ["installSNIInterface", "installContentAuditPorts", "installContentAuditMaxBody", "installContentAuditMaxEvents", "installContentAuditHosts", "installContentAuditExcludePaths"].forEach(id => safeAddEventListener(id, "input", renderInstallCmd));
@@ -362,10 +370,12 @@ safeAddEventListener("multiServerList", "input", renderInstallCmd);
 safeAddEventListener("relayGatewayIP", "input", renderInstallCmd);
 safeAddEventListener("relayListenPort", "input", renderInstallCmd);
 safeAddEventListener("copyRelayGatewayBtn", "click", function() {
-  copyWithFeedback(this, $("relayGatewayCmd").textContent, I18N.t("toast.copy_relay_install"));
+  const raw = this.dataset.rawCmd || $("relayGatewayCmd").textContent;
+  copyWithFeedback(this, raw, I18N.t("toast.copy_relay_install"));
 });
 safeAddEventListener("copyRelayInternalBtn", "click", function() {
-  copyWithFeedback(this, $("relayInternalCmd").textContent, I18N.t("toast.copy_intranet_install"));
+  const raw = this.dataset.rawCmd || $("relayInternalCmd").textContent;
+  copyWithFeedback(this, raw, I18N.t("toast.copy_intranet_install"));
 });
 
 // 告警操作按钮事件委托（确认 / 静默 / 清除状态）

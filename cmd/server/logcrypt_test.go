@@ -72,7 +72,7 @@ func TestSanitizeLogPaths(t *testing.T) {
 // 配置以 base64 注入脚本；解码后应为 `log_paths: [...]`。
 func TestInstallScriptEmbedsLogPaths(t *testing.T) {
 	lp := sanitizeLogPaths("/var/log/nginx/access.log\n/var/log/app/")
-	sh := renderScript(installShTemplate, "http://s:8529", "tok", "prod", "", lp)
+	sh := renderScript(installShTemplate, "http://s:8529", "tok", "prod", "", "", lp)
 	cfg, err := extractInstallConfigYAML(sh)
 	if err != nil {
 		t.Fatal(err)
@@ -87,7 +87,7 @@ func TestInstallScriptEmbedsLogPaths(t *testing.T) {
 		t.Fatal("占位符未被替换")
 	}
 	// 空 → log_paths: []（向后兼容，不影响现有安装）
-	sh2 := renderScript(installShTemplate, "http://s:8529", "tok", "prod", "", "")
+	sh2 := renderScript(installShTemplate, "http://s:8529", "tok", "prod", "", "", "")
 	cfg2, err := extractInstallConfigYAML(sh2)
 	if err != nil {
 		t.Fatal(err)

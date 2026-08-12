@@ -67,11 +67,29 @@ func deskDefaultLockHint() string {
 	case "windows":
 		return "锁屏时请先点「Ctrl+Alt+Del」，再输入密码；需以 Windows 服务+桌面 worker 运行 Agent。"
 	case "darwin":
-		return "macOS 锁屏可能拦截键鼠（Secure Input）；可尝试「唤醒」与凭据发送，不保证登录窗口可解锁。"
+		return "macOS 锁屏可能拦截键鼠（Secure Input）。可先点「唤醒」，再发送凭据；登录窗口不保证可远程解锁。请确认已授予「屏幕录制」与「辅助功能」。"
 	case "linux":
-		return "锁屏界面通常可键入；若无图形会话或 greeter，需先在本机登录。"
+		if linuxIsKylinFamily() {
+			return "麒麟/UOS：锁屏界面通常可键入。Wayland 需 grim+ffmpeg（H.264）与 ydotool/wtype；X11 需 ffmpeg+xdotool。Agent 须在已登录图形会话中运行。"
+		}
+		return "Linux 锁屏界面通常可键入。Wayland：安装 grim、ffmpeg、ydotool/wtype；X11：安装 ffmpeg、xdotool。无图形会话或 greeter 时需先在本机登录。"
 	default:
 		return ""
+	}
+}
+
+func deskBlankFrameHint() string {
+	switch deskGOOS() {
+	case "darwin":
+		return "画面为纯色/无内容：可能未授予屏幕录制、锁屏 Secure Input、或显示器休眠。请在「系统设置 → 隐私与安全性 → 屏幕录制」允许 Agent 后完全退出并重启，再试「唤醒」。"
+	case "linux":
+		base := "画面为纯色/无内容：通常是无图形会话、锁屏 greeter、或 DISPLAY/Wayland 未指向用户桌面。"
+		if linuxIsKylinFamily() {
+			return base + "麒麟/UOS：确认已本机登录图形桌面；Wayland 安装 grim+ffmpeg，X11 安装 ffmpeg；Agent 不要用纯 SSH 无头方式启动。"
+		}
+		return base + "请本机登录桌面；Wayland 安装 grim，X11 确认 DISPLAY/XAUTHORITY；必要时用登录用户 systemd --user 启动 Agent。"
+	default:
+		return "画面为纯色/无内容：目标会话未真正渲染桌面（无人登录、控制台断开、Session 0 抓屏、或 Windows 应用程序控制导致桌面 worker 未启动）。请：1) 用 RDP/控制台登录并解锁桌面；2) 以管理员安装 Agent 服务（aiops-agent --install-service）；3) 若安装时报 Application Control 拦截，先放行后再装。"
 	}
 }
 

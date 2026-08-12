@@ -206,16 +206,16 @@ func (h *SreyunCore) execListHosts(args map[string]any) (string, error) {
 		next = end
 	}
 	return toolResultJSON(map[string]any{
-		"ok":           true,
-		"total_hosts":  len(hosts),
-		"online":       onlineN,
-		"offline":      offlineN,
-		"matched":      totalMatched,
-		"limit":        limit,
-		"offset":       offset,
-		"next_offset":  next,
-		"hosts":        page,
-		"hint":         "单机健康用 check_host_health(host_id)；容器明细用 query_containers(host_id=...)",
+		"ok":          true,
+		"total_hosts": len(hosts),
+		"online":      onlineN,
+		"offline":     offlineN,
+		"matched":     totalMatched,
+		"limit":       limit,
+		"offset":      offset,
+		"next_offset": next,
+		"hosts":       page,
+		"hint":        "单机健康用 check_host_health(host_id)；容器明细用 query_containers(host_id=...)",
 	}), nil
 }
 
@@ -331,6 +331,7 @@ func compactContainerRow(m map[string]any) map[string]any {
 	id := firstNonEmpty(fmt.Sprint(m["id"]), fmt.Sprint(m["Id"]), fmt.Sprint(m["ID"]))
 	state := firstNonEmpty(fmt.Sprint(m["state"]), fmt.Sprint(m["Status"]), fmt.Sprint(m["status"]))
 	image := firstNonEmpty(fmt.Sprint(m["image"]), fmt.Sprint(m["Image"]))
+	created := firstNonEmpty(fmt.Sprint(m["created"]), fmt.Sprint(m["Created"]), fmt.Sprint(m["CreatedAt"]))
 	out := map[string]any{}
 	if name != "" && name != "<nil>" {
 		out["name"] = name
@@ -348,10 +349,19 @@ func compactContainerRow(m map[string]any) map[string]any {
 	if image != "" && image != "<nil>" {
 		out["image"] = image
 	}
+	if created != "" && created != "<nil>" {
+		out["created"] = created
+	}
 	if p := m["ports"]; p != nil {
 		out["ports"] = p
 	} else if p := m["Ports"]; p != nil {
 		out["ports"] = p
+	}
+	if proj := firstNonEmpty(fmt.Sprint(m["compose_project"]), fmt.Sprint(m["ComposeProject"])); proj != "" && proj != "<nil>" {
+		out["compose_project"] = proj
+	}
+	if svc := firstNonEmpty(fmt.Sprint(m["compose_service"]), fmt.Sprint(m["ComposeService"])); svc != "" && svc != "<nil>" {
+		out["compose_service"] = svc
 	}
 	return out
 }
@@ -496,19 +506,19 @@ func (h *SreyunCore) execQueryK8s(args map[string]any) (string, error) {
 		b, _ := json.MarshalIndent(rows, "", "  ")
 		return string(b), nil
 	case "pods":
-		items, err := cli.ListPods(ns, limit)
+		res, err := cli.ListPods(ns, limit, "")
 		if err != nil {
 			return "", err
 		}
-		b, _ := json.MarshalIndent(summarizeK8sPods(h.s, items), "", "  ")
+		b, _ := json.MarshalIndent(summarizeK8sPods(h.s, res.Items), "", "  ")
 		return string(b), nil
 	case "deployments":
-		items, err := cli.ListDeployments(ns, limit)
+		res, err := cli.ListDeployments(ns, limit, "")
 		if err != nil {
 			return "", err
 		}
 		rows := []map[string]any{}
-		for _, it := range items {
+		for _, it := range res.Items {
 			dns, name := k8sMetaName(it)
 			d, ready, avail := k8sDeployReplicas(it)
 			rows = append(rows, map[string]any{"namespace": dns, "name": name, "replicas": d, "ready": ready, "available": avail})
@@ -548,6 +558,7 @@ func (h *SreyunCore) execQueryK8s(args map[string]any) (string, error) {
 
 func summarizeK8sPods(s *Server, items []map[string]any) []map[string]any {
 	rows := make([]map[string]any, 0, len(items))
+	idx := s.buildK8sHostIndex()
 	for _, it := range items {
 		pns, name := k8sMetaName(it)
 		node := ""
@@ -556,7 +567,7 @@ func summarizeK8sPods(s *Server, items []map[string]any) []map[string]any {
 		}
 		row := map[string]any{"namespace": pns, "name": name, "phase": k8sPodPhase(it), "node": node}
 		if node != "" {
-			if hid, hname := s.hostIDForK8sNodeName(node); hid != "" {
+			if hid, hname := s.hostIDForK8sNodeNameWithIndex(node, idx); hid != "" {
 				row["linked_host_id"] = hid
 				row["linked_host_name"] = hname
 			}

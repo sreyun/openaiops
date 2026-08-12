@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -8,6 +11,24 @@ import (
 	"strings"
 	"time"
 )
+
+type errAuditMirrorConflict struct {
+	Kind  string
+	Value string
+}
+
+func (e *errAuditMirrorConflict) Error() string {
+	return fmt.Sprintf("audit mirror conflict: %s=%s", e.Kind, e.Value)
+}
+
+type auditMirrorStats struct {
+	LegacyRows          int64
+	PartitionRows       int64
+	UniqueHashes        int64
+	RemovedDuplicates   int64
+	BackfilledLegacy    int64
+	BackfilledPartition int64
+}
 
 // applyPGPoolSettings configures the sql.DB pool from env (defaults match historical values).
 func applyPGPoolSettings(db interface {
@@ -79,9 +100,9 @@ func isSafePartitionName(name, parent string) bool {
 }
 
 // migrateDualTrackPartitions creates partitioned twin tables for audit/events/ai_call.
-func (p *pgStore) migrateDualTrackPartitions() {
+func (p *pgStore) migrateDualTrackPartitions() error {
 	if p == nil || p.db == nil {
-		return
+		return sql.ErrConnDone
 	}
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS audit_log_p (
@@ -91,6 +112,8 @@ func (p *pgStore) migrateDualTrackPartitions() {
 			content_hash TEXT NOT NULL DEFAULT '',
 			prev_hash TEXT NOT NULL DEFAULT '',
 			chain_seq BIGINT NOT NULL DEFAULT 0,
+			chain_version SMALLINT NOT NULL DEFAULT 1,
+			chain_key_id TEXT NOT NULL DEFAULT '',
 			PRIMARY KEY (id, ts)
 		) PARTITION BY RANGE (ts)`,
 		`CREATE TABLE IF NOT EXISTS audit_log_p_default PARTITION OF audit_log_p DEFAULT`,
@@ -127,65 +150,348 @@ func (p *pgStore) migrateDualTrackPartitions() {
 		`ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS content_hash TEXT DEFAULT ''`,
 		`ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS prev_hash TEXT DEFAULT ''`,
 		`ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS chain_seq BIGINT DEFAULT 0`,
+		`ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS chain_version SMALLINT NOT NULL DEFAULT 1`,
+		`ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS chain_key_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE audit_log_p ADD COLUMN IF NOT EXISTS chain_version SMALLINT NOT NULL DEFAULT 1`,
+		`ALTER TABLE audit_log_p ADD COLUMN IF NOT EXISTS chain_key_id TEXT NOT NULL DEFAULT ''`,
+		`CREATE INDEX IF NOT EXISTS audit_log_content_hash ON audit_log(content_hash)`,
+		`CREATE INDEX IF NOT EXISTS audit_log_chain_seq ON audit_log(chain_seq)`,
+		`CREATE INDEX IF NOT EXISTS audit_log_p_content_hash ON audit_log_p(content_hash)`,
+		`CREATE INDEX IF NOT EXISTS audit_log_p_chain_seq ON audit_log_p(chain_seq)`,
 	}
 	for _, s := range stmts {
 		if _, err := p.db.Exec(s); err != nil {
-			slog.Warn("dual-track partition migrate", "err", err)
+			return fmt.Errorf("dual-track partition migrate: %w", err)
 		}
 	}
+	var stats auditMirrorStats
+	if err := p.withPgTx(context.Background(), func(tx *sql.Tx) error {
+		var err error
+		stats, err = reconcileAuditMirrors(context.Background(), tx)
+		if err != nil {
+			return err
+		}
+		for _, stmt := range []string{
+			`CREATE UNIQUE INDEX IF NOT EXISTS audit_log_content_hash_uq
+ON audit_log(content_hash) WHERE content_hash <> ''`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS audit_log_p_content_hash_ts_uq
+ON audit_log_p(content_hash, ts) WHERE content_hash <> ''`,
+		} {
+			if _, err := tx.ExecContext(context.Background(), stmt); err != nil {
+				return fmt.Errorf("guard reconciled audit mirrors: %w", err)
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	slog.Info("audit mirrors reconciled",
+		"legacy_rows", stats.LegacyRows,
+		"partition_rows", stats.PartitionRows,
+		"unique_hashes", stats.UniqueHashes,
+		"removed_duplicates", stats.RemovedDuplicates,
+		"backfilled_legacy", stats.BackfilledLegacy,
+		"backfilled_partition", stats.BackfilledPartition)
 	p.ensureTSPartitions("audit_log_p", 3)
 	p.ensureTSPartitions("events_p", 3)
 	p.ensureTSPartitions("ai_call_events_p", 3)
-	p.backfillPartitionTwins()
-	p.tryRevokeAuditMutations()
+	return nil
 }
 
-// backfillPartitionTwins copies legacy rows into partitioned twins (idempotent by id+ts).
-func (p *pgStore) backfillPartitionTwins() {
-	if p == nil || p.db == nil {
-		return
+func reconcileAuditMirrors(ctx context.Context, tx *sql.Tx) (auditMirrorStats, error) {
+	var stats auditMirrorStats
+	if tx == nil {
+		return stats, sql.ErrTxDone
 	}
-	stmts := []string{
-		`INSERT INTO audit_log_p(id, ts, data, content_hash, prev_hash, chain_seq)
-SELECT a.id, a.ts, a.data, COALESCE(a.content_hash,''), COALESCE(a.prev_hash,''), COALESCE(a.chain_seq,0)
+	var contentHash string
+	err := tx.QueryRowContext(ctx, `
+SELECT content_hash
+FROM (
+  SELECT content_hash, ts, data, prev_hash, chain_seq, chain_version, chain_key_id FROM audit_log
+  UNION ALL
+  SELECT content_hash, ts, data, prev_hash, chain_seq, chain_version, chain_key_id FROM audit_log_p
+) u
+WHERE content_hash <> ''
+GROUP BY content_hash
+HAVING COUNT(DISTINCT ROW(ts, data, prev_hash, chain_seq, chain_version, chain_key_id)) > 1
+LIMIT 1`).Scan(&contentHash)
+	if err == nil {
+		return stats, &errAuditMirrorConflict{Kind: "content_hash", Value: contentHash}
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return stats, fmt.Errorf("probe audit content conflicts: %w", err)
+	}
+
+	var chainSeq int64
+	err = tx.QueryRowContext(ctx, `
+SELECT chain_seq
+FROM (
+  SELECT chain_seq, content_hash FROM audit_log WHERE content_hash <> ''
+  UNION ALL
+  SELECT chain_seq, content_hash FROM audit_log_p WHERE content_hash <> ''
+) u
+GROUP BY chain_seq
+HAVING COUNT(DISTINCT content_hash) > 1
+LIMIT 1`).Scan(&chainSeq)
+	if err == nil {
+		return stats, &errAuditMirrorConflict{Kind: "chain_seq", Value: strconv.FormatInt(chainSeq, 10)}
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return stats, fmt.Errorf("probe audit sequence conflicts: %w", err)
+	}
+
+	res, err := tx.ExecContext(ctx, `
+WITH ranked AS (
+  SELECT tableoid, ctid,
+         ROW_NUMBER() OVER (PARTITION BY content_hash ORDER BY tableoid, ctid) AS copy_no
+  FROM audit_log_p
+  WHERE content_hash <> ''
+)
+DELETE FROM audit_log_p p
+USING ranked r
+WHERE p.tableoid = r.tableoid AND p.ctid = r.ctid AND r.copy_no > 1`)
+	if err != nil {
+		return stats, fmt.Errorf("remove exact audit mirrors: %w", err)
+	}
+	stats.RemovedDuplicates, err = res.RowsAffected()
+	if err != nil {
+		return stats, fmt.Errorf("count removed audit mirrors: %w", err)
+	}
+
+	res, err = tx.ExecContext(ctx, `
+INSERT INTO audit_log (
+  ts, data, content_hash, prev_hash, chain_seq, chain_version, chain_key_id
+)
+SELECT p.ts, p.data, p.content_hash, p.prev_hash, p.chain_seq, p.chain_version, p.chain_key_id
+FROM audit_log_p p
+WHERE p.content_hash <> ''
+  AND NOT EXISTS (SELECT 1 FROM audit_log a WHERE a.content_hash = p.content_hash)
+ORDER BY p.chain_seq, p.id`)
+	if err != nil {
+		return stats, fmt.Errorf("backfill legacy audit mirror: %w", err)
+	}
+	stats.BackfilledLegacy, err = res.RowsAffected()
+	if err != nil {
+		return stats, fmt.Errorf("count legacy audit backfill: %w", err)
+	}
+
+	res, err = tx.ExecContext(ctx, `
+INSERT INTO audit_log_p (
+  ts, data, content_hash, prev_hash, chain_seq, chain_version, chain_key_id
+)
+SELECT a.ts, a.data, a.content_hash, a.prev_hash, a.chain_seq, a.chain_version, a.chain_key_id
 FROM audit_log a
-WHERE NOT EXISTS (SELECT 1 FROM audit_log_p p WHERE p.id=a.id AND p.ts=a.ts)
-LIMIT 50000`,
-		`INSERT INTO events_p(id, ts, data)
-SELECT e.id, e.ts, e.data FROM events e
-WHERE NOT EXISTS (SELECT 1 FROM events_p p WHERE p.id=e.id AND p.ts=e.ts)
-LIMIT 50000`,
-		`INSERT INTO ai_call_events_p(
-  id, ts, task, model, actor, latency_ms, ok, error,
-  memory_hits, skill_hits, reply_chars, approx_tokens,
-  prompt_tokens, completion_tokens, cost_estimate)
-SELECT a.id, a.ts, a.task, a.model, a.actor, a.latency_ms, a.ok, a.error,
-  a.memory_hits, a.skill_hits, a.reply_chars, a.approx_tokens,
-  a.prompt_tokens, a.completion_tokens, a.cost_estimate
-FROM ai_call_events a
-WHERE NOT EXISTS (SELECT 1 FROM ai_call_events_p p WHERE p.id=a.id AND p.ts=a.ts)
-LIMIT 50000`,
+WHERE a.content_hash <> ''
+  AND NOT EXISTS (SELECT 1 FROM audit_log_p p WHERE p.content_hash = a.content_hash)
+ORDER BY a.chain_seq, a.id`)
+	if err != nil {
+		return stats, fmt.Errorf("backfill partition audit mirror: %w", err)
 	}
-	for _, s := range stmts {
-		if _, err := p.db.Exec(s); err != nil {
-			slog.Debug("partition backfill", "err", err)
+	stats.BackfilledPartition, err = res.RowsAffected()
+	if err != nil {
+		return stats, fmt.Errorf("count partition audit backfill: %w", err)
+	}
+
+	for _, stmt := range []string{
+		`SELECT setval(pg_get_serial_sequence('audit_log','id'),
+  COALESCE((SELECT MAX(id) FROM audit_log), 1),
+  EXISTS(SELECT 1 FROM audit_log))`,
+		`SELECT setval(pg_get_serial_sequence('audit_log_p','id'),
+  COALESCE((SELECT MAX(id) FROM audit_log_p), 1),
+  EXISTS(SELECT 1 FROM audit_log_p))`,
+	} {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return stats, fmt.Errorf("align audit identity sequence: %w", err)
 		}
 	}
+
+	err = tx.QueryRowContext(ctx, `
+SELECT
+  (SELECT COUNT(*) FROM audit_log) AS legacy_rows,
+  (SELECT COUNT(*) FROM audit_log_p) AS partition_rows,
+  (SELECT COUNT(DISTINCT content_hash)
+     FROM (
+       SELECT content_hash FROM audit_log WHERE content_hash <> ''
+       UNION ALL
+       SELECT content_hash FROM audit_log_p WHERE content_hash <> ''
+     ) hashes) AS unique_hashes`).Scan(&stats.LegacyRows, &stats.PartitionRows, &stats.UniqueHashes)
+	if err != nil {
+		return stats, fmt.Errorf("count reconciled audit mirrors: %w", err)
+	}
+	return stats, nil
 }
 
-// tryRevokeAuditMutations best-effort append-only hardening (no-op for superusers).
-func (p *pgStore) tryRevokeAuditMutations() {
-	if p == nil || p.db == nil {
-		return
-	}
-	for _, s := range []string{
-		`REVOKE UPDATE, DELETE ON audit_log_p FROM CURRENT_USER`,
-		`REVOKE UPDATE, DELETE ON audit_log FROM CURRENT_USER`,
-	} {
-		if _, err := p.db.Exec(s); err != nil {
-			slog.Debug("audit revoke", "err", err)
+// backfillPartitionTwins reconciles event and AI-call multiplicity after all
+// versioned columns exist. It never treats two equal business events as one.
+func (p *pgStore) backfillPartitionTwins(ctx context.Context) error {
+	return p.withPgTx(ctx, func(tx *sql.Tx) error {
+		if err := alignTwinIdentitySequences(ctx, tx); err != nil {
+			return err
+		}
+		stmts := []struct {
+			name string
+			sql  string
+		}{
+			{name: "events legacy to partition", sql: `
+WITH legacy_ranked AS (
+  SELECT ts, data,
+         ROW_NUMBER() OVER (PARTITION BY ts, data ORDER BY id) AS copy_no
+  FROM events
+), partition_ranked AS (
+  SELECT ts, data,
+         ROW_NUMBER() OVER (PARTITION BY ts, data ORDER BY id) AS copy_no
+  FROM events_p
+)
+INSERT INTO events_p(ts, data)
+SELECT l.ts, l.data
+FROM legacy_ranked l
+WHERE NOT EXISTS (
+  SELECT 1 FROM partition_ranked p
+  WHERE p.ts = l.ts AND p.data = l.data AND p.copy_no = l.copy_no
+)`},
+			{name: "events partition to legacy", sql: `
+WITH partition_ranked AS (
+  SELECT ts, data,
+         ROW_NUMBER() OVER (PARTITION BY ts, data ORDER BY id) AS copy_no
+  FROM events_p
+), legacy_ranked AS (
+  SELECT ts, data,
+         ROW_NUMBER() OVER (PARTITION BY ts, data ORDER BY id) AS copy_no
+  FROM events
+)
+INSERT INTO events(ts, data)
+SELECT p.ts, p.data
+FROM partition_ranked p
+WHERE NOT EXISTS (
+  SELECT 1 FROM legacy_ranked l
+  WHERE l.ts = p.ts AND l.data = p.data AND l.copy_no = p.copy_no
+)`},
+			{name: "AI calls legacy to partition", sql: `
+WITH legacy_ranked AS (
+  SELECT ts, task, model, actor, latency_ms, ok, error,
+         memory_hits, skill_hits, reply_chars, approx_tokens,
+         prompt_tokens, completion_tokens, cost_estimate,
+         usage_source, prompt_version, route_reason,
+         ROW_NUMBER() OVER (
+           PARTITION BY ts, task, model, actor, latency_ms, ok, error,
+                        memory_hits, skill_hits, reply_chars, approx_tokens,
+                        prompt_tokens, completion_tokens, cost_estimate,
+                        usage_source, prompt_version, route_reason
+           ORDER BY id
+         ) AS copy_no
+  FROM ai_call_events
+), partition_ranked AS (
+  SELECT ts, task, model, actor, latency_ms, ok, error,
+         memory_hits, skill_hits, reply_chars, approx_tokens,
+         prompt_tokens, completion_tokens, cost_estimate,
+         usage_source, prompt_version, route_reason,
+         ROW_NUMBER() OVER (
+           PARTITION BY ts, task, model, actor, latency_ms, ok, error,
+                        memory_hits, skill_hits, reply_chars, approx_tokens,
+                        prompt_tokens, completion_tokens, cost_estimate,
+                        usage_source, prompt_version, route_reason
+           ORDER BY id
+         ) AS copy_no
+  FROM ai_call_events_p
+)
+INSERT INTO ai_call_events_p(
+  ts, task, model, actor, latency_ms, ok, error,
+  memory_hits, skill_hits, reply_chars, approx_tokens,
+  prompt_tokens, completion_tokens, cost_estimate,
+  usage_source, prompt_version, route_reason
+)
+SELECT l.ts, l.task, l.model, l.actor, l.latency_ms, l.ok, l.error,
+       l.memory_hits, l.skill_hits, l.reply_chars, l.approx_tokens,
+       l.prompt_tokens, l.completion_tokens, l.cost_estimate,
+       l.usage_source, l.prompt_version, l.route_reason
+FROM legacy_ranked l
+WHERE NOT EXISTS (
+  SELECT 1 FROM partition_ranked p
+  WHERE ROW(
+    p.ts, p.task, p.model, p.actor, p.latency_ms, p.ok, p.error,
+    p.memory_hits, p.skill_hits, p.reply_chars, p.approx_tokens,
+    p.prompt_tokens, p.completion_tokens, p.cost_estimate,
+    p.usage_source, p.prompt_version, p.route_reason
+  ) IS NOT DISTINCT FROM ROW(
+    l.ts, l.task, l.model, l.actor, l.latency_ms, l.ok, l.error,
+    l.memory_hits, l.skill_hits, l.reply_chars, l.approx_tokens,
+    l.prompt_tokens, l.completion_tokens, l.cost_estimate,
+    l.usage_source, l.prompt_version, l.route_reason
+  ) AND p.copy_no = l.copy_no
+)`},
+			{name: "AI calls partition to legacy", sql: `
+WITH partition_ranked AS (
+  SELECT ts, task, model, actor, latency_ms, ok, error,
+         memory_hits, skill_hits, reply_chars, approx_tokens,
+         prompt_tokens, completion_tokens, cost_estimate,
+         usage_source, prompt_version, route_reason,
+         ROW_NUMBER() OVER (
+           PARTITION BY ts, task, model, actor, latency_ms, ok, error,
+                        memory_hits, skill_hits, reply_chars, approx_tokens,
+                        prompt_tokens, completion_tokens, cost_estimate,
+                        usage_source, prompt_version, route_reason
+           ORDER BY id
+         ) AS copy_no
+  FROM ai_call_events_p
+), legacy_ranked AS (
+  SELECT ts, task, model, actor, latency_ms, ok, error,
+         memory_hits, skill_hits, reply_chars, approx_tokens,
+         prompt_tokens, completion_tokens, cost_estimate,
+         usage_source, prompt_version, route_reason,
+         ROW_NUMBER() OVER (
+           PARTITION BY ts, task, model, actor, latency_ms, ok, error,
+                        memory_hits, skill_hits, reply_chars, approx_tokens,
+                        prompt_tokens, completion_tokens, cost_estimate,
+                        usage_source, prompt_version, route_reason
+           ORDER BY id
+         ) AS copy_no
+  FROM ai_call_events
+)
+INSERT INTO ai_call_events(
+  ts, task, model, actor, latency_ms, ok, error,
+  memory_hits, skill_hits, reply_chars, approx_tokens,
+  prompt_tokens, completion_tokens, cost_estimate,
+  usage_source, prompt_version, route_reason
+)
+SELECT p.ts, p.task, p.model, p.actor, p.latency_ms, p.ok, p.error,
+       p.memory_hits, p.skill_hits, p.reply_chars, p.approx_tokens,
+       p.prompt_tokens, p.completion_tokens, p.cost_estimate,
+       p.usage_source, p.prompt_version, p.route_reason
+FROM partition_ranked p
+WHERE NOT EXISTS (
+  SELECT 1 FROM legacy_ranked l
+  WHERE ROW(
+    l.ts, l.task, l.model, l.actor, l.latency_ms, l.ok, l.error,
+    l.memory_hits, l.skill_hits, l.reply_chars, l.approx_tokens,
+    l.prompt_tokens, l.completion_tokens, l.cost_estimate,
+    l.usage_source, l.prompt_version, l.route_reason
+  ) IS NOT DISTINCT FROM ROW(
+    p.ts, p.task, p.model, p.actor, p.latency_ms, p.ok, p.error,
+    p.memory_hits, p.skill_hits, p.reply_chars, p.approx_tokens,
+    p.prompt_tokens, p.completion_tokens, p.cost_estimate,
+    p.usage_source, p.prompt_version, p.route_reason
+  ) AND l.copy_no = p.copy_no
+)`},
+		}
+		for _, stmt := range stmts {
+			if _, err := tx.ExecContext(ctx, stmt.sql); err != nil {
+				return fmt.Errorf("backfill %s: %w", stmt.name, err)
+			}
+		}
+		return alignTwinIdentitySequences(ctx, tx)
+	})
+}
+
+func alignTwinIdentitySequences(ctx context.Context, tx *sql.Tx) error {
+	for _, table := range []string{"events", "events_p", "ai_call_events", "ai_call_events_p"} {
+		stmt := fmt.Sprintf(`SELECT setval(pg_get_serial_sequence('%s','id'),
+  COALESCE((SELECT MAX(id) FROM %s), 1),
+  EXISTS(SELECT 1 FROM %s))`, table, table, table)
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("align %s identity sequence: %w", table, err)
 		}
 	}
+	return nil
 }
 
 // cleanupOldTSPartitions drops monthly child partitions older than retainMonths.

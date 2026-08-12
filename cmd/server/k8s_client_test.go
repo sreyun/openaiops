@@ -59,8 +59,8 @@ func TestK8sRESTClientListScaleRestart(t *testing.T) {
 	if err != nil || ver["gitVersion"] != "v1.29.0" {
 		t.Fatalf("version=%v err=%v", ver, err)
 	}
-	pods, err := cli.ListPods("", 100)
-	if err != nil || len(pods) != 1 {
+	pods, err := cli.ListPods("", 100, "")
+	if err != nil || len(pods.Items) != 1 {
 		t.Fatalf("pods=%v err=%v", pods, err)
 	}
 	if n, err := cli.GetDeploymentScale("default", "web"); err != nil || n != 2 {

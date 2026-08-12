@@ -2,10 +2,13 @@
 (function () {
 "use strict";
 
-let CT_INVENTORIES = [];
-const CT_FILTER = { q: "", host: "", state: "all" }; // all | running | stopped | other
+let CT_ITEMS = [];
+const CT_FILTER = { q: "", host: "", state: "all", compose: "" }; // all | running | stopped | other
+const CT_PAGE = { limit: 50, offset: 0, total: 0 };
+let CT_PROJECTS = [];
 let CT_SELECTED = null; // { host_id, id, name, ... }
 let CT_BOUND = false;
+let CT_FILTER_TIMER = null;
 
 const ctT = (k, fb) => I18N.t(k, fb);
 function ctEsc(s) { return typeof esc === "function" ? esc(String(s ?? "")) : String(s ?? ""); }
@@ -64,39 +67,26 @@ function ctPortChips(ports) {
 }
 
 function ctFlatRows() {
-  const out = [];
-  (CT_INVENTORIES || []).forEach(inv => {
-    (inv.containers || []).forEach(c => {
-      out.push({
-        host_id: inv.host_id,
-        host_name: inv.host_name || inv.host_id,
-        runtime: inv.runtime || c.runtime || "",
-        id: c.id,
-        name: c.name || c.id,
-        image: c.image || "",
-        state: c.state || "",
-        status: c.status || "",
-        ports: c.ports || "",
-        created: c.created || "",
-        state_key: ctNormState(c),
-        raw: c,
-      });
-    });
-  });
-  return out;
+  return (CT_ITEMS || []).map(c => ({
+    host_id: c.host_id || "",
+    host_name: c.host_name || c.host_id || "",
+    runtime: c.runtime || "",
+    id: c.id,
+    name: c.name || c.id,
+    image: c.image || "",
+    state: c.state || "",
+    status: c.status || "",
+    ports: c.ports || "",
+    created: c.created || "",
+    compose_project: c.compose_project || "",
+    compose_service: c.compose_service || "",
+    state_key: ctNormState(c),
+    raw: c,
+  }));
 }
 
 function ctVisible(rows) {
-  const q = CT_FILTER.q || "";
-  return rows.filter(r => {
-    if (CT_FILTER.host && r.host_id !== CT_FILTER.host) return false;
-    if (CT_FILTER.state === "running" && r.state_key !== "running") return false;
-    if (CT_FILTER.state === "stopped" && r.state_key !== "stopped") return false;
-    if (CT_FILTER.state === "other" && r.state_key !== "other") return false;
-    if (!q) return true;
-    const hay = [r.host_name, r.host_id, r.name, r.id, r.image, r.state, r.status, r.ports, r.runtime].join(" ");
-    return typeof matchesSearchTokens === "function" ? matchesSearchTokens(hay, q) : hay.toLowerCase().includes(q.toLowerCase());
-  }).sort((a, b) => {
+  return rows.slice().sort((a, b) => {
     const rank = k => ({ stopped: 0, other: 1, running: 2 }[k] ?? 3);
     return rank(a.state_key) - rank(b.state_key) || String(a.name).localeCompare(String(b.name));
   });
@@ -104,9 +94,21 @@ function ctVisible(rows) {
 
 function ctHostOptions() {
   const map = new Map();
-  (CT_INVENTORIES || []).forEach(inv => {
-    map.set(inv.host_id, inv.host_name || inv.host_id);
+  const add = (id, name) => {
+    id = String(id || "").trim();
+    if (!id || map.has(id)) return;
+    map.set(id, String(name || id));
+  };
+  try {
+    const hosts = (typeof LAST_HOSTS !== "undefined" && Array.isArray(LAST_HOSTS) && LAST_HOSTS.length)
+      ? LAST_HOSTS
+      : (Array.isArray(window._cachedHosts) ? window._cachedHosts : []);
+    hosts.forEach(h => add(h && h.id, (h && (h.hostname || h.name)) || ""));
+  } catch (_) {}
+  (CT_ITEMS || []).forEach(c => {
+    add(c.host_id, c.host_name || c.host_id);
   });
+  if (CT_FILTER.host) add(CT_FILTER.host, CT_FILTER.host);
   return [...map.entries()];
 }
 
@@ -120,19 +122,84 @@ function ctStats(rows) {
   return { total: rows.length, running, stopped, other, hosts: ctHostOptions().length };
 }
 
-async function loadContainersPanel() {
+function ctRefocus(id) {
+  if (!id) return;
+  const el = $(id);
+  if (!el) return;
+  try {
+    el.focus();
+    if (typeof el.setSelectionRange === "function") el.setSelectionRange(el.value.length, el.value.length);
+  } catch (_) {}
+}
+
+async function loadContainersPanel(opts) {
+  opts = opts || {};
   const panel = $("containersPanel");
   if (!panel) return;
-  panel.innerHTML = `<div class="ct-shell"><div class="loading-dots">${ctEsc(ctT("ui.loading", "加载中…"))}</div></div>`;
+  if (!opts.keepPanel) panel.innerHTML = `<div class="ct-shell"><div class="loading-dots">${ctEsc(ctT("ui.loading", "加载中…"))}</div></div>`;
   try {
-    const r = await fetch(`${API}/containers/list`, { credentials: "same-origin" });
+    const limit = CT_PAGE.limit || 50;
+    const offset = CT_PAGE.offset || 0;
+    const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    if (CT_FILTER.host) params.set("host", CT_FILTER.host);
+    if (CT_FILTER.state && CT_FILTER.state !== "all") params.set("status", CT_FILTER.state);
+    if (CT_FILTER.q) params.set("q", CT_FILTER.q);
+    if (CT_FILTER.compose) params.set("compose_project", CT_FILTER.compose);
+    const r = await fetch(`${API}/containers/list?${params}`, { credentials: "same-origin" });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
-    CT_INVENTORIES = j.inventories || [];
+    CT_ITEMS = Array.isArray(j.items) ? j.items : [];
+    CT_PROJECTS = Array.isArray(j.compose_projects) ? j.compose_projects.slice() : [];
+    if (CT_FILTER.compose && !CT_PROJECTS.includes(CT_FILTER.compose)) CT_PROJECTS.push(CT_FILTER.compose);
+    CT_PROJECTS.sort((a, b) => String(a).localeCompare(String(b)));
+    CT_PAGE.total = Number.isFinite(Number(j.total)) ? Number(j.total) : CT_ITEMS.length;
+    CT_PAGE.limit = Number.isFinite(Number(j.limit)) && Number(j.limit) > 0 ? Number(j.limit) : limit;
+    CT_PAGE.offset = Number.isFinite(Number(j.offset)) && Number(j.offset) >= 0 ? Number(j.offset) : offset;
+    if (CT_PAGE.total > 0 && CT_PAGE.offset >= CT_PAGE.total) {
+      const lim = CT_PAGE.limit || 50;
+      CT_PAGE.offset = Math.max(0, Math.floor((CT_PAGE.total - 1) / lim) * lim);
+      return loadContainersPanel(opts);
+    }
     renderContainersPanel();
+    ctRefocus(opts.focusId);
   } catch (e) {
     panel.innerHTML = `<div class="empty-state"><h4>${ctEsc(ctT("containers.load_failed", "加载失败"))}</h4><p>${ctEsc(e.message || e)}</p></div>`;
   }
+}
+
+function ctResetAndLoad(opts) {
+  opts = opts || {};
+  CT_PAGE.offset = 0;
+  if (opts.debounce) {
+    if (CT_FILTER_TIMER) clearTimeout(CT_FILTER_TIMER);
+    CT_FILTER_TIMER = setTimeout(() => {
+      CT_FILTER_TIMER = null;
+      loadContainersPanel(opts);
+    }, opts.debounce);
+    return;
+  }
+  loadContainersPanel(opts);
+}
+
+function ctPagerHTML() {
+  const total = CT_PAGE.total || 0;
+  const limit = CT_PAGE.limit || 50;
+  const offset = Math.min(CT_PAGE.offset || 0, total);
+  const start = total ? offset + 1 : 0;
+  const end = Math.min(offset + limit, total);
+  if (!total) return "";
+  const prevDisabled = offset <= 0 ? " disabled" : "";
+  const nextDisabled = offset + limit >= total ? " disabled" : "";
+  const pages = Math.max(1, Math.ceil(total / limit));
+  const page = Math.floor(offset / limit) + 1;
+  return `<div class="rtx-toolbar ct-pager" style="justify-content:flex-end;margin-top:10px;gap:8px;align-items:center">
+    <span class="pinfo mono">${ctEsc(ctT("containers.pager_range", "第 {start}–{end} 条 / 共 {total} 条")
+      .replace("{start}", String(start)).replace("{end}", String(end)).replace("{total}", String(total)))}</span>
+    <span class="pinfo mono">${ctEsc(ctT("containers.pager_page", "第 {page}/{pages} 页")
+      .replace("{page}", String(page)).replace("{pages}", String(pages)))}</span>
+    <button type="button" class="btn sm" data-ct-page="prev"${prevDisabled}>${ctEsc(ctT("ui.prev", "上一页"))}</button>
+    <button type="button" class="btn sm" data-ct-page="next"${nextDisabled}>${ctEsc(ctT("ui.next", "下一页"))}</button>
+  </div>`;
 }
 
 function renderContainersPanel() {
@@ -140,17 +207,16 @@ function renderContainersPanel() {
   if (!panel) return;
   const all = ctFlatRows();
   const visible = ctVisible(all);
-  const stats = ctStats(all);
-  const visStats = ctStats(visible);
+  const pageStats = ctStats(visible);
   const allowWrite = typeof canWrite === "function" && canWrite();
   const hostOpts = ctHostOptions();
 
   let html = `<div class="ct-shell">`;
   html += `<div class="sec-stat-row">
-    <div class="sec-stat"><div class="sec-stat-n">${stats.total}</div><div class="sec-stat-l">${ctEsc(ctT("containers.stat_total", "容器总数"))}</div></div>
-    <div class="sec-stat"><div class="sec-stat-n" style="color:var(--ok)">${stats.running}</div><div class="sec-stat-l">${ctEsc(ctT("containers.st_running", "运行中"))}</div></div>
-    <div class="sec-stat"><div class="sec-stat-n high">${stats.stopped}</div><div class="sec-stat-l">${ctEsc(ctT("containers.st_stopped", "已停止"))}</div></div>
-    <div class="sec-stat"><div class="sec-stat-n">${stats.hosts}</div><div class="sec-stat-l">${ctEsc(ctT("containers.stat_hosts", "主机数"))}</div></div>
+    <div class="sec-stat"><div class="sec-stat-n">${CT_PAGE.total || 0}</div><div class="sec-stat-l">${ctEsc(ctT("containers.stat_total", "容器总数"))}</div></div>
+    <div class="sec-stat"><div class="sec-stat-n" style="color:var(--ok)">${pageStats.running}</div><div class="sec-stat-l">${ctEsc(ctT("containers.st_running_page", "本页运行"))}</div></div>
+    <div class="sec-stat"><div class="sec-stat-n high">${pageStats.stopped}</div><div class="sec-stat-l">${ctEsc(ctT("containers.st_stopped_page", "本页停止"))}</div></div>
+    <div class="sec-stat"><div class="sec-stat-n">${hostOpts.length}</div><div class="sec-stat-l">${ctEsc(ctT("containers.stat_hosts", "主机数"))}</div></div>
   </div>`;
 
   html += `<div class="rtx-toolbar ct-toolbar">
@@ -165,23 +231,28 @@ function renderContainersPanel() {
       <option value="stopped"${CT_FILTER.state === "stopped" ? " selected" : ""}>${ctEsc(ctT("containers.st_stopped", "已停止"))}</option>
       <option value="other"${CT_FILTER.state === "other" ? " selected" : ""}>${ctEsc(ctT("containers.st_other", "其他"))}</option>
     </select></div>
-    <span class="rtx-count tag">${visStats.total} / ${stats.total}</span>
+    <div class="select-wrap"><select id="ctComposeFilter">
+      <option value="">${ctEsc(ctT("containers.filter_all_compose", "全部 Compose 项目"))}</option>
+      ${CT_PROJECTS.map(p => `<option value="${ctEsc(p)}"${CT_FILTER.compose === p ? " selected" : ""}>${ctEsc(p)}</option>`).join("")}
+    </select></div>
+    <span class="rtx-count tag">${ctEsc(ctT("containers.page_count", "本页"))} ${visible.length} / ${CT_PAGE.total || 0}</span>
     <button type="button" class="btn sm" id="ctRefreshBtn" style="margin-left:auto">${ctEsc(ctT("ui.refresh", "刷新"))}</button>
   </div>`;
 
   html += `<div class="ct-layout">
     <div class="ct-main cfg-panel ct-card">`;
 
-  if (!all.length) {
+  if (!all.length && !(CT_FILTER.host || CT_FILTER.q || CT_FILTER.compose || CT_FILTER.state !== "all")) {
     html += `<div class="empty-state"><h4>${ctEsc(ctT("containers.empty_title", "暂无容器数据"))}</h4>
       <p>${ctEsc(ctT("containers.empty", "请确认主机已安装 Docker/Podman，并更新 Agent 后刷新。"))}</p></div>`;
   } else if (!visible.length) {
     html += `<div class="empty-state"><h4>${ctEsc(ctT("containers.no_match", "无匹配结果"))}</h4>
-      <p>${ctEsc(ctT("containers.no_match_hint", "试试清空搜索，或切换主机/状态筛选。"))}</p></div>`;
+      <p>${ctEsc(ctT("containers.no_match_hint", "试试清空搜索，或切换主机/状态/Compose 筛选。"))}</p></div>`;
   } else {
     html += `<div class="nf-table-wrap ct-table-wrap"><table class="data-table ct-table"><thead><tr>
       <th>${ctEsc(ctT("containers.col_host", "主机"))}</th>
       <th>${ctEsc(ctT("containers.col_name", "名称"))}</th>
+      <th>${ctEsc(ctT("containers.col_compose", "Compose"))}</th>
       <th>${ctEsc(ctT("containers.col_image", "镜像"))}</th>
       <th style="width:96px">${ctEsc(ctT("containers.col_state", "状态"))}</th>
       <th>${ctEsc(ctT("containers.col_ports", "端口"))}</th>
@@ -190,6 +261,9 @@ function renderContainersPanel() {
     visible.forEach(r => {
       const active = CT_SELECTED && CT_SELECTED.host_id === r.host_id && CT_SELECTED.id === r.id ? " active-row" : "";
       const acts = [];
+      const composeCell = r.compose_project
+        ? `<div class="mono">${ctEsc(r.compose_project)}</div>${r.compose_service ? `<div class="muted" style="font-size:11px">${ctEsc(r.compose_service)}</div>` : ""}`
+        : `<span class="muted">—</span>`;
       if (allowWrite) {
         if (r.state_key !== "running") {
           acts.push(`<button type="button" class="btn sm primary" data-ct-act="start" data-host="${ctEsc(r.host_id)}" data-id="${ctEsc(r.id)}" data-name="${ctEsc(r.name)}">${ctEsc(ctT("containers.act_start", "启动"))}</button>`);
@@ -203,6 +277,7 @@ function renderContainersPanel() {
       html += `<tr class="ct-row${active}" data-ct-row="${ctEsc(r.host_id)}|${ctEsc(r.id)}">
         <td><div class="ct-host">${ctEsc(r.host_name)}</div>${r.runtime ? `<div class="mono muted ct-runtime">${ctEsc(r.runtime)}</div>` : ""}</td>
         <td><div class="ct-name mono" title="${ctEsc(r.id)}">${ctEsc(r.name)}</div></td>
+        <td>${composeCell}</td>
         <td><div class="ct-image mono" title="${ctEsc(r.image)}">${ctEsc(r.image || "—")}</div></td>
         <td>${ctStateBadge(r)}</td>
         <td>${ctPortChips(r.ports)}</td>
@@ -211,6 +286,7 @@ function renderContainersPanel() {
     });
     html += `</tbody></table></div>`;
   }
+  html += ctPagerHTML();
   html += `</div>
     <div class="ct-side"><div id="ctDetail" class="cfg-panel ct-card ct-detail"></div></div>
   </div>
@@ -294,6 +370,7 @@ function ctPaintDetail(row) {
     <div class="ct-kv">
       <div><span>${ctEsc(ctT("containers.col_image", "镜像"))}</span><code class="mono">${ctEsc(row.image || "—")}</code></div>
       <div><span>${ctEsc(ctT("containers.col_host", "主机"))}</span><code class="mono">${ctEsc(row.host_name)}</code></div>
+      <div><span>${ctEsc(ctT("containers.col_compose", "Compose"))}</span><code class="mono">${ctEsc(row.compose_project || "—")}${row.compose_service ? " / " + ctEsc(row.compose_service) : ""}</code></div>
       <div><span>${ctEsc(ctT("containers.col_state", "状态"))}</span>${ctStateBadge(row)} <span class="muted mono">${ctEsc(row.status || row.state || "")}</span></div>
       <div><span>${ctEsc(ctT("containers.runtime", "运行时"))}</span><code class="mono">${ctEsc(row.runtime || "—")}</code></div>
       <div><span>${ctEsc(ctT("containers.created", "创建时间"))}</span><code class="mono">${ctEsc(row.created || "—")}</code></div>
@@ -307,15 +384,15 @@ function ctWire(panel) {
   if (search) {
     search.addEventListener("input", () => {
       CT_FILTER.q = search.value || "";
-      renderContainersPanel();
-      const el = $("ctSearch");
-      if (el) { el.focus(); try { el.setSelectionRange(el.value.length, el.value.length); } catch (_) {} }
+      ctResetAndLoad({ keepPanel: true, focusId: "ctSearch", debounce: 220 });
     });
   }
   const hostSel = $("ctHostFilter");
-  if (hostSel) hostSel.addEventListener("change", () => { CT_FILTER.host = hostSel.value || ""; renderContainersPanel(); });
+  if (hostSel) hostSel.addEventListener("change", () => { CT_FILTER.host = hostSel.value || ""; ctResetAndLoad({ keepPanel: true }); });
   const stateSel = $("ctStateFilter");
-  if (stateSel) stateSel.addEventListener("change", () => { CT_FILTER.state = stateSel.value || "all"; renderContainersPanel(); });
+  if (stateSel) stateSel.addEventListener("change", () => { CT_FILTER.state = stateSel.value || "all"; ctResetAndLoad({ keepPanel: true }); });
+  const composeSel = $("ctComposeFilter");
+  if (composeSel) composeSel.addEventListener("change", () => { CT_FILTER.compose = composeSel.value || ""; ctResetAndLoad({ keepPanel: true }); });
   $("ctRefreshBtn")?.addEventListener("click", () => loadContainersPanel());
 
   // 日志弹层在 panel 外静态挂载：本地再绑一次，避免依赖全局委托时序
@@ -361,6 +438,18 @@ async function ctOnClick(ev) {
     return;
   }
   if (!panel.contains(t)) return;
+
+  const pageBtn = t.closest("[data-ct-page]");
+  if (pageBtn) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    const dir = pageBtn.getAttribute("data-ct-page");
+    const limit = CT_PAGE.limit || 50;
+    if (dir === "prev") CT_PAGE.offset = Math.max(0, (CT_PAGE.offset || 0) - limit);
+    if (dir === "next" && (CT_PAGE.offset || 0) + limit < (CT_PAGE.total || 0)) CT_PAGE.offset = (CT_PAGE.offset || 0) + limit;
+    loadContainersPanel();
+    return;
+  }
 
   const actBtn = t.closest("[data-ct-act]");
   if (actBtn) {

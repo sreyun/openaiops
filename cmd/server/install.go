@@ -22,16 +22,16 @@ type installAuditOptions struct {
 	ContentAuditMaxEventsPerMin int
 }
 
-// renderScript injects the server URL / token / category / serversJSON into an
+// renderScript injects the server URL / token / category / folder_id / serversJSON into an
 // install template. Placeholders are used (not fmt) so the shell/PowerShell '%'
 // and '$' characters pass through untouched. serversJSON is a pre-validated JSON
 // array string (e.g. [{"server":"...","token":"..."}]); when empty the template
 // falls back to the single server+token config.
-func renderScript(tmpl, server, token, category, serversJSON, logPaths string) string {
-	return renderScriptWithAudit(tmpl, server, token, category, serversJSON, logPaths, installAuditOptions{})
+func renderScript(tmpl, server, token, category, folderID, serversJSON, logPaths string) string {
+	return renderScriptWithAudit(tmpl, server, token, category, folderID, serversJSON, logPaths, installAuditOptions{})
 }
 
-func renderScriptWithAudit(tmpl, server, token, category, serversJSON, logPaths string, audit installAuditOptions) string {
+func renderScriptWithAudit(tmpl, server, token, category, folderID, serversJSON, logPaths string, audit installAuditOptions) string {
 	if strings.TrimSpace(logPaths) == "" {
 		logPaths = "[]" // 必须是合法 JSON 数组（同时是合法 YAML flow 序列），否则生成的 config.yaml 语法错误
 	}
@@ -57,11 +57,12 @@ func renderScriptWithAudit(tmpl, server, token, category, serversJSON, logPaths 
 		audit.ContentAuditMaxEventsPerMin = 2000
 	}
 	windows := strings.Contains(tmpl, "$ErrorActionPreference")
-	cfgB64 := installConfigB64(server, token, category, serversJSON, logPaths, audit, windows)
+	cfgB64 := installConfigB64(server, token, category, folderID, serversJSON, logPaths, audit, windows)
 	return strings.NewReplacer(
 		"__SERVER__", server,
 		"__TOKEN__", token,
 		"__CATEGORY__", category,
+		"__FOLDER_ID__", folderID,
 		"__SERVERS_JSON__", serversJSON,
 		"__LOG_PATHS__", logPaths,
 		"__CONFIG_B64__", cfgB64,
@@ -116,13 +117,22 @@ func sanitizeLogPaths(raw string) string {
 	return string(b)
 }
 
+const (
+	maxServersJSONBytes   = 8192
+	maxServersJSONEntries = 8
+)
+
 // sanitizeServersJSON parses a JSON array of {server,token} objects, sanitizes
 // each URL, and re-serializes as compact JSON. Returns "" if input is empty or
 // invalid — the install template then falls back to single-server config.
+// Bounded to avoid oversized public install URLs / generated scripts.
 func sanitizeServersJSON(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ""
+	}
+	if len(raw) > maxServersJSONBytes {
+		raw = raw[:maxServersJSONBytes]
 	}
 	var entries []struct {
 		Server string `json:"server"`
@@ -131,16 +141,25 @@ func sanitizeServersJSON(raw string) string {
 	if json.Unmarshal([]byte(raw), &entries) != nil || len(entries) == 0 {
 		return ""
 	}
+	if len(entries) > maxServersJSONEntries {
+		entries = entries[:maxServersJSONEntries]
+	}
 	type clean struct {
 		Server string `json:"server"`
 		Token  string `json:"token,omitempty"`
 	}
 	out := make([]clean, 0, len(entries))
+	seen := map[string]bool{}
 	for _, e := range entries {
 		s := sanitizeServerURL(e.Server)
 		if s == "" {
 			continue
 		}
+		key := strings.ToLower(strings.TrimRight(s, "/"))
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
 		out = append(out, clean{Server: s, Token: sanitizeToken(e.Token)})
 	}
 	if len(out) == 0 {
@@ -281,6 +300,7 @@ set -e
 SERVER="__SERVER__"
 TOKEN="__TOKEN__"
 CATEGORY="__CATEGORY__"
+FOLDER_ID="__FOLDER_ID__"
 if [ "$(id -u)" = "0" ]; then DIR="${AIOPS_DIR:-/opt/aiops-agent}"; else DIR="${AIOPS_DIR:-$HOME/.aiops-agent}"; fi
 
 OS=$(uname -s)
@@ -826,6 +846,7 @@ try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::S
 $Server   = "__SERVER__"
 $Token    = "__TOKEN__"
 $Category = "__CATEGORY__"
+$FolderID = "__FOLDER_ID__"
 $LogPaths = '__LOG_PATHS__'
 $ServersJson = '__SERVERS_JSON__'
 $CaptureBackend = "__CAPTURE_BACKEND__"
@@ -853,6 +874,7 @@ function Test-AiopsAppLockerPresent {
 function Request-AiopsElevatedInstall([string]$Reason) {
   $q = "token=" + [Uri]::EscapeDataString([string]$Token)
   if ($Category) { $q += "&category=" + [Uri]::EscapeDataString([string]$Category) }
+  if ($FolderID) { $q += "&folder_id=" + [Uri]::EscapeDataString([string]$FolderID) }
   if ($LogPaths -and $LogPaths -ne "[]") { $q += "&log_paths=" + [Uri]::EscapeDataString([string]$LogPaths) }
   if ($ServersJson) { $q += "&servers_json=" + [Uri]::EscapeDataString([string]$ServersJson) }
   if ($CaptureBackend) { $q += "&capture_backend=" + [Uri]::EscapeDataString([string]$CaptureBackend) }

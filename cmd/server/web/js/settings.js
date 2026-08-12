@@ -441,7 +441,7 @@ let INSTALL = { server_url: "", token: "" };
 let CUR_OS = "linux";
 let RELAY_MODE = false;
 let MULTI_SERVER_MODE = false;
-let TOKEN_REVEALED = false; // Token 脱敏状态
+let TOKEN_REVEALED = true; // 默认明文：脱敏展示会导致用户复制到无法安装的命令
 // Windows Server 2012 R2 / 2016 default to TLS 1.0. The install.ps1 template enables
 // TLS 1.2 internally, but that runs too late: the outer `irm` that DOWNLOADS the
 // script fails first against a TLS1.2-only HTTPS server ("未能创建 SSL/TLS 安全通道").
@@ -515,16 +515,90 @@ function renderInstallTokenMeta(info) {
   if ($("installTokenExpiresAt")) $("installTokenExpiresAt").value = unixToDatetimeLocal(info.expires_at || 0);
   syncInstallTokenPolicyBadge(info);
 }
+async function populateInstallCategoryList() {
+  const sel = $("installFolderId");
+  if (!sel) return;
+  const prev = sel.value;
+  try {
+    const data = await fetch(`${API}/host-folders`).then((r) => r.json());
+    const flat = typeof flattenHostFolders === "function"
+      ? flattenHostFolders(data.folders || [])
+      : [];
+    sel.innerHTML = "";
+    const empty = document.createElement("option");
+    empty.value = "";
+    empty.textContent = I18N.t("install.category_placeholder", "不分组（可选任意节点）");
+    sel.appendChild(empty);
+    for (const n of flat) {
+      const opt = document.createElement("option");
+      opt.value = n.id;
+      opt.textContent = n.path;
+      opt.dataset.name = n.name || "";
+      sel.appendChild(opt);
+    }
+    if (prev && [...sel.options].some((o) => o.value === prev)) sel.value = prev;
+  } catch (_) {
+    /* leave select with empty option */
+  }
+  syncInstallNewFolderBtn();
+}
+function syncInstallNewFolderBtn() {
+  const btn = $("installNewFolderBtn");
+  const sel = $("installFolderId");
+  if (!btn || !sel) return;
+  btn.textContent = sel.value
+    ? I18N.t("install.new_child_folder_btn", "新建子分组")
+    : I18N.t("install.new_root_folder_btn", "新建一级分组");
+}
+function installFolderQueryParts() {
+  const sel = $("installFolderId");
+  const fid = (sel && sel.value) || "";
+  const opt = sel && sel.selectedOptions && sel.selectedOptions[0];
+  const cat = (opt && (opt.dataset.name || "").trim()) || "";
+  let q = "";
+  if (fid) q += "&folder_id=" + encodeURIComponent(fid);
+  if (cat) q += "&category=" + encodeURIComponent(cat);
+  return q;
+}
+async function createInstallChildFolder() {
+  const sel = $("installFolderId");
+  const parent = (sel && sel.value) || "";
+  const promptMsg = parent
+    ? I18N.t("install.new_child_folder_prompt", "在当前所选节点下新建子分组名称")
+    : I18N.t("install.new_root_folder_prompt", "新建一级分组名称");
+  const name = (prompt(promptMsg) || "").trim();
+  if (!name) return;
+  try {
+    const r = await fetch(`${API}/host-folders`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({ name, parent_id: parent }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || r.statusText);
+    await populateInstallCategoryList();
+    if (data.folder && data.folder.id && sel) {
+      sel.value = data.folder.id;
+      syncInstallNewFolderBtn();
+    }
+    renderInstallCmd();
+    toast(I18N.t("install.folder_created", "分组已创建"), "ok");
+  } catch (e) {
+    toast(I18N.t("install.folder_create_failed", "创建分组失败：") + e, "err");
+  }
+}
 async function openInstall() {
   try {
     INSTALL = await fetch(`${API}/install/info`).then(r => r.json());
-    TOKEN_REVEALED = false;
+    TOKEN_REVEALED = true;
     updateTokenDisplay();
     renderInstallTokenMeta(INSTALL);
     RELAY_MODE = false;
     MULTI_SERVER_MODE = false;
     const normalRadio = document.querySelector('input[name="installMode"][value="normal"]');
     if (normalRadio) normalRadio.checked = true;
+    await populateInstallCategoryList();
     renderInstallCmd();
     $("installMask").classList.add("show");
     collapseInstallTokenPolicy();
@@ -602,13 +676,36 @@ async function saveAgentAutoUpdatePolicy() {
 function normalizeInstallServerURL(u) {
   return String(u || "").trim().replace(/\/+$/, "").toLowerCase();
 }
+function normalizeExtraServerURL(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return "";
+  if (/^https?:\/\//i.test(s)) return s.replace(/\/+$/, "");
+  if (/[/?#@\s]/.test(s)) return s;
+  if (s.startsWith("[")) {
+    const m = s.match(/^(\[[0-9a-fA-F:.]+\])(?::(\d+))?$/i);
+    if (!m) return s;
+    return m[2] ? ("http://" + m[1] + ":" + m[2]) : ("http://" + m[1]);
+  }
+  if (/^[0-9a-fA-F:]+$/i.test(s) && (s.includes("::") || ((s.match(/:/g) || []).length >= 2))) {
+    return "http://[" + s + "]";
+  }
+  if (/^[\w.-]+(?::\d+)?$/.test(s)) return ("http://" + s).replace(/\/+$/, "");
+  return s;
+}
+function parseListenPort(listen) {
+  const s = String(listen || "").trim();
+  const m = s.match(/:(\d+)\s*$/) || s.match(/^(\d+)$/);
+  const p = m ? parseInt(m[1], 10) : 0;
+  if (!p || p < 1 || p > 65535) return 0;
+  return p;
+}
 function parseMultiServerExtras() {
   const text = ($("multiServerList") || {}).value || "";
   const lines = text.split("\n").map(l => l.trim()).filter(l => l);
   const servers = [];
   for (const line of lines) {
     const parts = line.split(/\s+/);
-    const server = parts[0];
+    const server = normalizeExtraServerURL(parts[0]);
     const token = parts.slice(1).join(" ") || "";
     if (server) servers.push({ server, token });
   }
@@ -620,34 +717,58 @@ function buildMultiServerTargets() {
   const token = INSTALL.token || "";
   const out = [{ server: primary, token }];
   const seen = new Set([normalizeInstallServerURL(primary)]);
+  const maxTargets = 8;
   for (const e of parseMultiServerExtras()) {
+    if (out.length >= maxTargets) break;
     const key = normalizeInstallServerURL(e.server);
-    if (!key || seen.has(key)) continue;
+    if (!key || seen.has(key) || !validHTTPURL(e.server)) continue;
     seen.add(key);
     out.push({ server: e.server, token: e.token || "" });
   }
   return out;
 }
 function formatRelayBase(ip, port) {
-  const host = String(ip || "").trim() || I18N.t("install.gateway_ip");
-  let p = parseInt(port, 10);
-  if (!p || p < 1 || p > 65535) p = 8529;
-  // Bracket IPv6 literals (contain ':') so http://[addr]:port is valid.
-  if (host.includes(":") && !host.startsWith("[")) {
-    return `http://[${host}]:${p}`;
-  }
+  const host = String(ip || "").trim();
+  const p = typeof port === "number" ? port : parseListenPort(port);
+  if (!host || !p || !validRelayHost(host)) return "";
+  if (host.startsWith("[")) return `http://${host}:${p}`;
+  if (host.includes(":")) return `http://[${host}]:${p}`;
   return `http://${host}:${p}`;
 }
 function updateInstallModeHint() {
   const el = $("installModeHint");
   if (!el) return;
+  const exclusive = I18N.t("install.mode_exclusive_hint", "中继与多服务端互斥，请勿在同一 Agent 上同时配置。");
   if (RELAY_MODE) {
-    el.textContent = I18N.t("install.relay_hint", "仅一台机器能联网时使用");
+    el.textContent = I18N.t("install.relay_hint", "仅一台机器能联网时使用") + " · " + exclusive;
   } else if (MULTI_SERVER_MODE) {
-    el.textContent = I18N.t("install.multi_server_hint", "单 Agent 同时向多个服务端推送");
+    el.textContent = I18N.t("install.multi_server_hint", "单 Agent 同时向多个服务端推送") + " · " + exclusive;
   } else {
     el.textContent = I18N.t("install.mode_normal_desc", "直连本面板安装");
   }
+}
+function validHTTPURL(value) {
+  try {
+    const parsed = new URL(String(value || "").trim());
+    return (parsed.protocol === "http:" || parsed.protocol === "https:") && !!parsed.host && !parsed.username && !parsed.password;
+  } catch (_) {
+    return false;
+  }
+}
+function validRelayHost(value) {
+  const host = String(value || "").trim();
+  if (!host || /\s|[/?#@]/.test(host)) return false;
+  if (host.startsWith("[")) return /^\[[0-9a-fA-F:.]+\]$/.test(host);
+  if (host.includes(":")) {
+    const colons = (host.match(/:/g) || []).length;
+    return /^[0-9a-fA-F:]+$/i.test(host) && (host.includes("::") || colons >= 2);
+  }
+  return /^[A-Za-z0-9._-]+$/.test(host);
+}
+function maskInstallCmd(cmd) {
+  const t = (INSTALL && INSTALL.token) || "";
+  if (!t || TOKEN_REVEALED) return cmd;
+  return String(cmd || "").split(t).join("••••••••");
 }
 function renderInstallCmd() {
   // Multi-server section visibility
@@ -667,8 +788,7 @@ function renderInstallCmd() {
   $("relaySection").style.display = "none";
   const server = INSTALL.server_url || location.origin;
   const token = INSTALL.token || "";
-  const cat = $("installCategory").value.trim();
-  let q = "token=" + encodeURIComponent(token) + (cat ? "&category=" + encodeURIComponent(cat) : "");
+  let q = "token=" + encodeURIComponent(token) + installFolderQueryParts();
   // 日志采集（可选）：把用户填写的路径（换行/逗号分隔）拼进安装命令，服务端写入 config.json 的 log_paths
   const lp = (($("installLogPaths") && $("installLogPaths").value) || "").trim();
   if (lp) q += "&log_paths=" + encodeURIComponent(lp);
@@ -702,17 +822,27 @@ function renderInstallCmd() {
   // Multi-server: always include current panel + extras as servers_json.
   let cmd, label, hint;
   const multiWarn = $("multiServerWarn");
+  const multiUrlWarn = $("multiServerUrlWarn");
   let multiReady = true;
+  let multiValid = true;
   if (MULTI_SERVER_MODE) {
     const targets = buildMultiServerTargets();
     multiReady = targets.length >= 2;
+    const extras = parseMultiServerExtras();
+    multiValid = extras.every((t) => validHTTPURL(t.server));
     if (multiWarn) multiWarn.style.display = multiReady ? "none" : "";
+    if (multiUrlWarn) multiUrlWarn.style.display = multiReady && !multiValid ? "" : "none";
     q += "&servers_json=" + encodeURIComponent(JSON.stringify(targets));
-  } else if (multiWarn) {
-    multiWarn.style.display = "none";
+  } else {
+    if (multiWarn) multiWarn.style.display = "none";
+    if (multiUrlWarn) multiUrlWarn.style.display = "none";
   }
   const multiHint = MULTI_SERVER_MODE
-    ? (multiReady ? I18N.t("install.multi_desc", "一台 Agent 同时向多个服务端推送") : I18N.t("install.multi_need_two"))
+    ? (multiReady
+      ? (multiValid
+        ? I18N.t("install.multi_desc", "一台 Agent 同时向多个服务端推送")
+        : I18N.t("install.invalid_extra_server", "额外服务端 URL 无效，请使用 http(s)://host[:port]"))
+      : I18N.t("install.multi_need_two"))
     : "";
   if (CUR_OS === "windows") {
     cmd = `${PS_TLS12}irm "${server}/install.ps1?${q}" | iex`;
@@ -734,11 +864,14 @@ function renderInstallCmd() {
       : I18N.t("install.linux_cmd");
     hint = multiHint || I18N.t("install.linux_desc");
   }
-  $("installCmd").textContent = cmd;
+  $("installCmd").textContent = maskInstallCmd(cmd);
   $("cmdLabel").textContent = label;
   $("cmdHint").textContent = hint;
   const copyBtn = $("copyCmdBtn");
-  if (copyBtn) copyBtn.disabled = MULTI_SERVER_MODE && !multiReady;
+  if (copyBtn) {
+    copyBtn.disabled = MULTI_SERVER_MODE && (!multiReady || !multiValid);
+    copyBtn.dataset.rawCmd = cmd;
+  }
   $("uninstallCmd").textContent = (CUR_OS === "windows")
     ? `${PS_TLS12}irm "${server}/uninstall.ps1" | iex`
     : `curl -fsSL "${server}/uninstall.sh" | sh`;
@@ -746,34 +879,48 @@ function renderInstallCmd() {
 function renderRelayCmd() {
   const server = INSTALL.server_url || location.origin;
   const token = INSTALL.token || "";
-  const cat = $("installCategory").value.trim();
-  let q = "token=" + encodeURIComponent(token) + (cat ? "&category=" + encodeURIComponent(cat) : "");
-  // Internal agents (via relay) still accept log_paths / optional audit query params.
+  let q = "token=" + encodeURIComponent(token) + installFolderQueryParts();
+  // Internal agents (via relay) still accept log_paths; audit stays off in relay mode.
   const lp = (($("installLogPaths") && $("installLogPaths").value) || "").trim();
   if (lp) q += "&log_paths=" + encodeURIComponent(lp);
-  const gwIP = (($("relayGatewayIP") || {}).value || "").trim() || I18N.t("install.gateway_ip");
-  const port = (($("relayListenPort") || {}).value || "8529").trim() || "8529";
-  const relay = formatRelayBase(gwIP, port);
-  const listenEnv = `RELAY_LISTEN=:${port}`;
-  let gatewayCmd, internalCmd;
-  if (CUR_OS === "windows") {
-    gatewayCmd = `${PS_TLS12}$env:RELAY_LISTEN=':${port}'; irm "${server}/install-relay.ps1" | iex`;
-    internalCmd = `${PS_TLS12}irm "${relay}/install.ps1?${q}" | iex`;
-  } else if (CUR_OS === "macos") {
-    gatewayCmd = `curl -fsSL "${server}/install-relay.sh" | env ${listenEnv} sh`;
-    internalCmd = `curl -fsSL "${relay}/install.sh?${q}" | sh`;
-  } else {
-    // sudo -E keeps AIOPS_RELAY_SECRET; env sets listen port for the install script.
-    gatewayCmd = `curl -fsSL "${server}/install-relay.sh" | sudo -E env ${listenEnv} sh`;
-    internalCmd = `curl -fsSL "${relay}/install.sh?${q}" | sh`;
+  const gwIP = (($("relayGatewayIP") || {}).value || "").trim();
+  const port = parseListenPort((($("relayListenPort") || {}).value || "8529"));
+  const relayReady = validRelayHost(gwIP) && port > 0;
+  const relay = relayReady ? formatRelayBase(gwIP, port) : "";
+  const listenEnv = port ? `RELAY_LISTEN=:${port}` : "";
+  let gatewayCmd = "", internalCmd = "";
+  if (port) {
+    if (CUR_OS === "windows") {
+      gatewayCmd = `${PS_TLS12}$env:RELAY_LISTEN=':${port}'; irm "${server}/install-relay.ps1" | iex`;
+      internalCmd = relayReady ? `${PS_TLS12}irm "${relay}/install.ps1?${q}" | iex` : "";
+    } else if (CUR_OS === "macos") {
+      gatewayCmd = `curl -fsSL "${server}/install-relay.sh" | env ${listenEnv} sh`;
+      internalCmd = relayReady ? `curl -fsSL "${relay}/install.sh?${q}" | sh` : "";
+    } else {
+      // sudo -E keeps AIOPS_RELAY_SECRET; env sets listen port for the install script.
+      gatewayCmd = `curl -fsSL "${server}/install-relay.sh" | sudo -E env ${listenEnv} sh`;
+      internalCmd = relayReady ? `curl -fsSL "${relay}/install.sh?${q}" | sh` : "";
+    }
   }
-  $("relayGatewayCmd").textContent = gatewayCmd;
-  $("relayInternalCmd").textContent = internalCmd;
+  $("relayGatewayCmd").textContent = gatewayCmd || I18N.t("install.invalid_port", "请填写有效的监听端口");
+  $("relayInternalCmd").textContent = maskInstallCmd(internalCmd) || I18N.t("install.fill_gateway_first", "请先填写有效的网关内网 IP（灰色提示不会自动填入）");
   const copyBtn = $("copyCmdBtn");
-  if (copyBtn) copyBtn.disabled = false;
-  $("uninstallCmd").textContent = (CUR_OS === "windows")
-    ? `${PS_TLS12}irm "${relay}/uninstall.ps1" | iex`
-    : `curl -fsSL "${relay}/uninstall.sh" | sh`;
+  if (copyBtn) copyBtn.disabled = !relayReady;
+  const copyGw = $("copyRelayGatewayBtn");
+  if (copyGw) {
+    copyGw.disabled = !gatewayCmd;
+    copyGw.dataset.rawCmd = gatewayCmd;
+  }
+  const copyIn = $("copyRelayInternalBtn");
+  if (copyIn) {
+    copyIn.disabled = !relayReady || !internalCmd;
+    copyIn.dataset.rawCmd = internalCmd;
+  }
+  $("uninstallCmd").textContent = !relayReady
+    ? I18N.t("install.fill_gateway_first", "请先填写有效的网关内网 IP")
+    : ((CUR_OS === "windows")
+      ? `${PS_TLS12}irm "${relay}/uninstall.ps1" | iex`
+      : `curl -fsSL "${relay}/uninstall.sh" | sh`);
 }
 async function resetToken() {
   const ok = typeof uiConfirm === "function"
@@ -789,7 +936,7 @@ async function resetToken() {
   try {
     const j = await fetch(`${API}/install/reset-token`, { method: "POST" }).then(r => r.json());
     INSTALL.token = j.token; INSTALL.revoked = false; INSTALL.use_count = 0;
-    TOKEN_REVEALED = false; updateTokenDisplay(); renderInstallTokenMeta(INSTALL); renderInstallCmd();
+    TOKEN_REVEALED = true; updateTokenDisplay(); renderInstallTokenMeta(INSTALL); renderInstallCmd();
     toast(I18N.t("toast.token_reset"), "ok");
   } catch (e) { toast(I18N.t("toast.reset_failed2") + e, "err"); }
 }
