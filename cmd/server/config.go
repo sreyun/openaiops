@@ -1306,6 +1306,10 @@ func (cs *ConfigStore) Set(c ServerConfig) error {
 	c.Brand = cs.cfg.Brand
 	c.TicketSLA = cs.cfg.TicketSLA
 	c.CmdPolicy = cs.cfg.CmdPolicy
+	// CI/CD connections (and their SCM tokens) are managed via /api/v1/cicd/* —
+	// the alert settings form does not round-trip them. Preserve so a settings
+	// save cannot wipe deploy tokens / pipeline integrations.
+	c.CICDConnections = cs.cfg.CICDConnections
 	c.AI = cs.cfg.AI                             // managed via AI config endpoint
 	c.VM = cs.cfg.VM                             // managed via env / storage config
 	c.PostgresDSN = cs.cfg.PostgresDSN           // managed via env / storage config

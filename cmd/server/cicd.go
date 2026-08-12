@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -192,8 +193,12 @@ func (cs *ConfigStore) DeleteCICDConnection(id string) error {
 }
 
 // SetCICDSyncResult records the outcome of the latest poll for the status column.
+// Memory-only: viewer GET /cicd/runs|/overview polls must not rewrite the full
+// config blob (that raced with admin Set and could silently revert unrelated
+// settings). Last sync/error is UI status; connections persist via dedicated CRUD.
 func (cs *ConfigStore) SetCICDSyncResult(id string, errMsg string) {
 	cs.mu.Lock()
+	defer cs.mu.Unlock()
 	for i, c := range cs.cfg.CICDConnections {
 		if c.ID == id {
 			cs.cfg.CICDConnections[i].LastError = errMsg
@@ -201,8 +206,6 @@ func (cs *ConfigStore) SetCICDSyncResult(id string, errMsg string) {
 			break
 		}
 	}
-	cs.mu.Unlock()
-	_ = cs.save()
 }
 
 // ---------------------------------------------------------------------------
@@ -256,6 +259,9 @@ func cicdOwnerRepo(project string) (owner, repo string) {
 // cicdHTTPClient builds a client that trusts the connection's CA bundle. Self-hosted
 // GitLab/Gitee instances routinely sit behind an internal CA, so verification has to
 // be configurable without falling back to "skip everything" by default.
+// Dialer uses ssrfDialControl so cloud metadata / link-local targets are rejected
+// (same baseline as AI/webhook egress); private-network SCM remains allowed unless
+// AIOPS_SSRF_STRICT is on.
 func cicdHTTPClient(c CICDConnection, timeout time.Duration) (*http.Client, error) {
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
 	if c.InsecureSkipTLS {
@@ -268,7 +274,9 @@ func cicdHTTPClient(c CICDConnection, timeout time.Duration) (*http.Client, erro
 		}
 		tlsCfg.RootCAs = pool
 	}
+	d := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second, Control: ssrfDialControl}
 	tr := &http.Transport{
+		DialContext:         d.DialContext,
 		TLSClientConfig:     tlsCfg,
 		TLSHandshakeTimeout: 10 * time.Second,
 		Proxy:               http.ProxyFromEnvironment,

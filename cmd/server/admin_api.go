@@ -63,6 +63,14 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		c.K8sClusters = clusters
 	}
+	if len(c.CICDConnections) > 0 {
+		// Copy before mask — Get() shares the slice backing array with live config.
+		conns := make([]CICDConnection, len(c.CICDConnections))
+		for i, cc := range c.CICDConnections {
+			conns[i] = maskCICDConnection(cc)
+		}
+		c.CICDConnections = conns
+	}
 	// Never expose the password hash/salt or the MFA secret to the browser.
 	c.Account.Salt, c.Account.Hash, c.Account.MFASecret = "", "", ""
 	c.Users = nil // the user list (with hashes) is served via /api/v1/users, not here
