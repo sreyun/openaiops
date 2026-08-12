@@ -151,6 +151,9 @@ func (s *Server) handleHardwareHealth(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "host required"})
 		return
 	}
+	if !s.requireHostAccess(w, r, hostID) {
+		return
+	}
 
 	if s.pg == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"snapshots": []any{}})
@@ -173,6 +176,9 @@ func (s *Server) handleHardwareEvents(w http.ResponseWriter, r *http.Request) {
 	hostID := r.URL.Query().Get("host")
 	if hostID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "host required"})
+		return
+	}
+	if !s.requireHostAccess(w, r, hostID) {
 		return
 	}
 	if s.pg == nil {
@@ -198,6 +204,9 @@ func (s *Server) handleDeleteHardware(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hostID and target required"})
 		return
 	}
+	if !s.requireHostAccess(w, r, hostID) {
+		return
+	}
 	// 从内存中移除
 	s.hw.remove(hostID, target)
 	// 从 PG 中级联删除快照 + 事件 + 变更记录
@@ -218,6 +227,9 @@ func (s *Server) handleHardwareHistory(w http.ResponseWriter, r *http.Request) {
 
 	if hostID == "" || metric == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "host and metric required"})
+		return
+	}
+	if !s.requireHostAccess(w, r, hostID) {
 		return
 	}
 
@@ -274,6 +286,9 @@ func (s *Server) handleNetFlowSummary(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "host required"})
 		return
 	}
+	if !s.requireHostAccess(w, r, hostID) {
+		return
+	}
 
 	from, to := parseTimeRange(rangeStr)
 	if dimension == "" {
@@ -327,6 +342,9 @@ func (s *Server) handleNetFlowIPHistory(w http.ResponseWriter, r *http.Request) 
 	dimension := r.URL.Query().Get("dimension")
 	if hostID == "" || net.ParseIP(ip) == nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "valid host and ip required"})
+		return
+	}
+	if !s.requireHostAccess(w, r, hostID) {
 		return
 	}
 	if dimension != "src_ip" && dimension != "dst_ip" {
@@ -388,6 +406,7 @@ func (s *Server) handleNetFlowHosts(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
+	hosts = s.filterInventoryRows(r, hosts)
 	s.annotateHostNames(hosts)
 	writeJSON(w, http.StatusOK, map[string]any{"hosts": hosts})
 }
@@ -397,6 +416,9 @@ func (s *Server) handleNetFlowFlows(w http.ResponseWriter, r *http.Request) {
 	hostID := r.URL.Query().Get("host")
 	if hostID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "host required"})
+		return
+	}
+	if !s.requireHostAccess(w, r, hostID) {
 		return
 	}
 
@@ -473,6 +495,9 @@ func (s *Server) handleNetFlowPackets(w http.ResponseWriter, r *http.Request) {
 
 	if hostID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "host required"})
+		return
+	}
+	if !s.requireHostAccess(w, r, hostID) {
 		return
 	}
 

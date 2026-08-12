@@ -232,6 +232,15 @@ func (s *Server) handleResourceSearch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	results := s.searchResources(r.URL.Query().Get("q"), limit)
+	if u, ok := s.currentUser(r); ok && u.hostScopeRestricted() && roleRank(u.Role) < roleRank(RoleAdmin) {
+		filtered := results[:0]
+		for _, res := range results {
+			if res.HostID == "" || s.userCanAccessHost(u, res.HostID) {
+				filtered = append(filtered, res)
+			}
+		}
+		results = filtered
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"query":   strings.TrimSpace(r.URL.Query().Get("q")),
 		"count":   len(results),

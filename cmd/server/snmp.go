@@ -275,6 +275,7 @@ func (s *Server) handleSNMPHosts(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
+	hosts = s.filterInventoryRows(r, hosts)
 	s.annotateHostNames(hosts)
 	writeJSON(w, http.StatusOK, map[string]any{"hosts": hosts})
 }
@@ -283,6 +284,9 @@ func (s *Server) handleSNMPList(w http.ResponseWriter, r *http.Request) {
 	hostID := r.URL.Query().Get("host")
 	if hostID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "host required"})
+		return
+	}
+	if !s.requireHostAccess(w, r, hostID) {
 		return
 	}
 	if s.pg == nil {
@@ -307,6 +311,9 @@ func (s *Server) handleDeleteSNMP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hostID and device required"})
 		return
 	}
+	if !s.requireHostAccess(w, r, hostID) {
+		return
+	}
 	s.snmp.remove(hostID, device)
 	if s.pg != nil {
 		s.pg.deleteSNMPSnapshot(hostID, device)
@@ -322,6 +329,9 @@ func (s *Server) handleSNMPTraps(w http.ResponseWriter, r *http.Request) {
 	hostID := r.URL.Query().Get("host")
 	if hostID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "host required"})
+		return
+	}
+	if !s.requireHostAccess(w, r, hostID) {
 		return
 	}
 	if s.pg == nil {
@@ -373,6 +383,9 @@ func (s *Server) handleSNMPInterfaceHistory(w http.ResponseWriter, r *http.Reque
 	ifname := r.URL.Query().Get("ifname")
 	if hostID == "" || (ifindex == "" && ifname == "") {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "host and interface required"})
+		return
+	}
+	if !s.requireHostAccess(w, r, hostID) {
 		return
 	}
 	if !s.vm.enabled() {

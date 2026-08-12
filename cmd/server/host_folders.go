@@ -535,11 +535,11 @@ type folderCountView struct {
 }
 
 func (s *Server) handleGetHostFolders(w http.ResponseWriter, r *http.Request) {
-	hosts := s.store.ListHosts()
-	if s.cfg.ensureHostFoldersMigrated(hosts) {
+	hosts := s.filterHostsForUser(r, s.store.ListHosts())
+	if s.cfg.ensureHostFoldersMigrated(s.store.ListHosts()) {
 		_ = s.cfg.save()
 	}
-	folders, assign := s.cfg.hostFoldersSnapshot()
+	folders, assignAll := s.cfg.hostFoldersSnapshot()
 	paths := folderPathMap(folders)
 	offlineAfter := int64(s.cfg.Thresholds().OfflineAfter.Seconds())
 	now := time.Now().Unix()
@@ -553,11 +553,15 @@ func (s *Server) handleGetHostFolders(w http.ResponseWriter, r *http.Request) {
 	}
 	initCounts(folders)
 
+	// Scoped callers only receive assignments for hosts they may access — the full
+	// assign map would otherwise leak every host_id in the fleet.
+	assign := map[string]string{}
 	for _, h := range hosts {
-		fid := assign[h.ID]
+		fid := assignAll[h.ID]
 		if fid == "" {
 			fid = HostFolderUngroupedID
 		}
+		assign[h.ID] = fid
 		c := counts[fid]
 		if c == nil {
 			c = counts[HostFolderUngroupedID]

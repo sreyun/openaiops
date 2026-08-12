@@ -97,6 +97,30 @@ func (s *Server) findDuplicateHosts() []dupGroupView {
 // handleHostDuplicates lists duplicate host records (same machine, different id).
 func (s *Server) handleHostDuplicates(w http.ResponseWriter, r *http.Request) {
 	groups := s.findDuplicateHosts()
+	u, scoped := s.currentUser(r)
+	if scoped && u.hostScopeRestricted() && roleRank(u.Role) < roleRank(RoleAdmin) {
+		filtered := groups[:0]
+		for _, g := range groups {
+			hosts := g.Hosts[:0]
+			for _, h := range g.Hosts {
+				if s.userCanAccessHost(u, h.ID) {
+					hosts = append(hosts, h)
+				}
+			}
+			if len(hosts) == 0 {
+				continue
+			}
+			g.Hosts = hosts
+			g.Stale = 0
+			for _, h := range hosts {
+				if h.Stale {
+					g.Stale++
+				}
+			}
+			filtered = append(filtered, g)
+		}
+		groups = filtered
+	}
 	stale := 0
 	for _, g := range groups {
 		stale += g.Stale
@@ -114,10 +138,14 @@ func (s *Server) handleHostDuplicates(w http.ResponseWriter, r *http.Request) {
 // 没有指纹的主机、组里唯一的主机，一律不碰。
 func (s *Server) handleCleanupDuplicates(w http.ResponseWriter, r *http.Request) {
 	groups := s.findDuplicateHosts()
+	u, _ := s.currentUser(r)
 	var deleted []string
 	for _, g := range groups {
 		for _, h := range g.Hosts {
 			if !h.Stale {
+				continue
+			}
+			if u.hostScopeRestricted() && roleRank(u.Role) < roleRank(RoleAdmin) && !s.userCanAccessHost(u, h.ID) {
 				continue
 			}
 			if s.store.DeleteHost(h.ID) {

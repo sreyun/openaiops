@@ -169,6 +169,12 @@ func (s *Server) routeAllowed(r *http.Request, role string) bool {
 		(p == "/api/v1/agents/auto-update-policy" && r.Method != http.MethodGet) {
 		return rank >= roleRank(RoleAdmin)
 	}
+	// Host-folder *tree* CRUD reshapes AllowedFolderIDs descendant grants (nesting a
+	// foreign folder under an allowed one expands a scoped operator's host access).
+	// Keep tree writes admin-only; per-host assignment stays on POST /hosts/{id}/folder.
+	if strings.HasPrefix(p, "/api/v1/host-folders") && r.Method != http.MethodGet {
+		return rank >= roleRank(RoleAdmin)
+	}
 	// Install info is readable by viewer+ (server_url / policy), but the handler
 	// masks the raw token for non-admins — keep route at viewer so the panel loads.
 	// SQL toolkit: offline tools + EXPLAIN → viewer+; connection CRUD/test → admin.

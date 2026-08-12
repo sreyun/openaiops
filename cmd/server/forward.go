@@ -1087,6 +1087,9 @@ func (s *Server) handleForwardDelete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "forward.rule_not_found")})
 		return
 	}
+	if !s.requireHostAccess(w, r, rule.hostID) {
+		return
+	}
 	operator, clientIP := s.actorIP(r)
 	s.forward.removeRule(id)
 	s.store.AddLog(LogEntry{Kind: KindOperation, Level: "info", Actor: operator, IP: clientIP, Host: rule.hostname,
@@ -1094,9 +1097,21 @@ func (s *Server) handleForwardDelete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-// handleForwardList returns all active forwarding rules.
+// handleForwardList returns active forwarding rules visible to the caller.
 func (s *Server) handleForwardList(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.forward.listRules())
+	all := s.forward.listRules()
+	u, ok := s.currentUser(r)
+	if !ok || !u.hostScopeRestricted() || roleRank(u.Role) >= roleRank(RoleAdmin) {
+		writeJSON(w, http.StatusOK, all)
+		return
+	}
+	out := make([]forwardInfo, 0, len(all))
+	for _, rule := range all {
+		if rule.HostID == "" || s.userCanAccessHost(u, rule.HostID) {
+			out = append(out, rule)
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // serveForwardListener accepts TCP connections for a rule and tunnels each

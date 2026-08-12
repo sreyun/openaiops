@@ -107,6 +107,13 @@ func (s *Server) handleForwardGroupDelete(w http.ResponseWriter, r *http.Request
 	}
 	deleted := 0
 	for _, id := range s.forward.groupRuleIDs(gid) {
+		rule := s.forward.getRule(id)
+		if rule == nil {
+			continue
+		}
+		if !s.requireHostAccess(w, r, rule.hostID) {
+			return
+		}
 		if s.forward.removeRule(id) {
 			deleted++
 		}
@@ -134,6 +141,15 @@ func (s *Server) handleForwardGroupToggle(w http.ResponseWriter, r *http.Request
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "common.invalid_json")})
 		return
+	}
+	for _, id := range s.forward.groupRuleIDs(gid) {
+		rule := s.forward.getRule(id)
+		if rule == nil {
+			continue
+		}
+		if !s.requireHostAccess(w, r, rule.hostID) {
+			return
+		}
 	}
 	toggled := 0
 	for _, id := range s.forward.groupRuleIDs(gid) {
@@ -172,6 +188,9 @@ func (s *Server) handleForwardGroupCopy(w http.ResponseWriter, r *http.Request) 
 		orig := s.forward.getRule(id)
 		if orig == nil {
 			continue
+		}
+		if !s.requireHostAccess(w, r, orig.hostID) {
+			return
 		}
 		wlOn, wlList, _ := orig.whitelistSnapshot()
 		newRule, err := s.forward.createRule(orig.hostID, orig.hostname, orig.targetPort, 0, listenHost, orig.protocol, "", operator, orig.remoteTarget, wlOn, wlList)
@@ -231,6 +250,11 @@ func (s *Server) handleForwardGroupEdit(w http.ResponseWriter, r *http.Request) 
 	if len(olds) == 0 {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "forward.rule_not_found")})
 		return
+	}
+	for _, o := range olds {
+		if !s.requireHostAccess(w, r, o.hostID) {
+			return
+		}
 	}
 	// 可选：整组改到新主机。
 	newHost, newHostname := "", ""
@@ -417,6 +441,14 @@ func (s *Server) handleForwardToggle(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "common.invalid_id")})
 		return
 	}
+	existing := s.forward.getRule(id)
+	if existing == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "forward.rule_not_found")})
+		return
+	}
+	if !s.requireHostAccess(w, r, existing.hostID) {
+		return
+	}
 	var req struct {
 		Enabled bool `json:"enabled"`
 	}
@@ -490,9 +522,20 @@ func (s *Server) handleForwardEdit(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "forward.invalid_port")})
 		return
 	}
+	existing := s.forward.getRule(id)
+	if existing == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "forward.rule_not_found")})
+		return
+	}
+	if !s.requireHostAccess(w, r, existing.hostID) {
+		return
+	}
 	// Lookup hostname when host_id is provided
 	var hostname string
 	if req.HostID != "" {
+		if !s.requireHostAccess(w, r, req.HostID) {
+			return
+		}
 		hostname = s.hostLabelForID(req.HostID)
 	}
 	rule, err := s.forward.updateRule(id, req.HostID, hostname, req.TargetPort, req.LocalPort, req.RemoteTarget)
@@ -569,6 +612,9 @@ func (s *Server) handleForwardCopy(w http.ResponseWriter, r *http.Request) {
 	orig := s.forward.getRule(id)
 	if orig == nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "forward.rule_not_found")})
+		return
+	}
+	if !s.requireHostAccess(w, r, orig.hostID) {
 		return
 	}
 	user, _ := s.currentUser(r)

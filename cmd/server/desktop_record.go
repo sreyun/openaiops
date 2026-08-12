@@ -126,46 +126,77 @@ func (m *deskManager) listSessions() []deskSessionInfo {
 }
 
 func (m *deskManager) getRecording(id string) []deskRecordFrame {
+	info, rec, ok := m.sessionArchive(id)
+	_ = info
+	if !ok {
+		return nil
+	}
+	return rec
+}
+
+// sessionArchive returns metadata + frames for a live, archived, or persisted session.
+func (m *deskManager) sessionArchive(id string) (deskSessionInfo, []deskRecordFrame, bool) {
 	m.mu.Lock()
 	if s := m.sessions[id]; s != nil {
 		s.recMu.Lock()
 		rec := make([]deskRecordFrame, len(s.recording))
 		copy(rec, s.recording)
 		s.recMu.Unlock()
+		info := deskSessionInfo{
+			ID: s.id, HostID: s.hostID, Hostname: s.hostname,
+			Operator: s.operator, IP: s.ip, CreatedAt: s.createdAt,
+			Frames: len(rec), Active: true,
+			ChangeID: s.changeID, IncidentID: s.incidentID,
+		}
 		m.mu.Unlock()
-		return rec
+		return info, rec, true
 	}
 	for _, a := range m.archived {
 		if a.Info.ID == id {
 			m.mu.Unlock()
-			return a.Recording
+			return a.Info, a.Recording, true
 		}
 	}
 	dir := m.recDir
 	m.mu.Unlock()
 	if dir == "" {
-		return nil
+		return deskSessionInfo{}, nil, false
 	}
 	b, err := os.ReadFile(filepath.Join(dir, id+".json"))
 	if err != nil {
-		return nil
+		return deskSessionInfo{}, nil, false
 	}
 	var a deskArchive
 	if json.Unmarshal(b, &a) != nil {
-		return nil
+		return deskSessionInfo{}, nil, false
 	}
-	return a.Recording
+	return a.Info, a.Recording, true
 }
 
 func (s *Server) handleListDesktopSessions(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.desk.listSessions())
+	all := s.desk.listSessions()
+	u, ok := s.currentUser(r)
+	if !ok || !u.hostScopeRestricted() || roleRank(u.Role) >= roleRank(RoleAdmin) {
+		writeJSON(w, http.StatusOK, all)
+		return
+	}
+	out := make([]deskSessionInfo, 0, len(all))
+	for _, sess := range all {
+		if sess.HostID == "" || s.userCanAccessHost(u, sess.HostID) {
+			out = append(out, sess)
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleDesktopReplay(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	frames := s.desk.getRecording(id)
-	if frames == nil {
+	info, frames, ok := s.desk.sessionArchive(id)
+	if !ok || frames == nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "common.session_gone")})
+		return
+	}
+	if info.HostID != "" && !s.requireHostAccess(w, r, info.HostID) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "frames": frames})
