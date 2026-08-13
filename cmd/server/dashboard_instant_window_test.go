@@ -74,3 +74,17 @@ func TestSubstituteVarsUsesSelectedRange(t *testing.T) {
 		t.Errorf("substituted expr = %q, want $__range → %s", got, want)
 	}
 }
+
+// Instant query used to call validatePanelQueryReq(..., withRange=false), so a
+// from=1 / to=now body could expand $__range across decades and DoS VictoriaMetrics.
+func TestInstantQueryReqRejectsUnboundedRange(t *testing.T) {
+	now := time.Now().Unix()
+	req := panelQueryReq{Expr: `avg_over_time(aiops_cpu_percent[$__range])`, From: 1, To: now}
+	if err := validatePanelQueryReq(&req, true, false); err == nil {
+		t.Fatal("expected rejection of multi-year instant $__range window")
+	}
+	req = panelQueryReq{Expr: `avg_over_time(aiops_cpu_percent[$__range])`, From: now - 7*24*3600, To: now}
+	if err := validatePanelQueryReq(&req, true, false); err != nil {
+		t.Fatalf("7d instant window should be accepted: %v", err)
+	}
+}

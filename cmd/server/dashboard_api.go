@@ -246,7 +246,10 @@ func (s *Server) handleDashboardQueryInstant(w http.ResponseWriter, r *http.Requ
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "common.invalid_json")})
 		return
 	}
-	if err := validatePanelQueryReq(&req, false, false); err != nil {
+	// withRange=true: instant panels now expand $__range from the picker, so the
+	// same 90-day / future caps as /query must apply. Skipping them let a crafted
+	// from/to (e.g. epoch→now) push multi-year avg_over_time windows into VM.
+	if err := validatePanelQueryReq(&req, true, false); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
