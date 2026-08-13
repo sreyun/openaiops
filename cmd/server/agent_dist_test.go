@@ -147,3 +147,45 @@ func minInt(a, b int) int {
 	}
 	return b
 }
+
+// Semver §11: a pre-release ranks below the plain release. Without this an agent
+// sitting on an -rc build compares equal to GA and never receives the real one.
+func TestAgentVersionBehindPreRelease(t *testing.T) {
+	cases := []struct {
+		current, target string
+		want            bool
+	}{
+		{"v1.2.3-rc1", "v1.2.3", true},
+		{"v1.2.3", "v1.2.3-rc1", false}, // never downgrade GA → rc
+		{"v1.2.3-rc1", "v1.2.3-rc2", true},
+		{"v1.2.3", "v1.2.3", false},
+		{"v1.2.3", "v1.2.4", true},
+		{"v1.3.0", "v1.2.9", false},
+	}
+	for _, c := range cases {
+		if got := agentVersionBehind(c.current, c.target); got != c.want {
+			t.Errorf("agentVersionBehind(%q, %q) = %v, want %v", c.current, c.target, got, c.want)
+		}
+	}
+}
+
+// 国产化 / 嵌入式平台必须能解析出 /dl 产物名，否则 decideAutoUpdate 直接 no_artifact。
+func TestNormalizeGOOSArchCoversDomesticPlatforms(t *testing.T) {
+	cases := []struct{ inOS, inArch, wantOS, wantArch string }{
+		{"linux", "loongarch64", "linux", "loong64"},
+		{"Kylin Linux Advanced Server V10", "loongarch64", "linux", "loong64"},
+		{"linux", "riscv64", "linux", "riscv64"},
+		{"linux", "armv7l", "linux", "arm"},
+		{"linux", "i686", "linux", "386"},
+	}
+	for _, c := range cases {
+		gotOS, gotArch := normalizeGOOSArch(c.inOS, c.inArch)
+		if gotOS != c.wantOS || gotArch != c.wantArch {
+			t.Errorf("normalizeGOOSArch(%q,%q) = %q/%q, want %q/%q",
+				c.inOS, c.inArch, gotOS, gotArch, c.wantOS, c.wantArch)
+		}
+		if _, err := agentDistBinaryName(gotOS, gotArch); err != nil {
+			t.Errorf("no /dl artifact name for %s/%s: %v", gotOS, gotArch, err)
+		}
+	}
+}

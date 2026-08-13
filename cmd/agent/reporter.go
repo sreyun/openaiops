@@ -145,9 +145,13 @@ func (t *serverTarget) register(base shared.Report) bool {
 				t.logKey = k
 			}
 		}
-		t.canonicalHostID = rr.HostID
 	}
 	t.regMu.Lock()
+	// Only overwrite on a real value — a body we failed to decode must not wipe
+	// the canonical id we are already reporting under.
+	if strings.TrimSpace(rr.HostID) != "" {
+		t.canonicalHostID = strings.TrimSpace(rr.HostID)
+	}
 	t.registered = true
 	t.regMu.Unlock()
 	slog.Info("已向服务端注册", "server", t.server, "token_prefix", maskToken(t.token))
@@ -161,6 +165,24 @@ func (t *serverTarget) isRegistered() bool {
 	return t.registered
 }
 
+// hostIDOr returns the id THIS panel knows this machine by, falling back to the
+// agent's local id before the first successful registration.
+//
+// 多服务端下这一步是必须的，不是优化：每个面板独立按指纹认领机器，两块面板完全
+// 可能给同一台机器不同的 host_id（典型场景——机器重装换了随机 id，面板 A 是新记录
+// 而面板 B 仍持有旧记录，注册时被 CanonicalHostID 认回旧 id）。服务端
+// UpsertAuthenticated 严格按 host_id 查表，用错 id 就是 403 → 重新注册 → 再 403
+// 的死循环：那块面板上这台机器永远离线，终端/桌面/端口转发也全部失效，而
+// reconcileIdentity 在多服务端下会主动跳过（绝不能把 A 的 id 套给 B）。
+func (t *serverTarget) hostIDOr(fallback string) string {
+	t.regMu.Lock()
+	defer t.regMu.Unlock()
+	if t.canonicalHostID != "" {
+		return t.canonicalHostID
+	}
+	return fallback
+}
+
 // send posts one report payload to this server. The report's Token field is
 // set to this target's token before marshalling. The body is gzip-compressed
 // when above the threshold to reduce bandwidth, UNLESS a previous 400 response
@@ -172,6 +194,14 @@ var errBadPayload = errors.New("bad payload (server returned 400)")
 
 func (t *serverTarget) send(rep shared.Report) error {
 	rep.Token = t.token
+	rep.HostID = t.hostIDOr(rep.HostID)
+	// Tell each panel the base URL this agent actually reaches IT by. The server
+	// stores it as Host.ServerURL and hands it back as the /dl download base for
+	// self-update (agentReportedDownloadBase). Reporting servers[0] to every
+	// target would tell panel B to serve upgrades from panel A — wrong artifact,
+	// and unreachable whenever the two panels live on different networks. In
+	// relay mode this is the relay URL, which is exactly right.
+	rep.ServerURL = strings.TrimRight(strings.TrimSpace(t.server), "/")
 	body, err := json.Marshal(rep)
 	if err != nil {
 		return err
@@ -309,16 +339,16 @@ type Agent struct {
 	stateFile  string   // 身份状态文件路径；认回规范 host_id 后要写回这里
 
 	// 新增采集器配置（可选，未配置时不启动）
-	redfishTargets   []RedfishTarget
-	oceanStorTargets []OceanStorTarget
-	netflowCfg       *NetFlowConfig
-	packetCfg        *PacketConfig
-	snmpCfg          *SNMPConfig
-	sniCfg           *SNIConfig
-	hypervInterval     time.Duration // Hyper-V 虚拟机采集间隔（0 → 默认 60s）
-	hypervDisabled     bool          // 显式关闭 Hyper-V 采集（默认自动探测）
-	containerInterval  time.Duration
-	containerDisabled  bool
+	redfishTargets    []RedfishTarget
+	oceanStorTargets  []OceanStorTarget
+	netflowCfg        *NetFlowConfig
+	packetCfg         *PacketConfig
+	snmpCfg           *SNMPConfig
+	sniCfg            *SNIConfig
+	hypervInterval    time.Duration // Hyper-V 虚拟机采集间隔（0 → 默认 60s）
+	hypervDisabled    bool          // 显式关闭 Hyper-V 采集（默认自动探测）
+	containerInterval time.Duration
+	containerDisabled bool
 
 	// desktopDisabled skips the in-process web-desktop channel. Set by the
 	// Windows service, which delegates screen capture/input to a helper worker
@@ -421,7 +451,7 @@ func (a *Agent) reconcileIdentity() {
 		if !t.register(a.identity) {
 			continue // 该服务端不可达/拒绝，换下一个
 		}
-		canonical := t.canonicalHostID
+		canonical := t.hostIDOr("")
 		if canonical == "" || canonical == a.identity.HostID {
 			return // 服务端认可当前身份（或是不认识 host_id 的旧版服务端）
 		}
@@ -916,14 +946,19 @@ func short(s string) string {
 
 // postHardwareReport sends a Redfish hardware snapshot to all server targets.
 func (a *Agent) postHardwareReport(rep shared.HardwareReport) {
-	body, err := json.Marshal(rep)
-	if err != nil {
-		slog.Warn("硬件上报序列化失败", "err", err)
-		return
-	}
 	fp := a.identity.Fingerprint
+	baseHostID := rep.HostID
 	for _, t := range a.targets {
 		go func(tgt *serverTarget) {
+			// Marshal per target:每块面板认的 host_id 可能不同（见 hostIDOr），
+			// 用错 id 这条上报会被 403 静默丢掉。
+			r := rep
+			r.HostID = tgt.hostIDOr(baseHostID)
+			body, err := json.Marshal(r)
+			if err != nil {
+				slog.Warn("硬件上报序列化失败", "err", err)
+				return
+			}
 			req, err := http.NewRequest("POST", tgt.server+"/api/v1/agent/hardware", bytes.NewReader(body))
 			if err != nil {
 				return
@@ -942,9 +977,9 @@ func (a *Agent) postHardwareReport(rep shared.HardwareReport) {
 				// 读取响应体以便诊断拒绝原因（如 fingerprint mismatch）
 				respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 				slog.Warn("硬件上报被拒", "server", tgt.server, "status", resp.StatusCode,
-					"host_id", rep.HostID, "snapshots", len(rep.Snapshots), "body", string(respBody))
+					"host_id", r.HostID, "snapshots", len(rep.Snapshots), "body", string(respBody))
 			} else {
-				slog.Info("硬件上报成功", "server", tgt.server, "host_id", rep.HostID,
+				slog.Info("硬件上报成功", "server", tgt.server, "host_id", r.HostID,
 					"snapshots", len(rep.Snapshots))
 			}
 		}(t)
@@ -953,14 +988,19 @@ func (a *Agent) postHardwareReport(rep shared.HardwareReport) {
 
 // postNetFlowReport sends aggregated NetFlow/packet flows to all server targets.
 func (a *Agent) postNetFlowReport(rep shared.NetFlowReport) {
-	body, err := json.Marshal(rep)
-	if err != nil {
-		slog.Warn("NetFlow 上报序列化失败", "err", err)
-		return
-	}
 	fp := a.identity.Fingerprint
+	baseHostID := rep.HostID
 	for _, t := range a.targets {
 		go func(tgt *serverTarget) {
+			// Marshal per target:每块面板认的 host_id 可能不同（见 hostIDOr），
+			// 用错 id 这条上报会被 403 静默丢掉。
+			r := rep
+			r.HostID = tgt.hostIDOr(baseHostID)
+			body, err := json.Marshal(r)
+			if err != nil {
+				slog.Warn("NetFlow 上报序列化失败", "err", err)
+				return
+			}
 			req, err := http.NewRequest("POST", tgt.server+"/api/v1/agent/netflow", bytes.NewReader(body))
 			if err != nil {
 				return
@@ -985,14 +1025,19 @@ func (a *Agent) postNetFlowReport(rep shared.NetFlowReport) {
 // postSNMPReport sends polled SNMP device metrics to all server targets.
 // postDNSMapReport 上报 SNI/DNS 域名观测到所有 server（与 postSNMPReport 同构）。
 func (a *Agent) postDNSMapReport(rep shared.DNSMapReport) {
-	body, err := json.Marshal(rep)
-	if err != nil {
-		slog.Warn("域名观测上报序列化失败", "err", err)
-		return
-	}
 	fp := a.identity.Fingerprint
+	baseHostID := rep.HostID
 	for _, t := range a.targets {
 		go func(tgt *serverTarget) {
+			// Marshal per target:每块面板认的 host_id 可能不同（见 hostIDOr），
+			// 用错 id 这条上报会被 403 静默丢掉。
+			r := rep
+			r.HostID = tgt.hostIDOr(baseHostID)
+			body, err := json.Marshal(r)
+			if err != nil {
+				slog.Warn("域名观测上报序列化失败", "err", err)
+				return
+			}
 			req, err := http.NewRequest("POST", tgt.server+"/api/v1/agent/dnsmap", bytes.NewReader(body))
 			if err != nil {
 				return
@@ -1016,14 +1061,19 @@ func (a *Agent) postDNSMapReport(rep shared.DNSMapReport) {
 
 // postContentAuditReport 上报明文 HTTP 内容审计事件（与 postDNSMapReport 同构）。
 func (a *Agent) postContentAuditReport(rep shared.ContentAuditReport) {
-	body, err := json.Marshal(rep)
-	if err != nil {
-		slog.Warn("内容审计上报序列化失败", "err", err)
-		return
-	}
 	fp := a.identity.Fingerprint
+	baseHostID := rep.HostID
 	for _, t := range a.targets {
 		go func(tgt *serverTarget) {
+			// Marshal per target:每块面板认的 host_id 可能不同（见 hostIDOr），
+			// 用错 id 这条上报会被 403 静默丢掉。
+			r := rep
+			r.HostID = tgt.hostIDOr(baseHostID)
+			body, err := json.Marshal(r)
+			if err != nil {
+				slog.Warn("内容审计上报序列化失败", "err", err)
+				return
+			}
 			req, err := http.NewRequest("POST", tgt.server+"/api/v1/agent/content-audit", bytes.NewReader(body))
 			if err != nil {
 				return
@@ -1046,14 +1096,19 @@ func (a *Agent) postContentAuditReport(rep shared.ContentAuditReport) {
 }
 
 func (a *Agent) postSNMPReport(rep shared.SNMPReport) {
-	body, err := json.Marshal(rep)
-	if err != nil {
-		slog.Warn("SNMP 上报序列化失败", "err", err)
-		return
-	}
 	fp := a.identity.Fingerprint
+	baseHostID := rep.HostID
 	for _, t := range a.targets {
 		go func(tgt *serverTarget) {
+			// Marshal per target:每块面板认的 host_id 可能不同（见 hostIDOr），
+			// 用错 id 这条上报会被 403 静默丢掉。
+			r := rep
+			r.HostID = tgt.hostIDOr(baseHostID)
+			body, err := json.Marshal(r)
+			if err != nil {
+				slog.Warn("SNMP 上报序列化失败", "err", err)
+				return
+			}
 			req, err := http.NewRequest("POST", tgt.server+"/api/v1/agent/snmp", bytes.NewReader(body))
 			if err != nil {
 				return
@@ -1077,14 +1132,19 @@ func (a *Agent) postSNMPReport(rep shared.SNMPReport) {
 
 // postSNMPTrapReport sends received SNMP traps to all server targets.
 func (a *Agent) postSNMPTrapReport(rep shared.SNMPTrapReport) {
-	body, err := json.Marshal(rep)
-	if err != nil {
-		slog.Warn("SNMP Trap 上报序列化失败", "err", err)
-		return
-	}
 	fp := a.identity.Fingerprint
+	baseHostID := rep.HostID
 	for _, t := range a.targets {
 		go func(tgt *serverTarget) {
+			// Marshal per target:每块面板认的 host_id 可能不同（见 hostIDOr），
+			// 用错 id 这条上报会被 403 静默丢掉。
+			r := rep
+			r.HostID = tgt.hostIDOr(baseHostID)
+			body, err := json.Marshal(r)
+			if err != nil {
+				slog.Warn("SNMP Trap 上报序列化失败", "err", err)
+				return
+			}
 			req, err := http.NewRequest("POST", tgt.server+"/api/v1/agent/snmp/trap", bytes.NewReader(body))
 			if err != nil {
 				return

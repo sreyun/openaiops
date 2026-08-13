@@ -419,6 +419,7 @@ func main() {
 	go server.runDutyReportLoop()                          // daily AI duty morning report → message center
 	go server.vm.run()                                     // optional VictoriaMetrics remote-write pump
 	go server.startAgentAutoUpdateScanner(5 * time.Minute) // 周期性扫描在线且版本落后的 agent 主动入队升级
+	go server.startCICDFailureWatcher(2 * time.Minute)     // 勾了「失败告警 / 自动事件」的 CI/CD 连接：红流水线 → 告警 / SRE 事件
 	server.initForecastLearn()                             // 预测台账对比实测 → 校准因子 + AI 自学习记忆
 
 	logProductionSecurityBaseline(cfg)

@@ -19,12 +19,12 @@ import (
 // macOS always-on daemon: a root LaunchDaemon runs metrics/terminal/forward and
 // supervises a remote-desktop worker launched *into the console user's GUI (Aqua)
 // session* via `launchctl asuser`. Screen capture (screencapture) and input
-// (cliclick/osascript) only work inside that GUI session ? a bare LaunchDaemon
+// (cliclick/osascript) only work inside that GUI session — a bare LaunchDaemon
 // context cannot see the desktop.
 //
 // The worker runs within the GUI session (host_id stays readable). The binary
 // still needs Screen Recording + Accessibility granted in
-// System Settings ? Privacy & Security.
+// System Settings → Privacy & Security.
 
 const agentServiceName = "com.aiops.monitor.agent"
 
@@ -92,7 +92,7 @@ func installAgentService(exePath, cfgPath string) error {
 `, agentServiceName, exePath, cfgPath, workDir, termShell, home)
 
 	if err := os.WriteFile(launchDaemonPlist, []byte(plist), 0o644); err != nil {
-		return fmt.Errorf("?? LaunchDaemon plist ??: %w", err)
+		return fmt.Errorf("写入 LaunchDaemon plist 失败: %w", err)
 	}
 	// bootout first (ignore errors) so a re-install reloads cleanly.
 	_ = runSvcCmd("launchctl", "bootout", "system/"+agentServiceName)
@@ -111,7 +111,7 @@ func installAgentService(exePath, cfgPath string) error {
 
 func uninstallAgentService() error {
 	if os.Geteuid() != 0 {
-		return fmt.Errorf("?? root ?????? sudo ?? --uninstall-service")
+		return fmt.Errorf("需要 root 权限，请用 sudo 运行 --uninstall-service")
 	}
 	_ = runSvcCmd("launchctl", "bootout", "system/"+agentServiceName)
 	_ = runSvcCmd("launchctl", "unload", launchDaemonPlist)
@@ -128,11 +128,11 @@ func runAgentAsService(agent *Agent, cfgPath string) error {
 
 	exe, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("???????????: %w", err)
+		return fmt.Errorf("无法解析可执行文件路径: %w", err)
 	}
 
 	go agent.Run(ctx)
-	slog.Info("Agent LaunchDaemon ???(root)", "config", cfgPath)
+	slog.Info("Agent LaunchDaemon 已启动(root)", "config", cfgPath)
 	superviseDarwinDesktopWorker(ctx, exe, cfgPath)
 	return nil
 }
@@ -168,11 +168,11 @@ func superviseDarwinDesktopWorker(ctx context.Context, exe, cfgPath string) {
 				stopWorker()
 				w, err := spawnDarwinDesktopWorker(exe, cfgPath, uid)
 				if err != nil {
-					slog.Warn("?? macOS ?? worker ??", "err", err, "uid", uid, "user", uname)
+					slog.Warn("启动 macOS 桌面 worker 失败", "err", err, "uid", uid, "user", uname)
 				} else {
 					worker = w
 					curUID = uid
-					slog.Info("?? GUI ??????? worker", "user", uname, "uid", uid)
+					slog.Info("已在 GUI 会话中启动桌面 worker", "user", uname, "uid", uid)
 				}
 			}
 		} else {

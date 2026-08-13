@@ -169,6 +169,11 @@ func (s *Server) routeAllowed(r *http.Request, role string) bool {
 		(p == "/api/v1/agents/auto-update-policy" && r.Method != http.MethodGet) {
 		return rank >= roleRank(RoleAdmin)
 	}
+	// NOTE: POST /api/v1/agents/update (fleet binary replacement) intentionally
+	// stays operator+ via the default write rule below — see auth_test.go
+	// "operator can start agent update". It is additionally gated per host by
+	// remoteGateCheck(highRisk=true), which demands an approved change outside
+	// freeze windows. Raise it here only as a deliberate policy change.
 	// Install info is readable by viewer+ (server_url / policy), but the handler
 	// masks the raw token for non-admins — keep route at viewer so the panel loads.
 	// SQL toolkit: offline tools + EXPLAIN → viewer+; connection CRUD/test → admin.

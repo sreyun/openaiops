@@ -41,8 +41,16 @@ func installAgentService(exePath, cfgPath string) error {
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("需要 root 权限，请用 sudo 运行 --install-service")
 	}
-	// Clear any leftover units/drop-ins so a prior hardened install cannot stick.
-	purgeAgentSystemdUnits()
+	// Clear leftover drop-ins/duplicate units so a prior hardened install cannot
+	// stick — but NEVER `systemctl stop` the unit we are currently running under.
+	//
+	// stop 会终止整个 unit cgroup：当 --install-service 是被自动升级助手（Agent 的
+	// 子进程）调用时，那一 stop 会连调用方一起 SIGKILL，后面的 daemon-reload /
+	// enable / restart 全部落空——服务停在"已停止"再没人拉起，机器永久离线。
+	// 正确做法：先写单元 + enable，最后用一次 `systemctl restart`（stop+start 是
+	// systemd 的同一个 job，即使调用方被杀，start 半程照样完成）。
+	purgeAgentUnitDropIns()
+	purgeConflictingAgentUnits()
 	termShell := "/bin/bash"
 	if _, err := os.Stat(termShell); err != nil {
 		termShell = "/bin/sh"
@@ -91,7 +99,102 @@ WantedBy=multi-user.target
 	if err := runSvcCmd("systemctl", "restart", agentServiceName); err != nil {
 		return fmt.Errorf("systemctl restart 失败: %w", err)
 	}
+	// Last step on purpose: retiring the unit we are running under kills this
+	// very process (cgroup teardown), so nothing may depend on returning here.
+	retireSelfLegacyUnit()
 	return nil
+}
+
+// currentSystemdUnit returns the *.service this process belongs to, or "" when
+// it is not running under systemd. Parsed from /proc/self/cgroup, which lists
+// the unit path for both cgroup v1 (name=systemd hierarchy) and v2 (unified).
+func currentSystemdUnit() string {
+	b, err := os.ReadFile("/proc/self/cgroup")
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		// "0::/system.slice/aiops-agent.service" | "1:name=systemd:/system.slice/…"
+		idx := strings.LastIndex(line, "/")
+		if idx < 0 {
+			continue
+		}
+		leaf := strings.TrimSpace(line[idx+1:])
+		if strings.HasSuffix(leaf, ".service") {
+			return strings.TrimSuffix(leaf, ".service")
+		}
+	}
+	return ""
+}
+
+// purgeAgentUnitDropIns removes *.service.d overrides for every known agent unit
+// without touching the running service. Drop-ins are what re-apply
+// ProtectSystem=strict after a heal, so they must go on every (re)install.
+func purgeAgentUnitDropIns() {
+	for _, name := range legacyAgentServiceNames {
+		for _, base := range []string{
+			"/etc/systemd/system",
+			"/lib/systemd/system",
+			"/usr/lib/systemd/system",
+			"/run/systemd/system",
+		} {
+			_ = os.RemoveAll(filepath.Join(base, name+".service.d"))
+		}
+	}
+}
+
+// purgeConflictingAgentUnits removes duplicate/legacy agent units so only the
+// canonical one survives — skipping the unit this process is running under
+// (retired last, see retireSelfLegacyUnit) and the unit about to be written.
+func purgeConflictingAgentUnits() {
+	self := currentSystemdUnit()
+	for _, name := range legacyAgentServiceNames {
+		if name == agentServiceName || name == self {
+			continue
+		}
+		removeAgentUnit(name, true)
+	}
+}
+
+// retireSelfLegacyUnit disables and removes the legacy unit this process runs
+// under, once the canonical unit is already installed and started.
+func retireSelfLegacyUnit() {
+	self := currentSystemdUnit()
+	if self == "" || self == agentServiceName {
+		return
+	}
+	known := false
+	for _, name := range legacyAgentServiceNames {
+		if name == self {
+			known = true
+			break
+		}
+	}
+	if !known {
+		return
+	}
+	removeAgentUnit(self, true)
+	_ = runSvcCmd("systemctl", "daemon-reload")
+}
+
+// removeAgentUnit disables one unit and deletes its files. stop=true also stops
+// it — only safe for units the caller does not live in.
+func removeAgentUnit(name string, stop bool) {
+	if stop {
+		_ = runSvcCmd("systemctl", "stop", name)
+	}
+	_ = runSvcCmd("systemctl", "disable", name)
+	_ = runSvcCmd("systemctl", "reset-failed", name)
+	for _, base := range []string{
+		"/etc/systemd/system",
+		"/lib/systemd/system",
+		"/usr/lib/systemd/system",
+		"/run/systemd/system",
+	} {
+		_ = os.Remove(filepath.Join(base, name+".service"))
+		_ = os.RemoveAll(filepath.Join(base, name+".service.d"))
+	}
+	_ = os.Remove(filepath.Join("/etc/systemd/system/multi-user.target.wants", name+".service"))
 }
 
 func uninstallAgentService() error {

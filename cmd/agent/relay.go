@@ -40,6 +40,14 @@ func runRelay(listenAddr, upstream, relaySecret string) {
 	proxy.FlushInterval = 100 * time.Millisecond
 	proxy.Transport = relayTransport
 
+	// Interactive channels get immediate flushing. The reverse terminal, remote
+	// desktop and port-forward all ride plain HTTP streams (rx/tx) through this
+	// relay; a 100ms buffer window is a 100ms lag on every keystroke and every
+	// frame, which is exactly what makes a relayed session feel broken.
+	streamProxy := httputil.NewSingleHostReverseProxy(target)
+	streamProxy.FlushInterval = -1 // -1 = flush after every write
+	streamProxy.Transport = relayTransport
+
 	dlCache := newRelayDLCache(upstream, relaySecret)
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -52,8 +60,15 @@ func runRelay(listenAddr, upstream, relaySecret string) {
 				return
 			}
 		}
+		// Never let a client smuggle its own relay secret upstream: we are the
+		// only party allowed to assert "this request came through the relay".
+		r.Header.Del("X-Relay-Secret")
 		if relaySecret != "" {
 			r.Header.Set("X-Relay-Secret", relaySecret)
+		}
+		if isRelayStreamingPath(r.URL.Path) {
+			streamProxy.ServeHTTP(w, r)
+			return
 		}
 		proxy.ServeHTTP(w, r)
 	})
@@ -102,6 +117,48 @@ var serverLineRe = regexp.MustCompile(`((?:SERVER|\$Server)\s*=\s*")[^"]+(")`)
 
 // Install scripts embed a full commented config.example.yaml reference; 1 MiB is safe.
 const maxInstallScriptSize = 1 << 20
+
+// isRelayStreamingPath marks the hijacked / long-lived byte pipes that must not
+// sit in a flush buffer: the agent-facing terminal, desktop and forward rx/tx
+// streams, plus the browser-facing WebSocket and HTTP-proxy paths in case an
+// operator points a panel at the relay directly.
+func isRelayStreamingPath(p string) bool {
+	for _, pre := range []string{
+		"/api/v1/agent/terminal/",
+		"/api/v1/agent/desktop/",
+		"/api/v1/agent/forward/",
+		"/agent/terminal/",
+		"/agent/desktop/",
+		"/agent/forward/",
+		"/proxy/",
+		"/ws",
+	} {
+		if strings.HasPrefix(p, pre) {
+			return true
+		}
+	}
+	return strings.Contains(p, "/terminal") || strings.Contains(p, "/desktop") ||
+		strings.Contains(p, "/forward")
+}
+
+// relayPublicScheme reports the scheme internal machines should use to reach
+// this relay. Defaults to http (the relay serves plaintext), but honours TLS
+// termination in front of it — otherwise the rewritten install script hands out
+// an http:// SERVER= that a TLS-only front door will reject.
+func relayPublicScheme(r *http.Request) string {
+	if r.TLS != nil {
+		return "https"
+	}
+	if p := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))); p != "" {
+		if i := strings.IndexByte(p, ','); i >= 0 {
+			p = strings.TrimSpace(p[:i])
+		}
+		if p == "https" {
+			return "https"
+		}
+	}
+	return "http"
+}
 
 func sanitizeHost(h string) string {
 	return strings.Map(func(r rune) rune {
@@ -154,7 +211,7 @@ func serveRelayInstallScript(w http.ResponseWriter, r *http.Request, upstream, r
 		return
 	}
 
-	relayURL := "http://" + host
+	relayURL := relayPublicScheme(r) + "://" + host
 	rewritten := rewriteInstallScriptForRelay(string(body), relayURL)
 
 	if ct := resp.Header.Get("Content-Type"); ct != "" {
@@ -165,7 +222,19 @@ func serveRelayInstallScript(w http.ResponseWriter, r *http.Request, upstream, r
 	_, _ = io.WriteString(w, rewritten)
 }
 
-const relayDLCacheTTL = 10 * time.Minute
+const (
+	// relayDLRevalidateAfter is how long a cached artifact is served without
+	// asking upstream whether it changed.
+	//
+	// 必须很短：服务端升级后 /dl 下的二进制与 .sha256 是**成对**更新的，而中继旧缓存
+	// 里的两者也彼此匹配。于是内网 agent 下载到旧二进制、SHA-256 校验通过、"升级成功"，
+	// 版本却纹丝不动 —— 服务端的 pending_verify 超时、soft-retry，整条自动升级链路
+	// 在缓存 TTL 内空转。用 ETag 条件回源换掉"盲信 TTL"，代价只有一次 HEAD。
+	relayDLRevalidateAfter = 15 * time.Second
+	// relayDLCacheTTL bounds the pair-generation check (binary vs .sha256 written
+	// in the same fetch), not the trust window.
+	relayDLCacheTTL = 10 * time.Minute
+)
 
 type relayDLCache struct {
 	dir      string
@@ -205,28 +274,88 @@ func (c *relayDLCache) serve(w http.ResponseWriter, r *http.Request) bool {
 	cf := filepath.Join(c.dir, name)
 	pair := relayDLPairKey(name)
 
-	if fi, err := os.Stat(cf); err == nil && !fi.IsDir() && time.Since(fi.ModTime()) < relayDLCacheTTL {
-		// Also require sibling .sha256 (or binary) to be fresh when both exist.
-		if c.pairFresh(pair) {
-			http.ServeFile(w, r, cf)
+	lk := c.lockFor(pair)
+	lk.Lock()
+	defer lk.Unlock()
+
+	cached := false
+	if fi, err := os.Stat(cf); err == nil && !fi.IsDir() && c.pairFresh(pair) {
+		cached = true
+		if time.Since(fi.ModTime()) < relayDLRevalidateAfter {
+			http.ServeFile(w, r, cf) // just validated by another request
 			return true
 		}
 	}
 
-	lk := c.lockFor(pair)
-	lk.Lock()
-	defer lk.Unlock()
-	if fi, err := os.Stat(cf); err == nil && !fi.IsDir() && time.Since(fi.ModTime()) < relayDLCacheTTL && c.pairFresh(pair) {
-		http.ServeFile(w, r, cf)
-		return true
+	if cached {
+		switch c.revalidate(pair) {
+		case relayRevalFresh:
+			// Unchanged upstream: bump mtime so the next few requests skip the HEAD.
+			now := time.Now()
+			_ = os.Chtimes(cf, now, now)
+			http.ServeFile(w, r, cf)
+			return true
+		case relayRevalUnreachable:
+			// Cloud unreachable — serving the cached copy is the entire point of
+			// relay mode for an isolated network. Loud, but not fatal.
+			slog.Warn("Relay /dl 无法回源校验，先用本地缓存（内容可能已过期）", "pair", pair)
+			http.ServeFile(w, r, cf)
+			return true
+		}
+		slog.Info("Relay /dl 上游已变更，重新拉取", "pair", pair)
 	}
+
 	if err := c.fetchPair(pair); err != nil {
+		if cached {
+			slog.Warn("Relay /dl 回源失败，退回本地缓存", "pair", pair, "err", err)
+			http.ServeFile(w, r, cf)
+			return true
+		}
 		slog.Warn("Relay /dl 缓存回源失败，回退直连代理", "file", name, "err", err)
 		return false
 	}
 	slog.Info("Relay /dl 缓存已刷新", "pair", pair)
 	http.ServeFile(w, r, cf)
 	return true
+}
+
+type relayRevalResult int
+
+const (
+	relayRevalStale relayRevalResult = iota
+	relayRevalFresh
+	relayRevalUnreachable
+)
+
+// revalidate asks upstream whether the cached artifact still matches, using the
+// ETag the server sets on /dl (size-mtime for binaries, the digest for .sha256).
+// One HEAD round-trip is negligible next to re-downloading a multi-MB agent, and
+// it is what keeps a relayed fleet from upgrading into a stale binary.
+func (c *relayDLCache) revalidate(pair string) relayRevalResult {
+	want, err := os.ReadFile(filepath.Join(c.dir, pair+".etag"))
+	if err != nil || len(want) == 0 {
+		return relayRevalStale // never recorded → cannot trust the copy
+	}
+	req, err := http.NewRequest(http.MethodHead, c.upstream+"/dl/"+pair, nil)
+	if err != nil {
+		return relayRevalStale
+	}
+	if c.secret != "" {
+		req.Header.Set("X-Relay-Secret", c.secret)
+	}
+	resp, err := relayClient.Do(req)
+	if err != nil {
+		return relayRevalUnreachable
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<10))
+	if resp.StatusCode != http.StatusOK {
+		return relayRevalStale
+	}
+	if et := resp.Header.Get("ETag"); et != "" && et == string(want) {
+		return relayRevalFresh
+	}
+	return relayRevalStale
 }
 
 func (c *relayDLCache) pairFresh(pair string) bool {
@@ -307,7 +436,18 @@ func (c *relayDLCache) fetch(urlPath, dst string) error {
 		return err
 	}
 	tmp.Close()
-	return os.Rename(tmpName, dst)
+	if err := os.Rename(tmpName, dst); err != nil {
+		return err
+	}
+	// Record the upstream ETag next to the payload so later hits can be
+	// revalidated with a HEAD instead of blindly trusting a time window.
+	etagPath := dst + ".etag"
+	if et := resp.Header.Get("ETag"); et != "" {
+		_ = os.WriteFile(etagPath, []byte(et), 0o644)
+	} else {
+		_ = os.Remove(etagPath) // no validator → force a real refetch next time
+	}
+	return nil
 }
 
 type relayDLError struct{ status int }

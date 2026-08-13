@@ -310,8 +310,12 @@ case "$OS" in
     case "$ARCH" in
       x86_64|amd64)   BIN="aiops-agent-linux-amd64" ;;
       aarch64|arm64)   BIN="aiops-agent-linux-arm64" ;;
+      loongarch64)     BIN="aiops-agent-linux-loong64" ;;
+      riscv64)         BIN="aiops-agent-linux-riscv64" ;;
+      i386|i686)       BIN="aiops-agent-linux-386" ;;
+      armv7l|armv7|armv6l|armhf) BIN="aiops-agent-linux-arm" ;;
       *)
-        echo "[AIOps] ERROR: unsupported architecture: $ARCH (supported: x86_64/amd64, aarch64/arm64)"
+        echo "[AIOps] ERROR: unsupported architecture: $ARCH (supported: x86_64/amd64, aarch64/arm64, loongarch64, riscv64, i386/i686, armv7l)"
         exit 1
         ;;
     esac
@@ -1812,8 +1816,12 @@ case "$OS" in
     case "$ARCH" in
       x86_64|amd64)   BIN="aiops-agent-linux-amd64" ;;
       aarch64|arm64)   BIN="aiops-agent-linux-arm64" ;;
+      loongarch64)     BIN="aiops-agent-linux-loong64" ;;
+      riscv64)         BIN="aiops-agent-linux-riscv64" ;;
+      i386|i686)       BIN="aiops-agent-linux-386" ;;
+      armv7l|armv7|armv6l|armhf) BIN="aiops-agent-linux-arm" ;;
       *)
-        echo "[AIOps] ERROR: unsupported architecture: $ARCH (supported: x86_64/amd64, aarch64/arm64)"
+        echo "[AIOps] ERROR: unsupported architecture: $ARCH (supported: x86_64/amd64, aarch64/arm64, loongarch64, riscv64, i386/i686, armv7l)"
         exit 1
         ;;
     esac

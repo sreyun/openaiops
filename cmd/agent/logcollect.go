@@ -206,7 +206,7 @@ func sealLogAgent(key, plaintext []byte) ([]byte, error) {
 }
 
 func (a *Agent) sendLogBatch(t *serverTarget, lines []shared.LogLine) {
-	body, _ := json.Marshal(shared.LogBatch{HostID: a.identity.HostID, Lines: lines})
+	body, _ := json.Marshal(shared.LogBatch{HostID: t.hostIDOr(a.identity.HostID), Lines: lines})
 	enc := ""
 	if a.logEncrypt && len(t.logKey) == 32 { // 默认加密上报（服务端下发密钥时）
 		if sealed, err := sealLogAgent(t.logKey, body); err == nil {

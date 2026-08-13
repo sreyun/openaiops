@@ -31,6 +31,13 @@ var agentDistCatalog = []struct {
 }{
 	{"aiops-agent-linux-amd64", "linux", "amd64"},
 	{"aiops-agent-linux-arm64", "linux", "arm64"},
+	// 国产化 / 嵌入式：麒麟-龙芯、开源 RISC-V、老旧 32 位 x86 与 armv7 单板。
+	// 没有对应产物时 agentDistResolveForHost 会给出 no_artifact 跳过原因，
+	// 自动升级只是不可用，不会静默失败。
+	{"aiops-agent-linux-loong64", "linux", "loong64"},
+	{"aiops-agent-linux-riscv64", "linux", "riscv64"},
+	{"aiops-agent-linux-386", "linux", "386"},
+	{"aiops-agent-linux-arm", "linux", "arm"},
 	{"aiops-agent-darwin-amd64", "darwin", "amd64"},
 	{"aiops-agent-darwin-arm64", "darwin", "arm64"},
 	{"aiops-agent.exe", "windows", "amd64"},
@@ -70,6 +77,12 @@ func normalizeGOOSArch(goos, goarch string) (string, string) {
 		goarch = "arm64"
 	case "i386", "i686", "x86":
 		goarch = "386"
+	case "loongarch64", "loong64":
+		goarch = "loong64"
+	case "riscv64", "riscv":
+		goarch = "riscv64"
+	case "armv7l", "armv7", "armv6l", "armhf", "arm":
+		goarch = "arm"
 	case "":
 		// Empty arch is common on older Windows reports — default to amd64.
 		if goos == "windows" || goos == "linux" || goos == "darwin" {
@@ -274,7 +287,31 @@ func compareAgentVer(a, b string) int {
 			return 1
 		}
 	}
-	return 0
+	// Equal numeric parts: a pre-release ranks below the plain release (semver
+	// §11), so an agent sitting on v1.2.3-rc1 is still behind v1.2.3 — without
+	// this it would compare equal and never receive the GA build.
+	apre, bpre := agentVerPreRelease(a), agentVerPreRelease(b)
+	switch {
+	case apre == bpre:
+		return 0
+	case apre == "":
+		return 1
+	case bpre == "":
+		return -1
+	case apre < bpre:
+		return -1
+	default:
+		return 1
+	}
+}
+
+// agentVerPreRelease returns the semver pre-release tail ("rc1" for 1.2.3-rc1),
+// or "" for a plain release.
+func agentVerPreRelease(v string) string {
+	if i := strings.IndexAny(v, "-+"); i >= 0 {
+		return v[i+1:]
+	}
+	return ""
 }
 
 func verNumericPrefix(s string) int {

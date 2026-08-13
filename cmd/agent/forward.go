@@ -59,7 +59,7 @@ func (a *Agent) runForwardChannelFor(t *serverTarget) {
 	slog.Info("端口转发通道已就绪，等待服务端呼叫…", "server", t.server)
 	backoff := newBackoffTimer(1*time.Second, 60*time.Second)
 	for {
-		sid, targetPort, mode, remoteTarget, ok := a.forwardWait(t.server)
+		sid, targetPort, mode, remoteTarget, ok := a.forwardWait(t)
 		if !ok {
 			d := backoff.next()
 			slog.Debug("转发通道连接失败，指数退避等待", "delay", d, "retry", backoff.retry)
@@ -75,8 +75,9 @@ func (a *Agent) runForwardChannelFor(t *serverTarget) {
 }
 
 // forwardWait long-polls the server for a pending forward session.
-func (a *Agent) forwardWait(server string) (sessionID string, targetPort int, mode string, remoteTarget string, ok bool) {
-	q := url.Values{"host": {a.identity.HostID}}
+func (a *Agent) forwardWait(t *serverTarget) (sessionID string, targetPort int, mode string, remoteTarget string, ok bool) {
+	server := t.server
+	q := url.Values{"host": {t.hostIDOr(a.identity.HostID)}}
 	resp, err := agentGet(forwardWaitHTTP, server+"/api/v1/agent/forward/wait?"+q.Encode(), a.identity.Fingerprint)
 	if err != nil {
 		return "", 0, "", "", false

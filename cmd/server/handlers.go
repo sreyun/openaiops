@@ -68,6 +68,7 @@ type Server struct {
 	sqlSlow      *slowSQLManager          // multi-DB slow SQL digests + advice
 	secFindings  *securityFindingManager  // security finding lifecycle states
 	agentUpdates *agentUpdateManager      // fleet agent binary update jobs
+	cicdWatcher  *cicdFailureWatcher      // CI/CD failed-run alert / auto-incident state
 	// --- AI 记忆异步写入通道 ---
 	memoryCh  chan memoryJob // 异步记忆写入队列
 	memorySem chan struct{}  // Embedding API 并发信号量（最多 3 并发）
@@ -87,6 +88,7 @@ func NewServer(store *Store, cfg *ConfigStore, notifier *Notifier, distDir strin
 		inspect:      newHostInspectManager(),
 		push:         newPushHub(),
 		agentUpdates: newAgentUpdateManager(),
+		cicdWatcher:  newCICDFailureWatcher(),
 		incidents:    newIncidentManager(),
 		remediation:  newRemediationManager(cfg),
 		slos:         newSLOManager(cfg),

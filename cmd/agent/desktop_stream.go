@@ -189,7 +189,16 @@ func (a *Agent) runDesktopChannelFor(t *serverTarget) {
 				a.identity.HostID = id
 			}
 		}
-		sid, lang, ok := a.deskWait(t.server)
+		// The state file holds ONE id, but each panel may know this machine by a
+		// different one (see serverTarget.hostIDOr) — and the desktop worker is a
+		// separate process that never registered, so it has no per-target id yet.
+		// A fingerprint rejoin is idempotent (install-token counters only advance
+		// for genuinely new hosts), making this the cheapest way to learn the id
+		// this particular panel expects in deskWait. Skipped once registered.
+		if !t.isRegistered() {
+			_ = t.register(a.identity)
+		}
+		sid, lang, ok := a.deskWait(t)
 		if !ok {
 			d := backoff.next()
 			time.Sleep(d)
@@ -203,8 +212,9 @@ func (a *Agent) runDesktopChannelFor(t *serverTarget) {
 	}
 }
 
-func (a *Agent) deskWait(server string) (sessionID, lang string, ok bool) {
-	q := url.Values{"host": {a.identity.HostID}}
+func (a *Agent) deskWait(t *serverTarget) (sessionID, lang string, ok bool) {
+	server := t.server
+	q := url.Values{"host": {t.hostIDOr(a.identity.HostID)}}
 	resp, err := agentGet(termWaitHTTP, server+"/api/v1/agent/desktop/wait?"+q.Encode(), a.identity.Fingerprint)
 	if err != nil {
 		return "", "", false

@@ -12,7 +12,6 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-	"unsafe"
 
 	"aiops-monitor/shared"
 )
@@ -31,9 +30,13 @@ type sockFilter struct {
 	jf   uint8
 	k    uint32
 }
+
+// sockFprog mirrors C struct sock_fprog. Do NOT hand-write the padding: the
+// pointer field is 8 bytes on amd64/arm64/loong64/riscv64 but 4 on 386/arm, and
+// a fixed [6]byte gap silently misaligns the filter pointer on every 32-bit
+// build. Go's natural alignment reproduces the C layout on both widths.
 type sockFprog struct {
 	length uint16
-	_      [6]byte // 64 位对齐：len(2)+pad(6)+ptr(8)
 	filter *sockFilter
 }
 
@@ -58,18 +61,6 @@ var ipTCPUDPFilter = []sockFilter{
 	{0x15, 0, 1, 0x86dd}, // 12 内层 IPv6 → ACCEPT，否则 DROP
 	{0x06, 0, 0, 0xffff}, // 13 ACCEPT
 	{0x06, 0, 0, 0},      // 14 DROP
-}
-
-// attachBPF 尽力给 AF_PACKET fd 挂 cBPF 过滤器。失败不致命——退回 ETH_P_ALL 全收 + userspace 过滤。
-func attachBPF(fd int, filter []sockFilter) error {
-	prog := sockFprog{length: uint16(len(filter)), filter: &filter[0]}
-	_, _, errno := syscall.Syscall6(syscall.SYS_SETSOCKOPT, uintptr(fd),
-		uintptr(solSocket), uintptr(soAttachFilter),
-		uintptr(unsafe.Pointer(&prog)), unsafe.Sizeof(prog), 0)
-	if errno != 0 {
-		return errno
-	}
-	return nil
 }
 
 // runNative 开一个 AF_PACKET 原始套接字抓包，内核 BPF 过滤 + 读/解析解耦(worker 池)，

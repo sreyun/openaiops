@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -14,8 +15,21 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
+
+// agentUpdateRunMu serializes self-update attempts inside this process.
+//
+// 多服务端下这把锁是必须的：每个面板各自持有 in-flight 冷却表，两块面板完全可能在
+// 同一时刻下发 agent_update；exec 通道又是「每个 target 一条 goroutine」，于是两次
+// 升级会并发跑同一条 download → verify → replace 流水线。共用暂存文件时，A 校验完
+// SHA-256 到 rename 之间的窗口里 B 正在把同一个文件截断重写，换上去的就是半截二进制
+// （只剩 .bak + 看门狗兜底）；Windows 侧还会互相覆盖 helper 脚本、注销对方的计划任务。
+//
+// 用 TryLock 而不是 Lock：第二块面板应当立刻被告知「已有升级在跑」，而不是排在一次
+// 以重启收尾的替换后面——那条命令醒来时进程早已不是它下发的那个了。
+var agentUpdateRunMu sync.Mutex
 
 // moduleAgentUpdate downloads the matching platform binary from the server /dl/
 // tree, verifies SHA-256, stages it beside the running executable, then asks the
@@ -28,6 +42,13 @@ import (
 //	version  – expected target version (optional; skip when equal unless force)
 //	rollback – "1" to restore aiops-agent(.exe).bak instead of downloading
 func moduleAgentUpdate(args map[string]string, allowedBases []string) ([]byte, int) {
+	if !agentUpdateRunMu.TryLock() {
+		// Keep the "agent_update:" prefix — the server uses it to tell a real module
+		// failure from "module unknown" (which would trigger the legacy script path).
+		return []byte("agent_update: another self-update is already running on this host (skipped)"), 1
+	}
+	defer agentUpdateRunMu.Unlock()
+
 	if truthyArg(args["rollback"]) {
 		return moduleAgentRollback()
 	}
@@ -40,6 +61,12 @@ func moduleAgentUpdate(args map[string]string, allowedBases []string) ([]byte, i
 	}
 	if err := validateUpdateServerURL(server, allowedBases); err != nil {
 		return []byte("agent_update: " + err.Error()), 1
+	}
+	if strings.HasPrefix(strings.ToLower(server), "http://") {
+		// Not fatal (plenty of air-gapped LAN deployments run plaintext), but the
+		// operator should know the binary + its checksum share one unauthenticated
+		// channel. Same reasoning applies to tls_skip_verify: see docs/ci-gate.md.
+		fmt.Fprintf(os.Stderr, "agent_update: WARNING downloading over plaintext http from %s — binary and checksum share an unauthenticated channel\n", server)
 	}
 	force := truthyArg(args["force"])
 	wantVer := strings.TrimSpace(args["version"])
@@ -59,7 +86,8 @@ func moduleAgentUpdate(args map[string]string, allowedBases []string) ([]byte, i
 		exe = resolved
 	}
 	dir := filepath.Dir(exe)
-	staging := filepath.Join(dir, ".aiops-agent.new"+exeSuffix())
+	sweepStaleAgentStaging(dir)
+	staging := agentStagingPath(dir, "new")
 	bak := exe + ".bak"
 
 	client := newUpdateHTTPClient(10 * time.Minute)
@@ -159,7 +187,7 @@ func moduleAgentRollback() ([]byte, int) {
 	if st, err := os.Stat(bak); err != nil || st.IsDir() {
 		return []byte("agent_update rollback: no .bak beside current binary"), 1
 	}
-	staging := filepath.Join(filepath.Dir(exe), ".aiops-agent.rollback"+exeSuffix())
+	staging := agentStagingPath(filepath.Dir(exe), "rollback")
 	if err := copyFile(bak, staging); err != nil {
 		return []byte("agent_update rollback: " + err.Error()), 1
 	}
@@ -193,6 +221,43 @@ func resolveAgentConfigBesideExe(dir string) string {
 		return p
 	}
 	return ""
+}
+
+// agentStagingPath builds a per-process staging name (".aiops-agent.new.<pid>").
+// agentUpdateRunMu already serializes goroutines inside one agent; the pid keeps a
+// SECOND agent process (a manual foreground run alongside the service, or the
+// installer re-launching while a self-update is in flight) from truncating the
+// file this process has already checksummed.
+func agentStagingPath(dir, kind string) string {
+	return filepath.Join(dir, fmt.Sprintf(".aiops-agent.%s.%d%s", kind, os.Getpid(), exeSuffix()))
+}
+
+// sweepStaleAgentStaging removes staging leftovers from runs that died before
+// their own cleanup (killed mid-download, host rebooted during a swap). Without
+// this, per-pid names would accumulate one dead multi-MB file per failed attempt
+// next to the binary. Anything younger than an hour may belong to a live run.
+func sweepStaleAgentStaging(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-1 * time.Hour)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasPrefix(name, ".aiops-agent.new.") &&
+			!strings.HasPrefix(name, ".aiops-agent.rollback.") &&
+			!strings.HasPrefix(name, ".aiops-agent.replace.") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || info.ModTime().After(cutoff) {
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, name))
+	}
 }
 
 func truthyArg(v string) bool {
@@ -234,6 +299,12 @@ func agentUpdateBinCandidates(goos, goarch, preferred string) []string {
 		goarch = "amd64"
 	case "aarch64":
 		goarch = "arm64"
+	case "loongarch64":
+		goarch = "loong64"
+	case "i386", "i686", "x86":
+		goarch = "386"
+	case "armv7l", "armv7", "armv6l", "armhf":
+		goarch = "arm"
 	}
 	const win2012 = "aiops-agent-windows-amd64-win2012.exe"
 	legacyWin := goos == "windows" && goarch == "amd64" && windowsNeedsLegacyAgentBuild()
@@ -242,10 +313,8 @@ func agentUpdateBinCandidates(goos, goarch, preferred string) []string {
 	switch goos {
 	case "linux":
 		switch goarch {
-		case "amd64":
-			primary = "aiops-agent-linux-amd64"
-		case "arm64":
-			primary = "aiops-agent-linux-arm64"
+		case "amd64", "arm64", "loong64", "riscv64", "386", "arm":
+			primary = "aiops-agent-linux-" + goarch
 		}
 	case "darwin":
 		switch goarch {
@@ -286,6 +355,14 @@ func agentUpdateBinCandidates(goos, goarch, preferred string) []string {
 		return []string{win2012}
 	}
 
+	// The server guesses "legacy Windows" from the reported OS string ("...2012...")
+	// while we know the actual kernel. On a modern kernel its win2012 hint would
+	// pin us to the Go 1.20 build line — drop it here; the alias loop below still
+	// keeps win2012 as the last-resort candidate.
+	if pref == win2012 && primary != win2012 {
+		pref = ""
+	}
+
 	out := make([]string, 0, 4)
 	if pref != "" {
 		out = append(out, pref)
@@ -314,25 +391,46 @@ func agentUpdateBinCandidates(goos, goarch, preferred string) []string {
 	return out
 }
 
-// agentBinaryVersionProbe runs `<bin> --version` to ensure the staged PE actually
-// starts on this kernel (catches Go≥1.21 binaries on Server 2012 before replace).
+// agentBinaryVersionProbe runs `<bin> --version` to ensure the staged binary
+// actually starts on this host before it replaces a working agent (catches
+// Go≥1.21 PEs on Server 2012, and wrong-arch / truncated downloads everywhere).
+// AIOPS_UPDATE_PROBE=1 forces the callee onto its silent fast path.
 func agentBinaryVersionProbe(path string) error {
-	if runtime.GOOS != "windows" {
-		return nil
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, path, "--version")
 	cmd.Env = append(os.Environ(), "AIOPS_UPDATE_PROBE=1")
 	out, err := cmd.CombinedOutput()
-	if err != nil {
-		msg := strings.TrimSpace(string(out))
-		if msg == "" {
-			msg = err.Error()
-		}
+	if err == nil {
+		return nil
+	}
+	msg := strings.TrimSpace(string(out))
+	if msg == "" {
+		msg = err.Error()
+	}
+	if runtime.GOOS == "windows" || probeFailureIsFatal(err) {
 		return fmt.Errorf("%s", msg)
 	}
+	// Hardened hosts (SELinux/AppArmor/noexec staging dir) can deny exec of a
+	// freshly written file even though the binary itself is fine. Do not block the
+	// upgrade on an inconclusive probe — the restart watchdog plus .bak rollback
+	// remains the real safety net on Unix.
+	fmt.Fprintf(os.Stderr, "agent_update: version probe inconclusive (%s); continuing\n", msg)
 	return nil
+}
+
+// probeFailureIsFatal is true only when the staged binary demonstrably cannot
+// run here: a wrong-arch / truncated download (ENOEXEC), or a clean non-zero
+// exit from a process that did start.
+func probeFailureIsFatal(err error) bool {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return true
+	}
+	low := strings.ToLower(err.Error())
+	return strings.Contains(low, "exec format error") ||
+		strings.Contains(low, "cannot execute binary file") ||
+		strings.Contains(low, "bad executable")
 }
 
 func validateUpdateServerURL(server string, allowedBases []string) error {
@@ -372,6 +470,13 @@ func validateUpdateServerURL(server string, allowedBases []string) error {
 		}
 		if strings.EqualFold(u.Host, bu.Host) {
 			// http↔https after redirect / TLS upgrade: still the same monitor.
+			// A downgrade is not: the update payload is a root-privileged binary
+			// whose only integrity proof (the .sha256) travels the same channel,
+			// so plaintext would let anyone on-path own the fleet. Upgrades to
+			// https are always fine.
+			if scheme == "http" && strings.EqualFold(bu.Scheme, "https") {
+				return fmt.Errorf("refusing plaintext http update from %s (configured target is https)", u.Host)
+			}
 			return nil
 		}
 	}

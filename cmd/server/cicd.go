@@ -16,8 +16,10 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -191,18 +193,37 @@ func (cs *ConfigStore) DeleteCICDConnection(id string) error {
 	return cs.save()
 }
 
+// cicdSyncPersistEvery bounds how often an UNCHANGED sync result is written back.
+// The heartbeat still lands in the config, just not on every poll.
+const cicdSyncPersistEvery = 5 * time.Minute
+
 // SetCICDSyncResult records the outcome of the latest poll for the status column.
+//
+// The in-memory fields are always refreshed, but persistence is deliberate:
+// ConfigStore.save() marshals the ENTIRE server config (users, playbooks, every
+// connection) through encryptConfigSecrets and writes it as one blob to PG/disk.
+// /cicd/runs and /cicd/overview both call this once per connection, and the
+// console polls both — so an unconditional save turned a 4-connection setup into
+// eight full-config writes per refresh cycle. Only a changed error string (the
+// part operators actually see) or a stale heartbeat is worth that.
 func (cs *ConfigStore) SetCICDSyncResult(id string, errMsg string) {
+	now := time.Now().Unix()
+	persist := false
 	cs.mu.Lock()
 	for i, c := range cs.cfg.CICDConnections {
-		if c.ID == id {
-			cs.cfg.CICDConnections[i].LastError = errMsg
-			cs.cfg.CICDConnections[i].LastSyncAt = time.Now().Unix()
-			break
+		if c.ID != id {
+			continue
 		}
+		persist = c.LastError != errMsg ||
+			now-c.LastSyncAt >= int64(cicdSyncPersistEvery/time.Second)
+		cs.cfg.CICDConnections[i].LastError = errMsg
+		cs.cfg.CICDConnections[i].LastSyncAt = now
+		break
 	}
 	cs.mu.Unlock()
-	_ = cs.save()
+	if persist {
+		_ = cs.save()
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -256,6 +277,13 @@ func cicdOwnerRepo(project string) (owner, repo string) {
 // cicdHTTPClient builds a client that trusts the connection's CA bundle. Self-hosted
 // GitLab/Gitee instances routinely sit behind an internal CA, so verification has to
 // be configurable without falling back to "skip everything" by default.
+//
+// base_url is operator-supplied, so this is a "user can influence the URL" egress
+// exactly like the AI endpoint and the notification webhooks: it dials through
+// ssrfDialControl (see safedial.go), which rejects link-local and cloud metadata
+// addresses after DNS resolution — covering redirects and DNS rebinding too. It
+// cannot simply reuse newGuardedHTTPClient because the CA bundle / skip-verify
+// options need their own TLS config.
 func cicdHTTPClient(c CICDConnection, timeout time.Duration) (*http.Client, error) {
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
 	if c.InsecureSkipTLS {
@@ -272,19 +300,51 @@ func cicdHTTPClient(c CICDConnection, timeout time.Duration) (*http.Client, erro
 		TLSClientConfig:     tlsCfg,
 		TLSHandshakeTimeout: 10 * time.Second,
 		Proxy:               http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+			Control:   ssrfDialControl,
+		}).DialContext,
 	}
 	return &http.Client{Timeout: timeout, Transport: tr}, nil
 }
 
+// cicdSanitizeErr scrubs the access token out of an error before it reaches the
+// browser or the config file.
+//
+// Gitee v5 authenticates with an `?access_token=` QUERY PARAMETER, so any
+// transport-level failure comes back as *url.Error carrying the full URL — token
+// included. That string is handed to SetCICDSyncResult, which persists it in
+// CICDConnection.LastError and renders it in the connection list, i.e. a repo
+// credential would leak into the config blob and to every viewer-level user.
+func cicdSanitizeErr(err error, token string) error {
+	token = strings.TrimSpace(token)
+	if err == nil || token == "" {
+		return err
+	}
+	msg := err.Error()
+	cleaned := strings.ReplaceAll(msg, token, "***")
+	// The URL carries the escaped spelling; scrub that form as well.
+	if esc := url.QueryEscape(token); esc != token {
+		cleaned = strings.ReplaceAll(cleaned, esc, "***")
+	}
+	if cleaned == msg {
+		return err
+	}
+	return errors.New(cleaned)
+}
+
 // cicdRequest performs an authenticated call and decodes JSON into out.
-func (s *Server) cicdRequest(ctx context.Context, c CICDConnection, method, path string, body io.Reader, out any) error {
+func (s *Server) cicdRequest(ctx context.Context, c CICDConnection, method, path string, body io.Reader, out any) (err error) {
+	token := decryptSecret(c.Token)
+	defer func() { err = cicdSanitizeErr(err, token) }()
+
 	root := cicdAPIRoot(c)
 	full := root + path
 	req, err := http.NewRequestWithContext(ctx, method, full, body)
 	if err != nil {
 		return err
 	}
-	token := decryptSecret(c.Token)
 	switch c.Provider {
 	case CICDProviderGitLab:
 		if token != "" {

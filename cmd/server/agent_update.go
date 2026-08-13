@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -379,7 +380,13 @@ func (s *Server) handleAgentUpdateJob(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAgentUpdateJobs(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"jobs": s.agentUpdates.list(20)})
+	limit := 20
+	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = min(n, agentUpdateMaxJobs)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"jobs": s.agentUpdates.list(limit)})
 }
 
 type agentAutoUpdatePolicyRequest struct {
@@ -589,7 +596,8 @@ func (s *Server) waitVersionAckOrExpire(job *agentUpdateJob, hostID, target stri
 		return
 	}
 	// Give the helper a few report cycles to come back with the new version.
-	// Soft-retry (60s) can re-queue in parallel if still behind.
+	// The soft-retry window (agentUpdateSoftRetrySec) is deliberately >= this
+	// deadline, so a re-queue can never overlap a swap that is still in flight.
 	deadline := time.Now().Add(5 * time.Minute)
 	for time.Now().Before(deadline) {
 		time.Sleep(5 * time.Second)

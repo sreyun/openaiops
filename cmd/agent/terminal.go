@@ -223,7 +223,7 @@ func (a *Agent) runTerminalChannelFor(t *serverTarget) {
 				a.identity.HostID = id
 			}
 		}
-		sid, mode, command, lang, ok := a.termWait(t.server)
+		sid, mode, command, lang, ok := a.termWait(t)
 		if !ok {
 			d := backoff.next()
 			slog.Debug("终端通道连接失败，指数退避等待", "delay", d, "retry", backoff.retry)
@@ -245,8 +245,13 @@ func (a *Agent) runTerminalChannelFor(t *serverTarget) {
 	}
 }
 
-func (a *Agent) termWait(server string) (sessionID, mode, command, lang string, ok bool) {
-	q := url.Values{"host": {a.identity.HostID}}
+func (a *Agent) termWait(t *serverTarget) (sessionID, mode, command, lang string, ok bool) {
+	server := t.server
+	// Per-target id: panels can know this machine by different host_ids (see
+	// serverTarget.hostIDOr) — waiting on the wrong one means the panel's
+	// terminal call is never picked up by this agent.
+	hostID := t.hostIDOr(a.identity.HostID)
+	q := url.Values{"host": {hostID}}
 	resp, err := agentGet(termWaitHTTP, server+"/api/v1/agent/terminal/wait?"+q.Encode(), a.identity.Fingerprint)
 	if err != nil {
 		slog.Debug("终端 wait 请求失败", "err", err, "server", server)
@@ -255,7 +260,7 @@ func (a *Agent) termWait(server string) (sessionID, mode, command, lang string, 
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusForbidden {
 		slog.Warn("终端 wait 被拒绝(403)：指纹与服务端主机记录不匹配，请确认 Agent 已成功注册",
-			"server", server, "host_id", short(a.identity.HostID))
+			"server", server, "host_id", short(hostID))
 		return "", "", "", "", false
 	}
 	if resp.StatusCode != http.StatusOK {

@@ -95,7 +95,55 @@ func defaultDiskPath() string {
 	return "/"
 }
 
+// valueTakingAgentFlags are the flags whose *next* argv token is a value, not a
+// flag. Needed so `--config --version` (a path literally named "--version") is
+// not mistaken for a version request during the pre-config scan.
+var valueTakingAgentFlags = map[string]bool{
+	"-server": true, "-interval": true, "-plugin-interval": true, "-disk-path": true,
+	"-plugins-dir": true, "-python": true, "-category": true, "-folder-id": true,
+	"-token": true, "-listen": true, "-relay-secret": true, "-config": true,
+	"-log-paths": true, "-ca-cert": true, "-security-mode": true,
+}
+
+// argsRequestVersion reports whether argv asks for `--version` / `-version`.
+// Mirrors the flag package's accepted spellings (both dash forms, optional
+// `=value`) and stops at the first non-flag argument, like flag.Parse does.
+func argsRequestVersion(args []string) bool {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" || a == "" || a[0] != '-' || a == "-" {
+			return false
+		}
+		name, val, hasVal := strings.Cut(a, "=")
+		norm := "-" + strings.TrimLeft(name, "-")
+		if norm == "-version" {
+			// `--version=false` explicitly opts out.
+			return !hasVal || (val != "false" && val != "0")
+		}
+		if !hasVal && valueTakingAgentFlags[norm] {
+			i++ // skip the separate value token
+		}
+	}
+	return false
+}
+
 func main() {
+	// --version must stay a pure, silent, side-effect-free probe: the self-update
+	// helpers run `<staged binary> --version` BEFORE swapping the live agent to
+	// prove the download actually starts on this kernel. Handling it here — ahead
+	// of config load, slog output and ensureConfigExample — matters because:
+	//   1. a single stderr line makes the PowerShell helper's `& $new --version`
+	//      throw under $ErrorActionPreference='Stop' (native stderr → terminating
+	//      NativeCommandError), which aborted every Windows upgrade before the swap;
+	//   2. a malformed config.yaml in CWD would log.Fatalf here and mark a
+	//      perfectly good binary "not runnable";
+	//   3. ensureConfigExample would litter config.example.yaml into the probe's
+	//      CWD (C:\Windows\System32 for the SYSTEM scheduled task).
+	// AIOPS_UPDATE_PROBE=1 is set by the updater and forces the same fast path.
+	if argsRequestVersion(os.Args[1:]) || os.Getenv("AIOPS_UPDATE_PROBE") == "1" {
+		fmt.Println(agentVersion())
+		return
+	}
 	// Prefer WriteConsoleW on an attached Windows console so UTF-8 Chinese slog
 	// lines are not visually duplicated under CP 65001 WriteFile quirks.
 	slog.SetDefault(slog.New(newAgentTextHandler(shared.NewConsoleAwareWriter(os.Stderr))))
