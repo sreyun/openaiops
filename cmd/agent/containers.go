@@ -122,13 +122,19 @@ func (a *Agent) runContainerCollector(ctx context.Context) {
 }
 
 func (a *Agent) postContainerReport(rep shared.ContainerReport) {
-	body, err := json.Marshal(rep)
-	if err != nil {
-		return
-	}
 	fp := a.identity.Fingerprint
+	baseHostID := rep.HostID
 	for _, t := range a.targets {
 		go func(tgt *serverTarget) {
+			// Marshal per target: each panel may know this machine by a different
+			// host_id (see serverTarget.hostIDOr). A shared local-id body is 403'd
+			// forever by forwardFingerprintOKByHost on the rebound panel.
+			r := rep
+			r.HostID = tgt.hostIDOr(baseHostID)
+			body, err := json.Marshal(r)
+			if err != nil {
+				return
+			}
 			req, err := http.NewRequest(http.MethodPost, tgt.server+"/api/v1/agent/containers", bytes.NewReader(body))
 			if err != nil {
 				return

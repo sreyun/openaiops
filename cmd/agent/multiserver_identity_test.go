@@ -151,6 +151,75 @@ func TestSendReportsPerTargetServerURL(t *testing.T) {
 	}
 }
 
+// Hyper-V / container inventory must remap host_id per panel the same way
+// hardware/netflow already do. A shared local-id body is rejected forever by
+// forwardFingerprintOKByHost when the panel rebound the fingerprint to an older id.
+func TestHyperVAndContainerReportsUsePerTargetHostID(t *testing.T) {
+	var mu sync.Mutex
+	got := map[string]string{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		switch r.URL.Path {
+		case "/api/v1/agent/hyperv":
+			var rep shared.HyperVReport
+			if err := json.NewDecoder(r.Body).Decode(&rep); err != nil {
+				t.Errorf("hyperv decode: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			got["hyperv"] = rep.HostID
+			mu.Unlock()
+		case "/api/v1/agent/containers":
+			var rep shared.ContainerReport
+			if err := json.NewDecoder(r.Body).Decode(&rep); err != nil {
+				t.Errorf("containers decode: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			got["containers"] = rep.HostID
+			mu.Unlock()
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	tgt := newTestTarget(srv.URL)
+	tgt.regMu.Lock()
+	tgt.canonicalHostID = "panel-b-id"
+	tgt.regMu.Unlock()
+
+	a := &Agent{
+		identity: shared.Report{HostID: "local-id", Fingerprint: "fp"},
+		targets:  []*serverTarget{tgt},
+	}
+	a.postHyperVReport(shared.HyperVReport{HostID: "local-id", Guests: nil})
+	a.postContainerReport(shared.ContainerReport{HostID: "local-id"})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		done := got["hyperv"] != "" && got["containers"] != ""
+		mu.Unlock()
+		if done {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if got["hyperv"] != "panel-b-id" {
+		t.Fatalf("hyperv host_id=%q, want panel-b-id", got["hyperv"])
+	}
+	if got["containers"] != "panel-b-id" {
+		t.Fatalf("containers host_id=%q, want panel-b-id", got["containers"])
+	}
+}
+
 // terminal / desktop / forward long-polls key off host_id too — a wrong id
 // means the panel's session request is never picked up by this agent.
 func TestWaitChannelsUsePerTargetHostID(t *testing.T) {

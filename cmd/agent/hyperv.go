@@ -288,16 +288,20 @@ func (a *Agent) runHyperVCollector(ctx context.Context) {
 
 // postHyperVReport sends the Hyper-V guest inventory to all server targets.
 // Mirrors postHardwareReport: fingerprint in the X-Agent-Fingerprint header,
-// no credential in the body.
+// no credential in the body. Marshal per target — each panel may know this
+// machine by a different host_id (see serverTarget.hostIDOr).
 func (a *Agent) postHyperVReport(rep shared.HyperVReport) {
-	body, err := json.Marshal(rep)
-	if err != nil {
-		slog.Warn("Hyper-V 上报序列化失败", "err", err)
-		return
-	}
 	fp := a.identity.Fingerprint
+	baseHostID := rep.HostID
 	for _, t := range a.targets {
 		go func(tgt *serverTarget) {
+			r := rep
+			r.HostID = tgt.hostIDOr(baseHostID)
+			body, err := json.Marshal(r)
+			if err != nil {
+				slog.Warn("Hyper-V 上报序列化失败", "err", err)
+				return
+			}
 			req, err := http.NewRequest("POST", tgt.server+"/api/v1/agent/hyperv", bytes.NewReader(body))
 			if err != nil {
 				return
@@ -315,9 +319,9 @@ func (a *Agent) postHyperVReport(rep shared.HyperVReport) {
 			if resp.StatusCode >= 300 {
 				respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 				slog.Warn("Hyper-V 上报被拒", "server", tgt.server, "status", resp.StatusCode,
-					"host_id", rep.HostID, "vms", len(rep.Guests), "body", string(respBody))
+					"host_id", r.HostID, "vms", len(r.Guests), "body", string(respBody))
 			} else {
-				slog.Info("Hyper-V 上报成功", "server", tgt.server, "host_id", rep.HostID, "vms", len(rep.Guests))
+				slog.Info("Hyper-V 上报成功", "server", tgt.server, "host_id", r.HostID, "vms", len(r.Guests))
 			}
 		}(t)
 	}
