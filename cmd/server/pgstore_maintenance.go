@@ -65,7 +65,9 @@ func (p *pgStore) tableStats() ([]pgTableStat, error) {
 		FROM pg_class c
 		JOIN pg_namespace n ON n.oid = c.relnamespace
 		LEFT JOIN pg_stat_user_tables st ON st.relid = c.oid
-		WHERE n.nspname = 'public' AND c.relkind IN ('r','p')
+		-- current_schema()，不是写死的 'public'：服务端的表就住在 search_path 的首个
+		-- schema 里，部署可以自定义。写死 public 会让诊断在这类部署上报出「什么表都没有」。
+		WHERE n.nspname = current_schema() AND c.relkind IN ('r','p')
 		ORDER BY pg_total_relation_size(c.oid) DESC`)
 	if err != nil {
 		return nil, err

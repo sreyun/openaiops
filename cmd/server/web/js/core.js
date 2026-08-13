@@ -465,6 +465,29 @@ const isSystemMount = p => {
   return p === "/boot" || p.startsWith("/boot/") || p === "/System" || p.startsWith("/System/");
 };
 
+/* ---------- 挂载路径智能缩短（K8s PVC / 长路径截断） ---------- */
+const shortenMountPath = (raw, maxLen = 42) => {
+  const p = String(raw || "");
+  if (!p) return "";
+  // K8s pod volume: /var/lib/kubelet/pods/<UUID>/volumes/<plugin>/<pvc-name>
+  const kubeMatch = p.match(/\/volumes\/(?:kubernetes\.io~)?([^/]+)\/([^/]+)$/);
+  if (kubeMatch) return "k8s:" + kubeMatch[2];
+  // Docker overlay: /var/lib/docker/overlay2/<id>/merged
+  if (p.startsWith("/var/lib/docker/")) {
+    const last = p.split("/").pop();
+    return "docker:" + (last || p);
+  }
+  // Snap: /snap/...
+  if (p.startsWith("/snap/")) return p;
+  // Generic long path: show first + last segments
+  if (p.length > maxLen) {
+    const head = p.slice(0, Math.floor(maxLen * 0.55));
+    const tail = p.slice(-Math.floor(maxLen * 0.35));
+    return head + "…" + tail;
+  }
+  return p;
+};
+
 /* ============================================================
    P1-1: 主题切换（默认浅色；meta theme-color / color-scheme 跟随应用主题）
    ============================================================ */
@@ -800,12 +823,13 @@ function icon(name) {
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${p}</svg>`;
 }
 
-function bar(label, percent, detail, key) {
+function bar(label, percent, detail, key, labelTitle) {
   const p = Math.max(0, Math.min(percent || 0, 100));
   // key（cpu/mem/disk）用于差量更新时定位数值与进度条，避免每轮询全量重建主机卡片。
   const vAttr = key ? ` data-metric="${key}"` : "";
   const bAttr = key ? ` data-bar="${key}"` : "";
-  return `<div class="metric"><div class="row"><span class="label">${label}</span><span class="val mono"${vAttr}>${detail}</span></div>
+  const tAttr = labelTitle ? ` title="${esc(labelTitle)}"` : "";
+  return `<div class="metric"><div class="row"><span class="label"${tAttr}>${label}</span><span class="val mono"${vAttr}>${detail}</span></div>
     <div class="bar"><div class="fill"${bAttr} style="width:${p}%;background:${usageColor(percent)}"></div></div></div>`;
 }
 

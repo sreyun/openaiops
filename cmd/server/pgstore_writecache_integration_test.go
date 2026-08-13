@@ -46,6 +46,11 @@ func openIntegrationPGStore(t *testing.T) *pgStore {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Keep public on the search path *behind* the isolated schema: new tables still
+	// land in the isolated one (it is first), but extension-provided types such as
+	// pgvector's `vector` — installed once, in public — stay resolvable. Without
+	// this the bootstrap DDL fails with `type "vector" does not exist`.
+	scopedDSN = strings.Replace(scopedDSN, "search_path="+schema, "search_path="+schema+",public", 1)
 	// openPGStore runs the full bootstrap + versioned migrations, so this also
 	// exercises migration v13 against a real server.
 	ps, err := openPGStore(scopedDSN)
@@ -195,20 +200,24 @@ func TestAutovacuumTuningMigrationApplied(t *testing.T) {
 	ps := openIntegrationPGStore(t)
 
 	for _, table := range []string{"hosts", "kv_state", "incidents"} {
-		var opts sql.NullString
+		var opts, toastOpts sql.NullString
+		// PG 把 toast.* 参数存在 **TOAST 副表** 的 reloptions 里，不是主表的——查主表
+		// 永远看不到它们。kv_state 的大 blob 正是躺在 TOAST 里，这一半设置漏了的话，
+		// 主表干净而 TOAST 继续膨胀，问题只解决了一半。
 		err := ps.db.QueryRow(`
-			SELECT array_to_string(c.reloptions, ',')
+			SELECT array_to_string(c.reloptions, ','), array_to_string(t.reloptions, ',')
 			FROM pg_class c
 			JOIN pg_namespace n ON n.oid = c.relnamespace
-			WHERE c.relname = $1 AND n.nspname = current_schema()`, table).Scan(&opts)
+			LEFT JOIN pg_class t ON t.oid = c.reltoastrelid
+			WHERE c.relname = $1 AND n.nspname = current_schema()`, table).Scan(&opts, &toastOpts)
 		if err != nil {
 			t.Fatalf("read reloptions for %s: %v", table, err)
 		}
 		if !opts.Valid || !strings.Contains(opts.String, "autovacuum_vacuum_scale_factor=0.01") {
 			t.Errorf("%s did not get the autovacuum tuning (reloptions=%q)", table, opts.String)
 		}
-		if !opts.Valid || !strings.Contains(opts.String, "toast.autovacuum_vacuum_scale_factor=0.01") {
-			t.Errorf("%s did not get the TOAST autovacuum tuning (reloptions=%q)", table, opts.String)
+		if !toastOpts.Valid || !strings.Contains(toastOpts.String, "autovacuum_vacuum_scale_factor=0.01") {
+			t.Errorf("%s TOAST table did not get the autovacuum tuning (toast reloptions=%q)", table, toastOpts.String)
 		}
 	}
 }

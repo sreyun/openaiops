@@ -179,8 +179,8 @@ function renderSNDevices(container, devices) {
     const reachable = d.reachable !== false;
     html += `<div class="sn-dev">`;
     html += `<div class="sn-dev-head">
-      <div class="sn-dev-title">${esc(d.device_name || "设备")}${reachable ? `<span class="sn-pill ok">${I18N.t("snmp.reachable") || "可达"}</span>` : `<span class="sn-pill bad">${I18N.t("snmp.unreachable") || "不可达"}</span>`}</div>
-      <div class="sn-dev-sub">${esc(d.device_ip || "")}${sys.name ? " · " + esc(sys.name) : ""}</div>
+      <div class="sn-dev-title" title="${esc(d.device_name || "")}">${esc(d.device_name || "设备")}${reachable ? `<span class="sn-pill ok">${I18N.t("snmp.reachable") || "可达"}</span>` : `<span class="sn-pill bad">${I18N.t("snmp.unreachable") || "不可达"}</span>`}</div>
+      <div class="sn-dev-sub" title="${esc((d.device_ip || "") + (sys.name ? " · " + sys.name : ""))}">${esc(d.device_ip || "")}${sys.name ? " · " + esc(sys.name) : ""}</div>
       <span style="flex:1"></span>
       <button class="icon-btn danger" data-sndel="${esc(d.device_name || "")}" data-snhost="${esc(snCurrentHost || "")}" title="${esc(I18N.t("snmp.delete") || "删除")}">
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6h14z"/></svg>
@@ -257,7 +257,7 @@ function renderSNTraps(container, traps) {
     html += `<td>${esc(snFmtTime(t.received_at))}</td>`;
     html += `<td><span class="sn-badge ${sevCls}">${esc(sev)}</span></td>`;
     html += `<td>${esc(t.source_ip || "")}</td>`;
-    html += `<td class="sn-oid">${esc(t.trap_oid || "")}</td>`;
+    html += `<td class="sn-oid" title="${esc(t.trap_oid || "")}">${esc(t.trap_oid || "")}</td>`;
     html += `</tr>`;
   });
   html += `</tbody></table></div></div>`;

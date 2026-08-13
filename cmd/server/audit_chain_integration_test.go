@@ -164,7 +164,9 @@ SELECT
 }
 
 func postgresDSNWithSearchPath(dsn, schema string) (string, error) {
-	if !isSafePartitionName(schema, "audit_chain_test") {
+	// Allow-list the prefixes the integration tests generate. The schema name is
+	// interpolated into DDL, so it must never come from anywhere but here.
+	if !isSafePartitionName(schema, "audit_chain_test") && !isSafePartitionName(schema, "writecache_test") {
 		return "", fmt.Errorf("unsafe test schema")
 	}
 	parsed, err := url.Parse(dsn)

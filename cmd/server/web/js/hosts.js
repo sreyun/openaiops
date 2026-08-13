@@ -27,7 +27,11 @@ function hostCard(h) {
     : "";
   const disks = (Array.isArray(m.disks) ? m.disks : []).filter(d => !isSystemMount(d.path));
   const disksHtml = disks.length
-    ? disks.map(d => bar(I18N.t("ui.disk_label") + " " + esc(d.path) + (d.percent >= 90 ? " ⚠" : ""), d.percent, d.percent.toFixed(1) + "% · " + fmtGB(d.used) + "/" + fmtGB(d.total) + I18N.t("unit.gb"))).join("")
+    ? disks.map(d => {
+        const shortPath = shortenMountPath(d.path);
+        const label = I18N.t("ui.disk_label") + " " + esc(shortPath) + (d.percent >= 90 ? " ⚠" : "");
+        return bar(label, d.percent, d.percent.toFixed(1) + "% · " + fmtGB(d.used) + "/" + fmtGB(d.total) + I18N.t("unit.gb"), undefined, d.path);
+      }).join("")
     : bar(I18N.t("ui.disk"), m.disk_percent || 0, (m.disk_percent || 0).toFixed(1) + "% · " + fmtGB(m.disk_used || 0) + "/" + fmtGB(m.disk_total || 0) + I18N.t("unit.gb"), "disk");
   const gpus = Array.isArray(m.gpus) ? m.gpus : [];
   const gpusHtml = gpus.map(g => {
@@ -1279,9 +1283,10 @@ async function loadAndRenderCharts() {
     const _gb = b => b / 1073741824;
     const diskLabel = (path) => {
       const d = latestDisk[path];
-      if (!d || !d.total) return '磁盘 ' + path;
+      const shortPath = shortenMountPath(path);
+      if (!d || !d.total) return '磁盘 ' + shortPath;
       const used = _gb(d.used), tot = _gb(d.total);
-      return `磁盘 ${path} · 已用 ${used.toFixed(0)}/${tot.toFixed(0)}GB · 剩 ${(tot - used).toFixed(0)}GB`;
+      return `磁盘 ${shortPath} · 已用 ${used.toFixed(0)}/${tot.toFixed(0)}GB · 剩 ${(tot - used).toFixed(0)}GB`;
     };
     const diskSeries = diskKeys.map((path, idx) => ({
       key: `disk_${path}`, label: diskLabel(path),

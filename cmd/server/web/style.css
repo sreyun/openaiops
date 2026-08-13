@@ -659,7 +659,7 @@ section{scroll-margin-top:80px; margin-bottom:24px}
 /* 指标：紧凑行，4px 进度条 */
 .metric{ margin:6px 0 }
 .metric .row{display:flex; justify-content:space-between; align-items:baseline; font-size:11.5px; margin-bottom:3px; gap:8px}
-.metric .row .label{color:var(--muted); font-weight:500; flex:none}
+.metric .row .label{color:var(--muted); font-weight:500; flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
 .metric .row .val{color:var(--txt2); font-weight:600; font-variant-numeric:tabular-nums; text-align:right;
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex-shrink:1; min-width:0}
 .bar{ height:4px; background:var(--panel3); border-radius:2px; overflow:hidden; position:relative }
@@ -3785,7 +3785,7 @@ table tbody tr:hover{
 .api-table td.crit{color:var(--crit); font-variant-numeric:tabular-nums}
 .api-table tr.row-down{background:var(--crit-soft)}
 .api-ep-name{color:var(--txt); font-weight:500}
-.api-ep-url{color:var(--muted); font-size:11px; font-family:monospace; max-width:340px; overflow:hidden; text-overflow:ellipsis}
+.api-ep-url{color:var(--muted); font-size:11px; font-family:monospace; max-width:340px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
 .api-table .muted{color:var(--muted)}
 .sdot{display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; vertical-align:middle}
 .sdot.ok{background:var(--ok)} .sdot.crit{background:var(--crit)} .sdot.idle{background:var(--muted2)}
@@ -4597,12 +4597,12 @@ select:focus {
 .sn-warn { background: var(--warn-soft); color: var(--warn); }
 .sn-row-crit td { background: var(--crit-soft); }
 .sn-row-warn td { background: var(--warn-soft); }
-.sn-oid { font-family: ui-monospace, monospace; font-size: 11px; color: var(--txt2); }
+.sn-oid { font-family: ui-monospace, monospace; font-size: 11px; color: var(--txt2); max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* SNMP 设备卡片 + 统计 + 利用率条（网络设备页重构） */
 .sn-dev { margin-bottom: 22px; }
 .sn-dev-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.sn-dev-title { font-size: 16px; font-weight: 650; color: var(--txt); display: flex; align-items: center; gap: 8px; }
-.sn-dev-sub { font-size: 12px; color: var(--muted); font-family: ui-monospace, monospace; }
+.sn-dev-title { font-size: 16px; font-weight: 650; color: var(--txt); display: flex; align-items: center; gap: 8px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sn-dev-sub { font-size: 12px; color: var(--muted); font-family: ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 .sn-pill { font-size: 11px; font-weight: 600; padding: 2px 9px; border-radius: 10px; }
 .sn-pill.ok { background: var(--ok-soft); color: var(--ok); }
 .sn-pill.bad { background: var(--crit-soft); color: var(--crit); }

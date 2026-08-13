@@ -412,7 +412,7 @@ function hwDetailHeadHTML(it, m) {
   return `<div class="hwx-dhead">
     <span class="hw-health-dot hw-${m.cls}" aria-hidden="true">${m.icon}</span>
     <div class="hwx-dtitle">
-      <div class="t">${esc(snap.target_name || snap.target_url)}</div>
+      <div class="t" title="${esc(snap.target_name || snap.target_url || "")}">${esc(snap.target_name || snap.target_url)}</div>
       <div class="s" title="${esc(sub)}">${esc(sub)}</div>
     </div>
     <span class="badge ${badgeCls}">${esc(m.label)}</span>
@@ -1189,8 +1189,8 @@ function hwInjectTreeStyles() {
   s.textContent = `
   .hwx-detailbox{min-height:160px}
   .hwx-dhead{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding-bottom:12px;margin-bottom:14px;border-bottom:1px solid var(--line)}
-  .hwx-dtitle{min-width:0}
-  .hwx-dtitle .t{font-size:16px;font-weight:600;color:var(--txt)}
+  .hwx-dtitle{min-width:0;flex:1;overflow:hidden}
+  .hwx-dtitle .t{font-size:16px;font-weight:600;color:var(--txt);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .hwx-dtitle .s{font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .hwx-dd{position:relative}
   .hwx-empty{color:var(--muted);padding:48px 12px;text-align:center;font-size:13px}`;

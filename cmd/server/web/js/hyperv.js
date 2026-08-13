@@ -357,7 +357,7 @@ function hvDiskCard(g) {
   else body = hvMiniTable(
     [hvT("hyperv.disk_path", "路径"), hvT("hyperv.disk_ctrl", "控制器"), hvT("hyperv.disk_size", "占用")],
     disks.map(d => [
-      esc(d.path || "—"),
+      `<span title="${esc(d.path || "")}">${esc(shortenMountPath(d.path || "—"))}</span>`,
       esc((d.controller_type || "") + (d.controller_number != null ? ` ${d.controller_number}:${d.controller_location || 0}` : "")),
       d.file_size_gb ? esc(hvFmtGB(d.file_size_gb)) : "—",
     ]));
