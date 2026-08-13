@@ -28,6 +28,9 @@ type RetentionConfig struct {
 	MemoryDays       int `json:"memory_days,omitempty"`        // soft age for memory cleanup
 	NetFlowMonths    int `json:"netflow_months,omitempty"`     // drop partitions older than N months
 	AICallDays       int `json:"ai_call_days,omitempty"`       // AI 调用与人工反馈观测
+	// OpsHistoryDays 覆盖会话 / Run / 剧本与自愈执行 / Trap / 硬件与 Hyper-V 事件等
+	// 可再生的运行历史。这些表此前没有任何清理，是 PG 无界增长的主要来源之一。
+	OpsHistoryDays int `json:"ops_history_days,omitempty"`
 }
 
 func (r RetentionConfig) withDefaults() RetentionConfig {
@@ -48,6 +51,9 @@ func (r RetentionConfig) withDefaults() RetentionConfig {
 	}
 	if r.AICallDays <= 0 {
 		r.AICallDays = 365
+	}
+	if r.OpsHistoryDays <= 0 {
+		r.OpsHistoryDays = 90
 	}
 	return r
 }

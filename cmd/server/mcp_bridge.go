@@ -9,55 +9,72 @@ import (
 
 // registerExternalMCPTools bridges enabled MCP clients into the Sreyun tool map.
 // Removes previously registered ext_* tools, then re-adds from manager cache.
+//
+// 这条路径在运行时被 handleSetAIConfig / handleSyncMCPClient 触发，与正在进行的
+// AI 会话并发。工具表的增删必须在 toolsMu 下完成再原子发布；而 mgr.Reload 会做网络
+// 探测，绝不能持锁做，否则一次保存配置就会把所有会话卡住。
 func (h *SreyunCore) registerExternalMCPTools() {
 	if h == nil || h.s == nil {
 		return
 	}
-	// Drop prior bridge tools
-	for name := range h.tools {
-		if strings.HasPrefix(name, "ext_") || name == "call_external_mcp" || name == "list_external_mcp_tools" {
-			delete(h.tools, name)
-		}
-	}
 	mgr := h.s.mcpClients
-	if mgr == nil {
-		h.invalidateToolCaches()
-		return
-	}
-	_ = mgr.Reload(h.s.cfg.AIConfig().MCPClientsJSON)
 
-	bridged := mgr.ListBridgedTools()
-	for _, b := range bridged {
-		bt := b // capture
-		schema := bt.Tool.InputSchema
-		if schema == nil {
-			schema = map[string]any{"type": "object", "properties": map[string]any{}}
-		}
-		desc := bt.Tool.Description
-		if desc == "" {
-			desc = "外部 MCP 工具 " + bt.Tool.Name
-		}
-		desc = fmt.Sprintf("[外部MCP:%s] %s", bt.ServerName, desc)
-		h.tools[bt.BridgeName] = SreyunTool{
-			Name:        bt.BridgeName,
-			Description: desc,
-			Parameters:  schema,
-			Execute: func(args map[string]any) (string, error) {
-				ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-				defer cancel()
-				if h.s.aiGov != nil {
-					h.s.aiGov.recordTool(aiToolAuditEntry{
-						Actor: "mcp-client:" + bt.ServerID, Tool: bt.BridgeName, Action: "tools/call", Approved: true,
-						Detail: "remote=" + bt.Tool.Name,
-					})
-				}
-				return mgr.Call(ctx, bt.ServerID, bt.Tool.Name, args)
-			},
-		}
+	// —— 锁外：网络 I/O ——
+	var bridged []mcpBridgedTool
+	if mgr != nil {
+		_ = mgr.Reload(h.s.cfg.AIConfig().MCPClientsJSON)
+		bridged = mgr.ListBridgedTools()
 	}
 
+	// —— 锁内：纯内存改表 ——
+	h.mutateTools(func(tools map[string]SreyunTool) {
+		for name := range tools {
+			if strings.HasPrefix(name, "ext_") || name == "call_external_mcp" || name == "list_external_mcp_tools" {
+				delete(tools, name)
+			}
+		}
+		if mgr == nil {
+			return
+		}
+		for _, b := range bridged {
+			bt := b // capture
+			schema := bt.Tool.InputSchema
+			if schema == nil {
+				schema = map[string]any{"type": "object", "properties": map[string]any{}}
+			}
+			desc := bt.Tool.Description
+			if desc == "" {
+				desc = "外部 MCP 工具 " + bt.Tool.Name
+			}
+			desc = fmt.Sprintf("[外部MCP:%s] %s", bt.ServerName, desc)
+			tools[bt.BridgeName] = SreyunTool{
+				Name:        bt.BridgeName,
+				Description: desc,
+				Parameters:  schema,
+				Execute: func(args map[string]any) (string, error) {
+					// 继承本轮会话上下文：客户端断开时外部调用也随之取消，不再空转 45s。
+					ctx, cancel := context.WithTimeout(h.callContext(args), 45*time.Second)
+					defer cancel()
+					if h.s.aiGov != nil {
+						h.s.aiGov.recordTool(aiToolAuditEntry{
+							Actor: "mcp-client:" + bt.ServerID, Tool: bt.BridgeName, Action: "tools/call", Approved: true,
+							Detail: "remote=" + bt.Tool.Name,
+						})
+					}
+					// 剥离引擎内部键，避免把面板用户名等信息透给第三方 MCP 服务端。
+					return mgr.Call(ctx, bt.ServerID, bt.Tool.Name, sanitizeOutboundArgs(args))
+				},
+			}
+		}
+		h.registerExternalMCPMetaToolsLocked(tools)
+	})
+}
+
+// registerExternalMCPMetaToolsLocked adds the discovery / explicit-call tools.
+// Caller holds toolsMu.
+func (h *SreyunCore) registerExternalMCPMetaToolsLocked(tools map[string]SreyunTool) {
 	// Meta tools for discovery / explicit call when many servers exist
-	h.tools["list_external_mcp_tools"] = SreyunTool{
+	tools["list_external_mcp_tools"] = SreyunTool{
 		Name:        "list_external_mcp_tools",
 		Description: "列出已启用的外部 MCP Client 及其可用工具（只读）。排查外部系统或创建看板前可先调用确认工具名。",
 		Parameters: map[string]any{
@@ -66,7 +83,7 @@ func (h *SreyunCore) registerExternalMCPTools() {
 		},
 		Execute: h.execListExternalMCPTools,
 	}
-	h.tools["call_external_mcp"] = SreyunTool{
+	tools["call_external_mcp"] = SreyunTool{
 		Name: "call_external_mcp",
 		Description: "调用指定外部 MCP Client 上的工具（只读策略仍生效）。" +
 			"参数：server_id（list_external_mcp_tools 返回的 id）、tool（远端工具名）、args（JSON 对象）。",
@@ -81,13 +98,6 @@ func (h *SreyunCore) registerExternalMCPTools() {
 		},
 		Execute: h.execCallExternalMCP,
 	}
-
-	h.invalidateToolCaches()
-}
-
-func (h *SreyunCore) invalidateToolCaches() {
-	h.cachedToolPrompt = ""
-	h.cachedNativeToolDefs = nil
 }
 
 func (h *SreyunCore) reloadExternalMCPTools() {
@@ -140,7 +150,7 @@ func (h *SreyunCore) execCallExternalMCP(args map[string]any) (string, error) {
 	if h.s == nil || h.s.mcpClients == nil {
 		return "", fmt.Errorf("MCP Client 管理器未初始化")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(h.callContext(args), 45*time.Second)
 	defer cancel()
 	if h.s.aiGov != nil {
 		h.s.aiGov.recordTool(aiToolAuditEntry{
@@ -148,7 +158,7 @@ func (h *SreyunCore) execCallExternalMCP(args map[string]any) (string, error) {
 			Detail: "remote=" + tool,
 		})
 	}
-	return h.s.mcpClients.Call(ctx, serverID, tool, toolArgs)
+	return h.s.mcpClients.Call(ctx, serverID, tool, sanitizeOutboundArgs(toolArgs))
 }
 
 // mcpPrefetchMaxTurnsKey limits runLoop turns for diagnosis/assist MCP prefetch.

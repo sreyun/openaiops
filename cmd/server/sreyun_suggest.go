@@ -83,7 +83,7 @@ func (s *Server) handleSreyunStatus(w http.ResponseWriter, r *http.Request) {
 	aiReady := cfg.Enabled && strings.TrimSpace(cfg.Endpoint) != "" && strings.TrimSpace(cfg.Model) != ""
 	toolCount := 0
 	if s.sreyun != nil {
-		toolCount = len(s.sreyun.tools)
+		toolCount = s.sreyun.toolCount()
 	}
 	hosts := s.filterHostsForUser(r, s.store.ListHosts())
 	alertN := 0

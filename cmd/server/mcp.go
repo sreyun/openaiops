@@ -251,7 +251,11 @@ func (s *Server) mcpToolList(scopes []string) []map[string]any {
 	if s.sreyun == nil {
 		return out
 	}
-	for name, t := range s.sreyun.tools {
+	// 走已发布快照：外部 MCP 工具可能正被 AI 设置保存流程重新注册，直接 range 裸 map 会
+	// 触发 Go 运行时的 concurrent map iteration and map write 致命错误。
+	snap := s.sreyun.snapshot()
+	for _, name := range snap.names {
+		t := snap.byName[name]
 		if !mcpToolAllowedByScopes(name, scopes) {
 			continue
 		}
@@ -277,7 +281,7 @@ func (s *Server) mcpToolCall(w http.ResponseWriter, r *http.Request, req jsonRPC
 		s.writeMCPError(w, r, req.ID, -32602, "unknown, not-exposed, or out-of-scope tool: "+p.Name)
 		return
 	}
-	tool, ok := s.sreyun.tools[p.Name]
+	tool, ok := s.sreyun.lookupTool(p.Name)
 	if !ok {
 		s.writeMCPError(w, r, req.ID, -32602, "unknown tool: "+p.Name)
 		return
@@ -326,7 +330,7 @@ func (s *Server) mcpResourceRead(w http.ResponseWriter, r *http.Request, req jso
 	switch strings.TrimSpace(p.URI) {
 	case "aiops://overview":
 		if s.sreyun != nil {
-			if t, ok := s.sreyun.tools["list_hosts"]; ok {
+			if t, ok := s.sreyun.lookupTool("list_hosts"); ok {
 				text, _ = t.Execute(map[string]any{"limit": 50})
 			}
 		}
@@ -335,7 +339,7 @@ func (s *Server) mcpResourceRead(w http.ResponseWriter, r *http.Request, req jso
 		}
 	case "aiops://duty":
 		if s.sreyun != nil {
-			if t, ok := s.sreyun.tools["get_duty_context"]; ok {
+			if t, ok := s.sreyun.lookupTool("get_duty_context"); ok {
 				text, _ = t.Execute(map[string]any{})
 			}
 		}

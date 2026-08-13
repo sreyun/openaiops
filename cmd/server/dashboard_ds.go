@@ -102,7 +102,16 @@ func dsPromRange(ds DataSource, promql string, start, end, step int64) ([]promMa
 }
 
 func dsPromInstant(ds DataSource, promql string) ([]promSeries, bool) {
-	body, code, err := dataSourceGet(ds, "/api/v1/query", url.Values{"query": {promql}})
+	return dsPromInstantAt(ds, promql, 0)
+}
+
+// dsPromInstantAt evaluates at unix time `at` (0 = now). See vmQueryVectorAt.
+func dsPromInstantAt(ds DataSource, promql string, at int64) ([]promSeries, bool) {
+	q := url.Values{"query": {promql}}
+	if at > 0 {
+		q.Set("time", strconv.FormatInt(at, 10))
+	}
+	body, code, err := dataSourceGet(ds, "/api/v1/query", q)
 	if err != nil || code != 200 {
 		return nil, false
 	}
@@ -205,13 +214,18 @@ func (s *Server) dashRangeSeries(dsID, promql string, from, to, step int64) ([]p
 }
 
 func (s *Server) dashVector(dsID, promql string) ([]promSeries, bool) {
+	return s.dashVectorAt(dsID, promql, 0)
+}
+
+// dashVectorAt runs an instant query evaluated at unix time `at` (0 = now).
+func (s *Server) dashVectorAt(dsID, promql string, at int64) ([]promSeries, bool) {
 	if ds, ok := s.lookupPromDS(dsID); ok {
-		return dsPromInstant(ds, promql)
+		return dsPromInstantAt(ds, promql, at)
 	}
 	if s.vm == nil || !s.vm.enabled() {
 		return nil, false
 	}
-	return s.vm.vmQueryVector(promql)
+	return s.vm.vmQueryVectorAt(promql, at)
 }
 
 func (s *Server) dashLabelValues(dsID, label, match string) ([]string, bool) {

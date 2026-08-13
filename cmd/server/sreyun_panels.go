@@ -236,8 +236,11 @@ func (h *SreyunCore) queryPanelStat(dsID string, p DashPanel, from, to int64) (f
 	if !h.s.dashBackendReady(dsID) {
 		return 0, "", nil, "数据源不可用"
 	}
-	expr := substituteVars(p.Targets[0].Expr, nil, 60, 3600)
-	vec, ok := h.s.dashVector(dsID, expr)
+	// 与看板前端同一套语义：$__range/$__interval 按调用方给的窗口展开，求值时刻取窗口
+	// 右端。此前写死 60/3600 并在 now 求值，AI 被要求「看过去 7 天」时实际只统计 1 小时。
+	evalAt, stepSec, rangeSecVar := instantQueryWindow(from, to)
+	expr := substituteVars(p.Targets[0].Expr, nil, stepSec, rangeSecVar)
+	vec, ok := h.s.dashVectorAt(dsID, expr, evalAt)
 	if !ok || len(vec) == 0 {
 		return 0, "", nil, "瞬时查询失败或无数据"
 	}
@@ -268,7 +271,8 @@ func (h *SreyunCore) queryPanelTable(dsID string, p DashPanel, from, to int64) (
 		if err != nil {
 			return nil, nil, err.Error()
 		}
-		sqlText := substituteVars(expr, nil, 60, to-from)
+		_, sqlStep, sqlRange := instantQueryWindow(from, to)
+		sqlText := substituteVars(expr, nil, sqlStep, sqlRange)
 		var cols []string
 		var rows []map[string]any
 		var qerr error
@@ -288,7 +292,8 @@ func (h *SreyunCore) queryPanelTable(dsID string, p DashPanel, from, to int64) (
 	if !h.s.dashBackendReady(dsID) {
 		return nil, nil, "数据源不可用"
 	}
-	vec, ok := h.s.dashVector(dsID, substituteVars(expr, nil, 60, 3600))
+	evalAt, stepSec, rangeSecVar := instantQueryWindow(from, to)
+	vec, ok := h.s.dashVectorAt(dsID, substituteVars(expr, nil, stepSec, rangeSecVar), evalAt)
 	if !ok {
 		return nil, nil, "查询失败"
 	}

@@ -2274,6 +2274,7 @@ async function loadOpsAdmin() {
     if ($("retContentDays")) $("retContentDays").value = ret.content_audit_days || 30;
     if ($("retAICallDays")) $("retAICallDays").value = ret.ai_call_days || 365;
     if ($("retNetflowMonths")) $("retNetflowMonths").value = ret.netflow_months || 12;
+    if ($("retOpsHistoryDays")) $("retOpsHistoryDays").value = ret.ops_history_days || 90;
     if ($("cmdPolMode")) $("cmdPolMode").value = pol.mode || "strict";
     if ($("cmdPolAllow")) $("cmdPolAllow").value = (pol.allow_prefixes || []).join(",");
     if ($("cmdPolDeny")) $("cmdPolDeny").value = (pol.deny_patterns || []).join("\n");
@@ -2318,7 +2319,9 @@ async function saveRetentionCfg() {
     alert_history_days: parseInt($("retAlertDays").value, 10) || 90,
     content_audit_days: parseInt($("retContentDays").value, 10) || 30,
     ai_call_days: parseInt(($("retAICallDays") && $("retAICallDays").value) || "365", 10) || 365,
-    netflow_months: parseInt($("retNetflowMonths").value, 10) || 12
+    netflow_months: parseInt($("retNetflowMonths").value, 10) || 12,
+    // 必须一并回传：SetRetention 是整体覆盖，漏字段会把管理员设过的值悄悄重置成默认。
+    ops_history_days: parseInt(($("retOpsHistoryDays") && $("retOpsHistoryDays").value) || "90", 10) || 90
   };
   const r = await fetch(`${API}/admin/retention`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   const j = await r.json().catch(() => ({}));

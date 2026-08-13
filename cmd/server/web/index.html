@@ -2447,13 +2447,14 @@
       <!-- Tab 5：数据保留 / 命令策略 / PG 备份（仅管理员） -->
       <div class="tab-panel" id="tab-profile-ops" role="tabpanel">
         <div class="subhead subhead-first">数据保留</div>
-        <div class="hint">缩短天数后由每日任务清理旧审计 / 告警历史 / 内容审计 / NetFlow 分区。VictoriaMetrics 与录音目录需外部备份，不在本界面还原。</div>
+        <div class="hint">缩短天数后由每日任务清理旧审计 / 告警历史 / 内容审计 / NetFlow 分区 / 运行历史。删除只是把行标记为可复用，磁盘占用要用 <code>aiops-server -pg-report</code> 查看、<code>-pg-reclaim</code> 一次性回收。VictoriaMetrics 与录音目录需外部备份，不在本界面还原。</div>
         <div class="grid2">
           <div class="field"><label>审计/事件（天）</label><input type="number" id="retAuditDays" min="7" placeholder="180"></div>
           <div class="field"><label>告警历史（天）</label><input type="number" id="retAlertDays" min="7" placeholder="90"></div>
           <div class="field"><label>内容审计（天）</label><input type="number" id="retContentDays" min="1" placeholder="30"></div>
           <div class="field"><label>AI 调用观测（天）</label><input type="number" id="retAICallDays" min="30" placeholder="365"></div>
           <div class="field"><label>NetFlow 分区（月）</label><input type="number" id="retNetflowMonths" min="1" placeholder="12"></div>
+          <div class="field"><label>运行历史（天）</label><input type="number" id="retOpsHistoryDays" min="7" placeholder="90" title="AI 会话与 Run 记录、剧本与自愈执行历史、SNMP Trap、硬件与 Hyper-V 事件"></div>
         </div>
         <div class="mfa-foot"><button class="btn primary sm" id="retSaveBtn" type="button">保存保留期</button></div>
 

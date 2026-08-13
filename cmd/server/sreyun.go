@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"aiops-monitor/shared"
@@ -51,21 +52,20 @@ type SreyunSession struct {
 }
 
 // SreyunCore is the autonomous agent engine.
+//
+// 这是进程级单例，所有会话并发共享，因此实例上不存放任何「当轮」状态：请求上下文与
+// 本轮引用都随工具参数下发（见 sreyun_registry.go）。工具表走写时复制快照，读路径无锁。
 type SreyunCore struct {
-	s     *Server
-	tools map[string]SreyunTool
-	ctx   context.Context
+	s *Server
+	// tools 是写入暂存区，只在 toolsMu 保护下修改；读路径一律走 published 快照。
+	tools     map[string]SreyunTool
+	toolsMu   sync.Mutex
+	published atomic.Pointer[toolSnapshot]
 	// Cached config (hot-reloaded from PG)
 	configMu        sync.RWMutex
 	cachedRules     []sreyunRule
 	cachedTemplates []sreyunTemplate
 	lastLoad        time.Time
-	// P1-2: 缓存工具定义 JSON，工具注册后不再变化，避免每轮重建
-	cachedToolPrompt string
-	// P3-1: 缓存原生 Function Calling 工具定义数组
-	cachedNativeToolDefs []map[string]any
-	// 本轮对话中 search_knowledge 命中的文档引用（供记忆沉淀与 SSE）
-	turnCites citationBuf
 }
 
 // newSreyunCore creates and initializes the Sreyun engine.
@@ -388,8 +388,7 @@ func (h *SreyunCore) registerTools() {
 	h.registerPanelTools()
 	h.registerSecurityTools()
 	h.registerEvolveTools()
-	h.registerExternalMCPTools()
-	h.cachedNativeToolDefs = nil // force rebuild after capability tools register
+	h.registerExternalMCPTools() // 内部自带加锁 + 发布
 }
 
 // resolveDataSource matches a configured data source by id, then by name (case-insensitive).
@@ -760,7 +759,7 @@ func (h *SreyunCore) execSearchKnowledge(args map[string]any) (string, error) {
 		return "WeKnora 检索失败（已降级）：" + err.Error() + "。请改用 search_similar_cases 与现场指标/日志继续排查。", nil
 	}
 	for _, t := range extractDocTitlesFromText(out) {
-		h.turnCites.add(RAGCitation{Kind: "weknora", Source: "weknora", Title: t})
+		h.addCitation(args, RAGCitation{Kind: "weknora", Source: "weknora", Title: t})
 	}
 	return out, nil
 }
@@ -801,12 +800,9 @@ func (h *SreyunCore) execDiagnostic(args map[string]any) (string, error) {
 	execID := h.s.triggerPlaybookOnHost(pb, host, "sreyun", func(ok bool) {
 		done <- ok
 	})
-	// h.ctx 是共享可变字段，仅 Chat() 内赋值；非会话路径调用时可能为 nil 或已取消，
-	// 这里取本地副本并兜底 Background()，避免对 nil ctx 调 Done() 引发 panic（与 execPythonAction 一致）。
-	dctx := h.ctx
-	if dctx == nil {
-		dctx = context.Background()
-	}
+	// 上下文随本次工具调用的参数下发（见 callContext），非会话路径自动兜底 Background()，
+	// 这样只有发起本轮对话的客户端断开才会掐掉这条命令，不会被别的会话误杀。
+	dctx := h.callContext(args)
 	select {
 	case ok := <-done:
 		// Retrieve execution output
@@ -840,11 +836,7 @@ func (h *SreyunCore) execPythonAction(args map[string]any) (string, error) {
 		return fmt.Sprintf("动作 %q：%s", actionName, msg), nil
 	}
 	// 加 30s 超时，避免插件脚本卡死导致请求 goroutine 永久阻塞
-	parentCtx := h.ctx
-	if parentCtx == nil {
-		parentCtx = context.Background()
-	}
-	ctx, cancel := context.WithTimeout(parentCtx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(h.callContext(args), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "python3", "plugins/sreyun_actions.py", actionName, hostID, argStr)
 	output, err := cmd.CombinedOutput()
@@ -1069,7 +1061,6 @@ func (h *SreyunCore) Chat(ctx context.Context, session *SreyunSession, userMsg s
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	h.ctx = ctx
 	cfg := h.s.cfg.AIConfig()
 	if !cfg.Enabled || cfg.Endpoint == "" || cfg.Model == "" {
 		return "", AgentLoopMeta{}, fmt.Errorf("AI 未配置或未启用")
@@ -1077,8 +1068,6 @@ func (h *SreyunCore) Chat(ctx context.Context, session *SreyunSession, userMsg s
 
 	// Build system prompt from cached templates + rules (scoped to actor)
 	sys := h.buildSystemPrompt(session.ActorUsername)
-
-	h.turnCites.reset()
 
 	// RAG: 检索历史记忆注入 system prompt，让 Agent 能跨会话复用已有知识
 	// Token 预算管理：动态裁剪 RAG 记忆，确保 system prompt 不超过 8000 token
@@ -1125,7 +1114,7 @@ func (h *SreyunCore) Chat(ctx context.Context, session *SreyunSession, userMsg s
 	if err != nil {
 		return "", meta, err
 	}
-	meta.Citations = len(cites) + len(h.turnCites.snapshot())
+	meta.Citations = len(cites) + len(meta.ToolCites)
 	// Update session — assistant 消息永久附带 UI actions（图表/指标卡等），供历史会话还原与导出。
 	asstMsg := map[string]string{"role": "assistant", "content": fullReply}
 	if len(meta.Actions) > 0 {
@@ -1148,7 +1137,7 @@ func (h *SreyunCore) Chat(ctx context.Context, session *SreyunSession, userMsg s
 	// 未经人工验证的模型输出默认不进入跨会话 RAG；管理员显式接受污染风险后才可开启。
 	if h.s.shouldRememberUnverifiedAIOutput() && strings.TrimSpace(fullReply) != "" {
 		mem := "【用户】\n" + userMsg + "\n\n【AI】\n" + fullReply
-		if wk := h.turnCites.snapshot(); len(wk) > 0 {
+		if wk := meta.ToolCites; len(wk) > 0 {
 			var titles []string
 			for _, c := range wk {
 				titles = append(titles, c.Title)
@@ -1173,8 +1162,8 @@ func (h *SreyunCore) Chat(ctx context.Context, session *SreyunSession, userMsg s
 // 判定是否为工具调用，且 streamChat 每次调用都会发送 [DONE]，会使前端在多轮工具调用中途
 // 提前结束、看不到最终结论。面向用户只推送「思考文字 + 工具执行状态 + 最终结论」，
 // 工具调用的原始 JSON 绝不下发到前端。max 8 turns（对齐 Hermes 多步工具深度，仍有硬顶）。
-func (h *SreyunCore) runLoop(ctx context.Context, cfg AIConfig, msgs []map[string]string, images []chatImage, stream bool, w http.ResponseWriter, actor string) (string, AgentLoopMeta, error) {
-	meta := AgentLoopMeta{}
+// 具名返回值：本轮引用在 defer 中统一回填，避免在每个 return 分支重复。
+func (h *SreyunCore) runLoop(ctx context.Context, cfg AIConfig, msgs []map[string]string, images []chatImage, stream bool, w http.ResponseWriter, actor string) (out string, meta AgentLoopMeta, retErr error) {
 	primary := cfg.Model
 	cfg = applyRoutedModel(cfg, "chat")
 	if h != nil && h.s != nil {
@@ -1251,6 +1240,19 @@ func (h *SreyunCore) runLoop(ctx context.Context, cfg AIConfig, msgs []map[strin
 		emitFallbackSSE(w, model)
 	}
 	const maxTurns = 8
+	// 本轮引用缓冲：随工具参数下发，工具在自己的 goroutine 里写入也只影响本轮。
+	callMeta := map[string]any{}
+	h.stampCallContext(callMeta, ctx)
+	citeBuf := h.newCallCitations(callMeta)
+	if actor != "" {
+		callMeta[argKeyScopeUser] = actor
+	}
+	defer func() { meta.ToolCites = citeBuf.snapshot() }()
+
+	// 整轮对话固定一份工具快照：外部 MCP 工具可能在对话进行中被重新注册，
+	// 若中途换表会出现「上一轮告诉模型有某工具、下一轮却查不到」的错配。
+	tools := h.snapshot()
+
 	toolSeen := map[string]bool{}
 	turnLimit := maxTurns
 	if v := ctx.Value(mcpPrefetchMaxTurnsKey{}); v != nil {
@@ -1268,17 +1270,13 @@ func (h *SreyunCore) runLoop(ctx context.Context, cfg AIConfig, msgs []map[strin
 		_, prov := normalizeEndpoint(cfg.Endpoint)
 		var callMsgs []map[string]string
 		var nativeTools []map[string]any
-		if prov != aiProvAnthropic && len(h.tools) > 0 {
+		if prov != aiProvAnthropic && len(tools.byName) > 0 {
 			// OpenAI 兼容 Provider：使用原生 Function Calling（更可靠）
 			callMsgs = msgs
-			// 确保 nativeToolDefs 已缓存
-			if h.cachedNativeToolDefs == nil {
-				h.injectTools(msgs) // 副作用：缓存 nativeToolDefs
-			}
-			nativeTools = h.cachedNativeToolDefs
+			nativeTools = tools.native
 		} else {
 			// Anthropic 或无工具：使用文本注入（兼容回退）
-			callMsgs = h.injectTools(msgs)
+			callMsgs = injectToolPrompt(msgs, tools.prompt)
 		}
 
 		// 真流式：仅 OpenAI 兼容 + 已开启 stream 时启用——content 逐字回调下发（实现主会话
@@ -1289,7 +1287,7 @@ func (h *SreyunCore) runLoop(ctx context.Context, cfg AIConfig, msgs []map[strin
 		var err error
 		var usedModel string
 		streamedContent := false
-		if stream && w != nil && prov != aiProvAnthropic && len(h.tools) > 0 {
+		if stream && w != nil && prov != aiProvAnthropic && len(tools.byName) > 0 {
 			reply, nativeCalls, usedModel, err = aiChatVStreamWithFallback(ctx, cfg, callMsgs, images, nativeTools,
 				func(delta string) {
 					streamedContent = true
@@ -1352,7 +1350,7 @@ func (h *SreyunCore) runLoop(ctx context.Context, cfg AIConfig, msgs []map[strin
 				toolSeen[tc.Name] = true
 				meta.Tools = append(meta.Tools, tc.Name)
 			}
-			tool, ok := h.tools[tc.Name]
+			tool, ok := tools.byName[tc.Name]
 			if !ok {
 				sendTool(tc.Name, "err", nil)
 				toolResults.WriteString(fmt.Sprintf("[工具 %s 不存在]\n", tc.Name))
@@ -1382,9 +1380,11 @@ func (h *SreyunCore) runLoop(ctx context.Context, cfg AIConfig, msgs []map[strin
 				toolResults.WriteString(fmt.Sprintf("[工具 %s 拒绝：%s]\n", tc.Name, deny))
 				continue
 			}
-			if actor != "" {
-				tc.Args["_scope_actor"] = actor
+			if tc.Args == nil {
+				tc.Args = map[string]any{}
 			}
+			// 下发本轮的调用上下文 / 引用缓冲 / 调用者身份（键名均以 _ 开头，出站前会被剥离）。
+			carryCallMeta(tc.Args, callMeta)
 			type toolOut struct {
 				result string
 				err    error
@@ -1427,9 +1427,15 @@ func (h *SreyunCore) runLoop(ctx context.Context, cfg AIConfig, msgs []map[strin
 				toolResults.WriteString(fmt.Sprintf("工具 %s 结果：\n%s\n", tc.Name, truncResult))
 			}
 		}
-		// 把模型本轮的工具调用 + 真实结果追加进上下文，供下一轮推理
+		// 把模型本轮的工具调用 + 真实结果追加进上下文，供下一轮推理。
+		//
+		// 原生 Function Calling 下 content 常为空、调用本身在 tool_calls 字段里，而这里只回传
+		// content —— 于是下一轮的模型看到一条空 assistant 消息和一堆「工具结果」，却不知道自己
+		// 究竟调了什么、传了什么参数，容易重复调用或错配结果。另外空字符串 content 会被
+		// Anthropic 及不少 OpenAI 兼容网关判为非法消息直接 400，把多轮工具循环打断在第二轮。
+		// 因此把本轮调用摘要补进 assistant 文本，既保证非空，也把调用记录还给模型。
 		msgs = append(msgs,
-			map[string]string{"role": "assistant", "content": reply},
+			map[string]string{"role": "assistant", "content": assistantTurnRecord(reply, toolCalls)},
 			map[string]string{"role": "user", "content": fmt.Sprintf("工具执行结果：\n%s\n请根据以上真实结果继续分析；若信息足够，请直接用简洁中文给出最终结论，不要再输出 JSON。", toolResults.String())},
 		)
 	}
@@ -1460,43 +1466,50 @@ type toolCall struct {
 	Args map[string]any
 }
 
-// injectTools adds tool definitions to the last system message.
-// P1-2: 工具定义 JSON 缓存于 h.cachedToolPrompt，仅首次调用时构建。
-// P3-1: 同时缓存原生 Function Calling 格式的工具定义。
-func (h *SreyunCore) injectTools(msgs []map[string]string) []map[string]string {
-	if h.cachedToolPrompt == "" {
-		// Build tool definitions JSON（按工具名排序，保证注入顺序稳定，利于 Provider prompt 缓存与可复现）
-		names := make([]string, 0, len(h.tools))
-		for name := range h.tools {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		var toolDefs []map[string]any
-		for _, name := range names {
-			t := h.tools[name]
-			toolDefs = append(toolDefs, map[string]any{
-				"type": "function",
-				"function": map[string]any{
-					"name":        t.Name,
-					"description": t.Description,
-					"parameters":  t.Parameters,
-				},
-			})
-		}
-		toolsJSON, _ := json.Marshal(toolDefs)
-		h.cachedToolPrompt = "\n\n你可以使用以下工具来获取信息或执行操作。当需要调用工具时，请用以下 JSON 格式回复：\n```json\n{\"tool_calls\":[{\"name\":\"工具名\",\"args\":{参数}}]}\n```\n\n可用工具定义：\n" + string(toolsJSON)
-		// P3-1: 缓存原生 Function Calling 工具定义（复用同一份排序后的 defs）
-		h.cachedNativeToolDefs = toolDefs
+// assistantTurnRecord renders the assistant side of one tool turn: whatever the
+// model said, plus an explicit record of the calls it issued. Never returns an
+// empty string — an empty assistant message is rejected by Anthropic and by
+// several OpenAI-compatible gateways.
+func assistantTurnRecord(reply string, calls []toolCall) string {
+	var b strings.Builder
+	if s := strings.TrimSpace(reply); s != "" {
+		b.WriteString(s)
 	}
+	if len(calls) > 0 {
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString("（本轮已发起工具调用）")
+		for _, c := range calls {
+			args := sanitizeOutboundArgs(c.Args) // 不把 _call_ctx 之类内部键写进上下文
+			raw, err := json.Marshal(args)
+			if err != nil || len(raw) > 500 {
+				fmt.Fprintf(&b, "\n- %s", c.Name)
+				continue
+			}
+			fmt.Fprintf(&b, "\n- %s %s", c.Name, raw)
+		}
+	}
+	if b.Len() == 0 {
+		return "（本轮无输出）"
+	}
+	return b.String()
+}
 
-	// Find the system message and append tool definitions
+// injectToolPrompt appends the text-injection tool description to the system
+// message. Used for Anthropic and any provider without native Function Calling;
+// the prompt itself is precomputed in the published tool snapshot.
+func injectToolPrompt(msgs []map[string]string, prompt string) []map[string]string {
+	if prompt == "" {
+		return msgs
+	}
 	result := make([]map[string]string, len(msgs))
 	copy(result, msgs)
 	for i, m := range result {
 		if m["role"] == "system" {
 			result[i] = map[string]string{
 				"role":    "system",
-				"content": m["content"] + h.cachedToolPrompt,
+				"content": m["content"] + prompt,
 			}
 			break
 		}

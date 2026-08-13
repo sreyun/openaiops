@@ -96,6 +96,39 @@ type panelQueryReq struct {
 	Limit      int               `json:"limit"`      // 日志面板取行上限
 }
 
+// instantQueryWindow derives the evaluation time, $__interval and $__range for
+// an instant panel from the dashboard's selected [from,to].
+//
+// evalAt is 0 ("now") whenever the window ends at or after the present, so live
+// dashboards keep reading the freshest sample; it is pinned to `to` only for a
+// window that genuinely ends in the past. rangeSec falls back to one hour when
+// the client sends no window at all, preserving the old behaviour for callers
+// that never learned to pass one.
+func instantQueryWindow(from, to int64) (evalAt, stepSec, rangeSec int64) {
+	const (
+		defaultRange = int64(3600)
+		defaultStep  = int64(60)
+		// 窗口右端落在这个容差内一律按「现在」处理：前端会把 to 对齐到 step 网格，
+		// 硬比较会把实时看板误判成历史窗口。
+		nowSlack = int64(120)
+	)
+	if to <= 0 || from <= 0 || to <= from {
+		return 0, defaultStep, defaultRange
+	}
+	rangeSec = to - from
+	stepSec = rangeSec / 480
+	switch {
+	case stepSec < 5:
+		stepSec = 5
+	case stepSec > 300:
+		stepSec = 300
+	}
+	if to < time.Now().Unix()-nowSlack {
+		evalAt = to
+	}
+	return evalAt, stepSec, rangeSec
+}
+
 func validatePanelQueryReq(req *panelQueryReq, withRange, logs bool) error {
 	if req == nil {
 		return fmt.Errorf("查询请求不能为空")
@@ -221,8 +254,14 @@ func (s *Server) handleDashboardQueryInstant(w http.ResponseWriter, r *http.Requ
 		writeJSON(w, http.StatusOK, map[string]any{"series": []any{}, "available": false})
 		return
 	}
-	expr := substituteVars(healPanelQueryExpr(req.DataSource, req.Expr), req.Vars, 60, 3600)
-	vec, ok := s.dashVector(req.DataSource, expr)
+	// 仪表/饼图/柱状/直方图等「瞬时」面板同样归看板时间选择器管辖：
+	//   - $__range / $__interval 必须按所选窗口展开，此前写死 3600s/60s，于是
+	//     topk(5, avg_over_time(x[$__range])) 这类表达式无论选 1h 还是 14d 都只统计 1 小时；
+	//   - 求值时刻取窗口右端而非 time.Now()，否则选了历史区间仍然显示当前值。
+	// 两者叠加的结果就是「点了时间跨度没有任何反应」。
+	evalAt, stepSec, rangeSec := instantQueryWindow(req.From, req.To)
+	expr := substituteVars(healPanelQueryExpr(req.DataSource, req.Expr), req.Vars, stepSec, rangeSec)
+	vec, ok := s.dashVectorAt(req.DataSource, expr, evalAt)
 	if !ok {
 		writeJSON(w, http.StatusOK, map[string]any{"series": []any{}, "available": true, "error": "查询失败（表达式或数据源）"})
 		return

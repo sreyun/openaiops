@@ -1,9 +1,14 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
+	"sync"
 	"unicode/utf16"
 )
 
@@ -295,19 +300,32 @@ echo "legacy agent update ok sha=$ACTUAL"
 `, server, bin, restart)
 }
 
-// legacyWindowsUpdateHelperPS is the *detached* stop/swap/restart body for the
-// legacy Windows update path.
+// windowsUpdateHelperPS is the COMPLETE Windows update helper: it locates the
+// installed agent, downloads /dl/$Bin, verifies SHA-256, probes the staged
+// binary, stops the service, swaps the locked PE, restarts the agent and rolls
+// back to .bak on failure.
 //
-// 为什么必须分离：这段脚本经 Agent 的 exec 通道执行，是 Agent 进程的子进程，因而
-// 落在服务的 Job Object 里。`sc.exe stop` 一旦停掉服务，Job 会把这个子进程一起
-// 杀掉——换二进制、重启服务全都来不及跑，主机就停在"服务已停止"。module 路径靠
-// schtasks(SYSTEM)/CREATE_BREAKAWAY_FROM_JOB 规避了这件事，而这条 legacy 路径恰恰
-// 是在 module helper 起不来时才启用的兜底，绝不能自带同一个致命缺陷。
+// 它不经命令行下发，而是由服务端在 /dl/aiops-agent-update.ps1 上以文件形式提供，
+// 由一段极小的引导脚本下载 + 校验 SHA-256 后落盘执行。原因见
+// legacyWindowsAgentUpdateScript 的注释——命令行装不下它。
 //
-// 变量 $Exe/$New/$Cfg/$Log 由外层脚本以赋值头拼在前面（字面 here-string 不插值）。
-const legacyWindowsUpdateHelperPS = `
+// 两条硬性约束：
+//
+//  1. **必须分离执行**。引导脚本经 Agent 的 exec 通道执行，是 Agent 进程的子进程，
+//     因而落在服务的 Job Object 里。`sc.exe stop` 一旦停掉服务，Job 会把这个子进程
+//     一起杀掉——换二进制、重启服务全都来不及跑，主机就停在「服务已停止」。所以本
+//     脚本里的每一步都只在 schtasks(SYSTEM) / WMI 拉起的独立进程里跑。
+//  2. **必须是纯 ASCII**。Windows PowerShell 5.1 用系统 ANSI 代码页读取无 BOM 的
+//     .ps1。服务端下发的正文原样落盘（引导脚本不改写它，才能校验 SHA-256），所以
+//     正文里出现非 ASCII 字符就会在 GBK/Latin-1 机器上解析错乱。中文说明一律留在
+//     Go 注释里。
+//
+// $Server / $Bin 由引导脚本作为命令行参数传入；其余路径本脚本自行推导。
+const windowsUpdateHelperPS = `param([string]$Server,[string]$Bin)
 $ErrorActionPreference='Stop'
 $helperPid = $PID
+$Work = Split-Path -Parent $PSCommandPath
+$Log = Join-Path $Work 'aiops-agent-update.log'
 function Write-Log($m){ try{ Add-Content -LiteralPath $Log -Value ("[{0}] {1}" -f (Get-Date -Format o), $m) -Encoding UTF8 }catch{} }
 function Invoke-Native {
   param([string]$File,[string[]]$Arguments)
@@ -315,8 +333,9 @@ function Invoke-Native {
   # NativeCommandError records that $ErrorActionPreference='Stop' promotes to a
   # terminating error. Judge by exit code instead.
   #
-  # 参数名不能是 $Args —— 那是 PowerShell 自动变量，声明成参数后每次调用都被清空，
-  # "& $File @Args" 会退化成不带参数裸跑目标程序（详见 agent 侧同名函数的注释）。
+  # The parameter must NOT be named $Args: that is a PowerShell automatic
+  # variable, and declaring it as a parameter silently clears it on every call,
+  # so "& $File @Args" degenerates into running the target with no arguments.
   $prevEAP = $ErrorActionPreference
   $out = ''
   $code = -1
@@ -327,8 +346,10 @@ function Invoke-Native {
   } catch { $out = $_.Exception.Message; $code = -1 } finally { $ErrorActionPreference = $prevEAP }
   return [pscustomobject]@{ ExitCode = $code; Output = $out.Trim() }
 }
-# 跑 Agent 二进制的 --version 必须有硬超时：探测对象随时可能变成守护进程，
-# 一旦它不退出，助手会永久吊死在换二进制之前，主机静默停在旧版本。
+# Running an agent binary's --version needs a hard timeout: the probe target can
+# turn into a daemon at any moment, and an unbounded pipe read would hang the
+# helper forever right before the swap, leaving the host silently on the old
+# version with nothing to report.
 function Invoke-VersionProbe {
   param([string]$File,[int]$TimeoutSec = 20)
   $o = [IO.Path]::GetTempFileName()
@@ -350,24 +371,62 @@ function Invoke-VersionProbe {
 }
 $procNames=@('aiops-agent','aiops-agent-windows-amd64','aiops-agent-windows-arm64','aiops-agent-windows-amd64-win2012')
 $svcNames=@('AiopsMonitorAgent','AIOps-Agent','AIOpsAgent')
+$exeNames=@('aiops-agent.exe','aiops-agent-windows-amd64.exe','aiops-agent-windows-arm64.exe','aiops-agent-windows-amd64-win2012.exe')
+# Resolve the installed binary. The service ImagePath is authoritative and is
+# tried first: a directory guess cannot find installs outside the standard
+# locations, and under a SYSTEM scheduled task $env:LOCALAPPDATA points at
+# systemprofile, so a per-user install would never be found by path guessing.
+function Resolve-AgentExe {
+  foreach($n in $svcNames){
+    try{
+      $svc = Get-CimInstance Win32_Service -Filter ("Name='" + $n + "'") -ErrorAction SilentlyContinue
+      if(-not $svc -or -not $svc.PathName){ continue }
+      $p = $svc.PathName.Trim()
+      if($p.StartsWith('"')){
+        $end = $p.IndexOf('"',1)
+        if($end -gt 1){ $p = $p.Substring(1, $end-1) }
+      } else {
+        $ix = $p.ToLowerInvariant().IndexOf('.exe')
+        if($ix -gt 0){ $p = $p.Substring(0, $ix+4) }
+      }
+      if($p -and (Test-Path -LiteralPath $p)){ return $p }
+    }catch{}
+  }
+  $dirs=@()
+  foreach($d in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramData, $env:LOCALAPPDATA)){
+    if($d){ $dirs += (Join-Path $d 'AIOps Agent'); $dirs += (Join-Path $d 'aiops-agent') }
+  }
+  $dirs += 'C:\aiops-agent'
+  foreach($d in $dirs){
+    foreach($n in $exeNames){
+      $p = Join-Path $d $n
+      if(Test-Path -LiteralPath $p){ return $p }
+    }
+  }
+  return $null
+}
 function Stop-AgentProcesses {
   Get-Process -Name $procNames -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $helperPid } | Stop-Process -Force -ErrorAction SilentlyContinue
-  # 也清掉「从暂存文件被裸跑起来」的野生 Agent：进程名形如 .aiops-agent.new.<pid>，
-  # 不匹配上面的名字列表，但它的映像路径一定含 aiops-agent。这是老版本 helper 留下的
-  # 残骸（"& $new" 不带参数把刚下载的 Agent 当守护进程拉起，永不退出），救援时必须扫掉，
-  # 否则它会一直占着 CPU 并让后续排障看到一个幽灵进程。
+  # Also kill wild agents launched straight from a staging file: their process
+  # name looks like ".aiops-agent.new.<pid>" and does not match the list above,
+  # but the image path always contains aiops-agent. These are wreckage from the
+  # broken helper generation ("& $new" with no arguments ran the freshly
+  # downloaded agent as a foreground daemon that never exits).
   Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
     Where-Object {
       $_.ProcessId -ne $helperPid -and $_.ExecutablePath -and
       $_.ExecutablePath -match 'aiops-agent' -and
-      (-not ($_.CommandLine -and $_.CommandLine -match 'aiops-agent-(update-helper|legacy-update)'))
+      (-not ($_.CommandLine -and $_.CommandLine -match 'aiops-agent-(update-helper|legacy-update|update)'))
     } |
     ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch {} }
 }
-# 老版本 helper 会把自己注册成 AIOpsAgentSelfUpdate 一次性计划任务，然后吊死在
-# --version 探测上，任务永远停不下来。救援前先把它连任务带进程一起结束掉。
+# Older helpers registered themselves as the one-shot AIOpsAgentSelfUpdate task
+# and then hung on the --version probe, so the task never stops. Clear the task
+# and its process before taking over.
 function Clear-StuckSelfUpdateTask {
-  try { [void](Invoke-Native "$env:SystemRoot\System32\schtasks.exe" @('/End','/TN','AIOpsAgentSelfUpdate')) } catch {}
+  foreach($tn in @('AIOpsAgentSelfUpdate','AIOpsAgentLegacyUpdate')){
+    try { [void](Invoke-Native "$env:SystemRoot\System32\schtasks.exe" @('/End','/TN',$tn)) } catch {}
+  }
   try { [void](Invoke-Native "$env:SystemRoot\System32\schtasks.exe" @('/Delete','/TN','AIOpsAgentSelfUpdate','/F')) } catch {}
   try {
     Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
@@ -418,13 +477,37 @@ function Restart-Agent {
   for($i=0;$i -lt 20;$i++){ if(Test-Running){ return $true }; Start-Sleep -Seconds 2 }
   return $false
 }
+function Write-Result($m){
+  foreach($p in @((Join-Path $Work 'aiops-agent-update.result'), (Join-Path $Dir 'aiops-agent-update.result'))){
+    if(-not $p){ continue }
+    try{ Set-Content -LiteralPath $p -Value $m -Encoding UTF8 }catch{}
+  }
+}
+$Exe = Resolve-AgentExe
+if(-not $Exe){ Write-Log 'FATAL: agent exe not found (service ImagePath and known dirs)'; exit 1 }
 $Dir = Split-Path -Parent $Exe
 $Bak = $Exe + '.bak'
+$New = Join-Path $Dir '.aiops-agent.update.exe'
+$Cfg = $null
+foreach($n in @('config.yaml','config.yml','config.json')){ $c=Join-Path $Dir $n; if(Test-Path -LiteralPath $c){ $Cfg=$c; break } }
 $swapped = $false
 try {
-  Write-Log ("legacy helper start pid=$helperPid exe=$Exe cfg=$Cfg")
+  Write-Log ("helper start pid=$helperPid exe=$Exe cfg=$Cfg bin=$Bin")
+  Write-Result ("running " + (Get-Date -Format o))
+  # Give the exec channel time to hand the bootstrap's output back to the server
+  # before the agent that carries that channel is stopped.
   Start-Sleep -Seconds 3
-  if(-not (Test-Path -LiteralPath $New)){ throw "staging missing: $New" }
+  try{[Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor 3072}catch{}
+  Remove-Item -LiteralPath $New -Force -ErrorAction SilentlyContinue
+  (New-Object Net.WebClient).DownloadFile("$Server/dl/$Bin", $New)
+  $Expected = ((New-Object Net.WebClient).DownloadString("$Server/dl/$Bin.sha256") -split '\s+')[0].Trim().ToLowerInvariant()
+  $Sha=[Security.Cryptography.SHA256]::Create(); $Stream=[IO.File]::OpenRead($New)
+  try{ $Actual=([BitConverter]::ToString($Sha.ComputeHash($Stream))).Replace('-','').ToLowerInvariant() } finally { $Stream.Dispose(); $Sha.Dispose() }
+  if(-not $Expected -or $Expected -ne $Actual){ Remove-Item $New -Force -ErrorAction SilentlyContinue; throw "SHA-256 mismatch (want $Expected got $Actual)" }
+  Write-Log ("downloaded $Bin sha=$Actual")
+  $probe = Invoke-VersionProbe $New
+  if($probe.ExitCode -ne 0){ Remove-Item $New -Force -ErrorAction SilentlyContinue; throw ("staging not runnable (exit="+$probe.ExitCode+"): "+$probe.Output) }
+  Write-Log ("staging --version: " + $probe.Output)
   Clear-StuckSelfUpdateTask
   foreach($name in $svcNames){
     if(Get-Service $name -ErrorAction SilentlyContinue){
@@ -450,10 +533,13 @@ try {
   $swapped = $true
   try{ Unblock-File -Path $Exe -ErrorAction SilentlyContinue }catch{}
   if(-not (Restart-Agent)){ throw 'agent not running after update' }
-  Write-Log ("legacy update ok version=" + (Invoke-VersionProbe $Exe).Output)
+  $ver = (Invoke-VersionProbe $Exe).Output
+  Write-Log ("update ok version=" + $ver)
+  Write-Result ("ok " + (Get-Date -Format o) + " version=" + $ver)
   exit 0
 } catch {
-  Write-Log ("legacy update failed: " + $_.Exception.Message)
+  Write-Log ("update failed: " + $_.Exception.Message)
+  Write-Result ("fail " + $_.Exception.Message)
   try {
     if((Test-Path -LiteralPath $Bak) -and ($swapped -or -not (Test-Path -LiteralPath $Exe))){
       Write-Log 'rolling back to .bak'
@@ -465,123 +551,101 @@ try {
 }
 `
 
+// windowsUpdateHelperPath is the single source of truth for the helper URL: the
+// route registration, the bootstrap's download line and the tests all read it,
+// so a rename cannot silently leave the bootstrap fetching a 404.
+const windowsUpdateHelperPath = "/dl/aiops-agent-update.ps1"
+
+// windowsUpdateHelperScript returns the exact bytes served at
+// windowsUpdateHelperPath. The bootstrap verifies this content against
+// windowsUpdateHelperSHA256 before executing it, so the two must never be
+// derived from different strings.
+func windowsUpdateHelperScript() string { return windowsUpdateHelperPS }
+
+var windowsUpdateHelperSHAOnce = sync.OnceValue(func() string {
+	sum := sha256.Sum256([]byte(windowsUpdateHelperScript()))
+	return hex.EncodeToString(sum[:])
+})
+
+// windowsUpdateHelperSHA256 is the hex digest the bootstrap pins.
+func windowsUpdateHelperSHA256() string { return windowsUpdateHelperSHAOnce() }
+
+// handleAgentUpdateHelperScript serves the Windows update helper. It sits under
+// /dl/ so it inherits the same unauthenticated, agent-reachable path as the
+// binaries it installs (isPublicPath / CSRF / gzip already treat /dl/ that way),
+// and it is generated rather than read from distDir so a deployment cannot end
+// up with a stale copy on disk. The content carries no secrets: server URL and
+// artifact name are supplied by the bootstrap at run time.
+func (s *Server) handleAgentUpdateHelperScript(w http.ResponseWriter, r *http.Request) {
+	body := windowsUpdateHelperScript()
+	w.Header().Set("Content-Type", "text/plain; charset=us-ascii")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	w.Header().Set("ETag", `"`+windowsUpdateHelperSHA256()+`"`)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if match := r.Header.Get("If-None-Match"); match != "" && strings.Contains(match, windowsUpdateHelperSHA256()) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	_, _ = io.WriteString(w, body)
+}
+
+// windowsUpdateBootstrapMaxLen caps the generated exec command.
+//
+// 这是本文件里最重要的一个常量。Agent 在 Windows 上执行 exec 命令的方式是
+// `cmd.exe /c "<整条命令>"`（cmd/agent/terminal.go:runShellCommandCtx），而
+// **cmd.exe 的命令行硬上限是 8191 个字符**，CreateProcessW 的上限是 32767。
+// 历史上这条 legacy 更新命令把整段 PowerShell 内联成 -EncodedCommand，长度
+// 37,171 字符——既超 cmd.exe 上限 4.5 倍，也超 CreateProcessW 上限，于是
+// **每一次 Windows 兜底升级/救援都在进程创建阶段就失败了**，而这条路径恰恰是
+// Agent 侧助手出问题时唯一的逃生口（助手脚本由 Agent 自己的代码生成，坏了就
+// 修不了）。主路径和兜底路径同时失效，Windows 机群因此永久停在旧版本。
+//
+// 预算：8191 − Agent 包的 PATH/chcp 前缀（约 190）− 安全余量。留 6000 是为了
+// 让后续往引导脚本里加逻辑时先撞上测试，而不是先撞上现网。
+const windowsUpdateBootstrapMaxLen = 6000
+
+// legacyWindowsAgentUpdateScript returns the command sent over the agent exec
+// channel. It is only a BOOTSTRAP: download the helper from the server, verify
+// its SHA-256 against the digest pinned here, drop it next to a generated
+// assignment header, and hand it to a detached SYSTEM process.
+//
+// 为什么必须是引导而不是整段脚本：见 windowsUpdateBootstrapMaxLen。
+// 为什么整段脚本要放在服务端：Windows 升级助手一旦有致命缺陷，装在现网的 Agent
+// 会一遍遍生成同一段坏脚本，新版本的修复永远送不到它们手上——因为「装上新版本」
+// 这件事本身就要靠那段坏脚本。把正文交给服务端下发，服务端一升级就能单方面修好
+// 所有老 Agent（见 rescueWindowsAgentUpdate）。
 func legacyWindowsAgentUpdateScript(server, bin string) string {
-	// Keep as one encoded command; restart must use --install-service / --config
-	// for service installs, and VBS/schtasks/Start-Process --config for per-user
-	// one-liner installs. Bare Start-Process $Exe (no args) breaks terminal+desktop.
+	// The bootstrap runs INLINE, inside the agent's service Job Object: stopping
+	// the service here would kill this very process mid-swap. It therefore only
+	// downloads + verifies + spawns, and never touches the service or the binary.
 	ps := fmt.Sprintf(`$ErrorActionPreference='Stop'
 try{[Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor 3072}catch{}
-function Invoke-Native {
-  param([string]$File,[string[]]$Arguments)
-  # Never merge native stderr via 2>&1: Windows PowerShell 5.1 turns it into
-  # NativeCommandError records that $ErrorActionPreference='Stop' promotes to a
-  # terminating error, so a harmless startup warning aborted the whole update.
-  #
-  # 参数名不能是 $Args —— PowerShell 自动变量会把它清空，见 agent 侧同名函数注释。
-  $prevEAP = $ErrorActionPreference
-  $out = ''
-  $code = -1
-  try {
-    $ErrorActionPreference = 'Continue'
-    $out = (& $File @Arguments 2>$null | Out-String)
-    $code = $LASTEXITCODE
-  } catch { $out = $_.Exception.Message; $code = -1 } finally { $ErrorActionPreference = $prevEAP }
-  return [pscustomobject]@{ ExitCode = $code; Output = $out.Trim() }
-}
-# --version 探测必须有硬超时，否则一个不退出的二进制会把整条 exec 通道占满 10 分钟，
-# 并在主机上留下一个从暂存路径拉起的野生 Agent 进程。
-function Invoke-VersionProbe {
-  param([string]$File,[int]$TimeoutSec = 20)
-  $o = [IO.Path]::GetTempFileName()
-  $e = [IO.Path]::GetTempFileName()
-  try {
-    $p = Start-Process -FilePath $File -ArgumentList '--version' -NoNewWindow -PassThru -RedirectStandardOutput $o -RedirectStandardError $e
-    if (-not $p.WaitForExit($TimeoutSec * 1000)) {
-      try { $p.Kill() } catch {}
-      return [pscustomobject]@{ ExitCode = -1; Output = ("version probe timed out after " + $TimeoutSec + "s") }
-    }
-    $p.WaitForExit()
-    $txt = '' + (Get-Content -LiteralPath $o -Raw -ErrorAction SilentlyContinue) + (Get-Content -LiteralPath $e -Raw -ErrorAction SilentlyContinue)
-    return [pscustomobject]@{ ExitCode = $p.ExitCode; Output = $txt.Trim() }
-  } catch {
-    return [pscustomobject]@{ ExitCode = -1; Output = $_.Exception.Message }
-  } finally {
-    Remove-Item -Force -ErrorAction SilentlyContinue $o, $e
-  }
-}
-$Server='%s'; $Bin='%s'
-$exeNames=@('aiops-agent.exe','aiops-agent-windows-amd64.exe','aiops-agent-windows-arm64.exe','aiops-agent-windows-amd64-win2012.exe')
-$cands=@((Join-Path $env:ProgramFiles 'AIOps Agent'),(Join-Path ${env:ProgramFiles(x86)} 'AIOps Agent'),(Join-Path $env:LOCALAPPDATA 'aiops-agent'),(Join-Path $env:ProgramData 'aiops-agent'),(Join-Path $env:ProgramData 'AIOps Agent'))
-$Dir=$null; $Exe=$null
-foreach($d in $cands){
-  foreach($n in $exeNames){ $p=Join-Path $d $n; if(Test-Path -LiteralPath $p){ $Dir=$d; $Exe=$p; break } }
-  if($Exe){ break }
-}
-if(-not $Exe){ throw 'agent exe not found' }
-$New=Join-Path $Dir '.aiops-agent.new.exe'
-$Cfg=$null
-foreach($n in @('config.yaml','config.yml','config.json')){ $c=Join-Path $Dir $n; if(Test-Path -LiteralPath $c){ $Cfg=$c; break } }
-Invoke-WebRequest "$Server/dl/$Bin" -OutFile $New -UseBasicParsing
-$Expected=((Invoke-WebRequest "$Server/dl/$Bin.sha256" -UseBasicParsing).Content -split '\s+')[0].Trim().ToLowerInvariant()
-$Sha=[Security.Cryptography.SHA256]::Create(); $Stream=[IO.File]::OpenRead($New)
-try{ $Actual=([BitConverter]::ToString($Sha.ComputeHash($Stream))).Replace('-','').ToLowerInvariant() } finally { $Stream.Dispose(); $Sha.Dispose() }
-if(-not $Expected -or $Expected -ne $Actual){ Remove-Item $New -Force; throw 'SHA-256 mismatch' }
-$probe = Invoke-VersionProbe $New
-if($probe.ExitCode -ne 0){ Remove-Item $New -Force -ErrorAction SilentlyContinue; throw ("staging not runnable (exit="+$probe.ExitCode+"): "+$probe.Output) }
-
-# ---- hand off to a DETACHED helper --------------------------------------
-# Everything above is safe to run inline (no service stop). Everything below
-# would kill this very process: we are a child of the agent, inside the service
-# Job Object, so stopping the service tears us down mid-swap.
-$Work=$null
-foreach($d in @((Join-Path $env:ProgramData 'aiops-agent-update'),(Join-Path $env:SystemRoot 'Temp\aiops-agent-update'),(Join-Path $env:TEMP 'aiops-agent-update'))){
-  if(-not $d){ continue }
-  try{ New-Item -ItemType Directory -Force -Path $d | Out-Null; $probeFile=Join-Path $d '.w'; Set-Content -LiteralPath $probeFile -Value '1'; Remove-Item -LiteralPath $probeFile -Force; $Work=$d; break }catch{}
-}
-if(-not $Work){ throw 'no writable work dir for update helper' }
-$Helper=Join-Path $Work 'aiops-agent-legacy-update.ps1'
-$LogPath=Join-Path $Work 'aiops-agent-update.log'
-function Quote-PS([string]$s){ return "'" + $s.Replace("'","''") + "'" }
-$nl=[Environment]::NewLine
-$hdr='$Exe = '+(Quote-PS $Exe)+$nl+'$New = '+(Quote-PS $New)+$nl+'$Cfg = '+(Quote-PS ([string]$Cfg))+$nl+'$Log = '+(Quote-PS $LogPath)+$nl
-$body=@'
-%s
-'@
-[IO.File]::WriteAllText($Helper, $hdr + $body, (New-Object Text.UTF8Encoding $false))
-$PSExe="$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-$HelperArgs='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$Helper+'"'
-$spawned=$false
-# 1) Scheduled task as SYSTEM — fully outside our job object.
+$S='%s';$B='%s';$H='%s';$T='AIOpsAgentLegacyUpdate';$N='aiops-agent-update'
+$W=Join-Path $env:ProgramData $N
+try{md $W -Force|Out-Null}catch{$W=Join-Path $env:TEMP $N;md $W -Force|Out-Null}
+$F=Join-Path $W "$N.ps1"
+Remove-Item -LiteralPath $F -Force -EA 0
+(New-Object Net.WebClient).DownloadFile("$S%s",$F)
+$sha=[Security.Cryptography.SHA256]::Create();$fs=[IO.File]::OpenRead($F)
+try{$a=([BitConverter]::ToString($sha.ComputeHash($fs))).Replace('-','').ToLowerInvariant()}finally{$fs.Dispose();$sha.Dispose()}
+if($a -ne $H){Remove-Item -LiteralPath $F -Force -EA 0;throw "update helper sha256 mismatch (want $H got $a)"}
+$P="$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+$A='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$F+'" -Server "'+$S+'" -Bin "'+$B+'"'
+$k=$false
 try{
-  $act=New-ScheduledTaskAction -Execute $PSExe -Argument $HelperArgs
-  $trg=New-ScheduledTaskTrigger -Once -At ((Get-Date).AddYears(10))
-  try{
-    $prin=New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-    Register-ScheduledTask -TaskName 'AIOpsAgentLegacyUpdate' -Action $act -Trigger $trg -Principal $prin -Force | Out-Null
-  }catch{
-    Register-ScheduledTask -TaskName 'AIOpsAgentLegacyUpdate' -Action $act -Trigger $trg -Force | Out-Null
-  }
-  Start-ScheduledTask -TaskName 'AIOpsAgentLegacyUpdate' -ErrorAction Stop
-  $spawned=$true
+ $t=New-ScheduledTaskAction -Execute $P -Argument $A
+ $g=New-ScheduledTaskTrigger -Once -At ((Get-Date).AddYears(10))
+ try{$n=New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest;Register-ScheduledTask -TaskName $T -Action $t -Trigger $g -Principal $n -Force|Out-Null}catch{Register-ScheduledTask -TaskName $T -Action $t -Trigger $g -Force|Out-Null}
+ Start-ScheduledTask -TaskName $T -EA Stop;$k=$true
 }catch{}
-# 2) WMI process create — the child is parented by WmiPrvSE, not by us.
-if(-not $spawned){
-  try{
-    $r=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = ('"'+$PSExe+'" '+$HelperArgs) }
-    if($r -and $r.ReturnValue -eq 0){ $spawned=$true }
-  }catch{}
-}
-# 3) Last resort: cmd start /b (weakest job isolation, but better than inline).
-if(-not $spawned){
-  Start-Process -FilePath "$env:SystemRoot\System32\cmd.exe" -ArgumentList ('/c start "" /b "'+$PSExe+'" '+$HelperArgs) -WindowStyle Hidden
-  $spawned=$true
-}
-if(-not $spawned){ throw 'failed to spawn detached update helper' }
-Write-Output ('legacy agent update ok sha='+$Actual+' -> restart scheduled (detached helper, log '+$LogPath+')')
+if(-not $k){try{$c=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=('"'+$P+'" '+$A)};if($c -and $c.ReturnValue -eq 0){$k=$true}}catch{}}
+if(-not $k){Start-Process -FilePath "$env:SystemRoot\System32\cmd.exe" -ArgumentList ('/c start "" /b "'+$P+'" '+$A) -WindowStyle Hidden}
+Write-Output ("legacy agent update ok helper=$($a.Substring(0,12)) -> restart scheduled (detached, log $W\$N.log)")
 `,
 		strings.ReplaceAll(server, "'", "''"),
 		strings.ReplaceAll(bin, "'", "''"),
-		legacyWindowsUpdateHelperPS,
+		windowsUpdateHelperSHA256(),
+		windowsUpdateHelperPath,
 	)
 	// Prefer absolute powershell so LocalSystem / thin PATH still works when this
 	// string is executed via cmd /c (agent runShellCommand expands %SystemRoot%).

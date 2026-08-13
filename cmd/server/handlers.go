@@ -164,6 +164,8 @@ func NewServer(store *Store, cfg *ConfigStore, notifier *Notifier, distDir strin
 			s.pg.cleanupAlertHistory(s.cfg.Retention().AlertHistoryDays)
 			s.pg.cleanupOldFlowPartitions(s.cfg.Retention().NetFlowMonths)
 			s.pg.cleanupAICallEvents(s.cfg.Retention().AICallDays)
+			s.pg.cleanupOpsHistory(s.cfg.Retention().OpsHistoryDays)
+			s.pg.cleanupAIToolAudit(s.cfg.Retention().AuditDays)
 			s.startBackupScheduler()
 			s.startTicketSLAWatcher()
 			s.startSecretRotateScheduler()
@@ -184,6 +186,8 @@ func NewServer(store *Store, cfg *ConfigStore, notifier *Notifier, distDir strin
 				s.pg.cleanupAlertHistory(ret.AlertHistoryDays)
 				s.pg.cleanupOldFlowPartitions(ret.NetFlowMonths)
 				s.pg.cleanupAICallEvents(ret.AICallDays)
+				s.pg.cleanupOpsHistory(ret.OpsHistoryDays)
+				s.pg.cleanupAIToolAudit(ret.AuditDays)
 				// 自进化：默认仍提炼技能；开启 SelfEvolveEnabled 时额外写成长日记并做完整维护。
 				if s.cfg.AIConfig().SelfEvolveEnabled {
 					s.maybeRunScheduledSelfEvolve()
@@ -845,6 +849,10 @@ func (s *Server) Routes() http.Handler {
 			w.Write(data)
 		})
 	}
+	// Windows Agent 升级助手正文。注册在 distDir 判断之外：它是服务端生成的，
+	// 不读磁盘，且它正是「Agent 侧助手坏掉时的唯一逃生口」——没有 dist 目录的
+	// 部署同样需要它可用。更具体的路由优先于下面的 "GET /dl/" 前缀路由。
+	mux.HandleFunc("GET "+windowsUpdateHelperPath, s.handleAgentUpdateHelperScript)
 	// agent binaries + plugins.zip for the one-line install command
 	if s.distDir != "" {
 		mux.HandleFunc("GET /dl/", s.handleDownload)

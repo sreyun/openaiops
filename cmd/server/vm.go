@@ -516,11 +516,21 @@ type promSeries struct {
 // 供指标告警规则评估用：表达式已编码条件（如 mysql_up==0 / rate(errors[5m])>10），
 // 非空结果即表示这些标签集正处于告警状态（与 Prometheus 告警规则语义一致）。ok=false 表示 VM 未启用/查询失败。
 func (v *vmWriter) vmQueryVector(promql string) ([]promSeries, bool) {
+	return v.vmQueryVectorAt(promql, 0)
+}
+
+// vmQueryVectorAt evaluates the instant query at unix time `at` (0 = now), so a
+// dashboard viewing a past window reads the value at the end of that window
+// rather than the current one.
+func (v *vmWriter) vmQueryVectorAt(promql string, at int64) ([]promSeries, bool) {
 	c := v.cfg.VMConfig()
 	if !c.Enabled || c.URL == "" {
 		return nil, false
 	}
 	q := url.Values{"query": {promql}}
+	if at > 0 {
+		q.Set("time", strconv.FormatInt(at, 10))
+	}
 	req, err := http.NewRequest(http.MethodGet, strings.TrimRight(c.URL, "/")+"/api/v1/query?"+q.Encode(), nil)
 	if err != nil {
 		return nil, false

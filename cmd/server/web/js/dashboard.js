@@ -1104,16 +1104,16 @@ async function loadPanelContent(p, body, chartKey, loadSeq) {
   if (p.type === "logs") await run(loadLogsPanel(pView, body, from, to, panelLoad));
   else if (p.type === "timeseries" || p.type === "graph") await run(loadTimeseriesPanel(pView, body, from, to, panelLoad));
   else if (p.type === "stat") await run(loadStatPanel(pView, body, from, to, panelLoad));
-  else if (p.type === "gauge") await run(loadGaugePanel(pView, body));
-  else if (p.type === "piechart" || p.type === "pie") await run(loadPiePanel(pView, body));
+  else if (p.type === "gauge") await run(loadGaugePanel(pView, body, from, to));
+  else if (p.type === "piechart" || p.type === "pie") await run(loadPiePanel(pView, body, from, to));
   else if (p.type === "barchart" || p.type === "bar") await run(loadBarPanel(pView, body, from, to, panelLoad));
-  else if (p.type === "histogram") await run(loadHistogramPanel(pView, body));
+  else if (p.type === "histogram") await run(loadHistogramPanel(pView, body, from, to));
   else if (p.type === "state-timeline" || p.type === "statetimeline") await run(loadStateTimelinePanel(pView, body, from, to));
   else if (p.type === "heatmap") await run(loadHeatmapPanel(pView, body, from, to));
   else if (p.type === "candlestick") await run(loadCandlestickPanel(pView, body, from, to));
-  else if (p.type === "radar") await run(loadRadarPanel(pView, body));
-  else if (p.type === "sankey") await run(loadSankeyPanel(pView, body));
-  else await run(loadInstantPanel(pView, body));
+  else if (p.type === "radar") await run(loadRadarPanel(pView, body, from, to));
+  else if (p.type === "sankey") await run(loadSankeyPanel(pView, body, from, to));
+  else await run(loadInstantPanel(pView, body, from, to));
   // Stale range: clear skeleton that a superseded load may have left behind.
   if (!stillCurrent() && body.querySelector(".dash-panel-skeleton")) {
     /* superseded — leave the newer render alone */
@@ -1201,8 +1201,8 @@ async function loadCandlestickPanel(p, body, from, to) {
   body.innerHTML = dashEmptyHint("需要 ECharts 以渲染 K 线");
 }
 
-async function loadRadarPanel(p, body) {
-  const series = await instantQuery(p, body);
+async function loadRadarPanel(p, body, from, to) {
+  const series = await instantQuery(p, body, from, to);
   if (!series) return;
   let items = series.map(s => ({
     name: legendFor(p.targets[0].legend, seriesLabels(s)),
@@ -1220,8 +1220,8 @@ async function loadRadarPanel(p, body) {
   ).join("") + `</div>`;
 }
 
-async function loadSankeyPanel(p, body) {
-  const series = await instantQuery(p, body);
+async function loadSankeyPanel(p, body, from, to) {
+  const series = await instantQuery(p, body, from, to);
   if (!series) return;
   const items = dashSortLimit(series.map(s => ({
     lbl: legendFor(p.targets[0].legend, seriesLabels(s)),
@@ -1248,9 +1248,15 @@ async function loadSankeyPanel(p, body) {
   body.innerHTML = dashEmptyHint("需要 ECharts 以渲染桑基图");
 }
 // 即时查询公共入口：返回序列数组，出错/无数据时写占位并返回 null。
-async function instantQuery(p, body) {
+// 瞬时面板（仪表/饼图/柱状/直方图/雷达/桑基/stat）同样受看板时间选择器管辖：
+// 窗口决定服务端的 $__range / $__interval 展开值与求值时刻。不传窗口时服务端
+// 退回 1h/now，与旧行为一致。
+async function instantQuery(p, body, from, to) {
+  const win = (typeof from === "number" && typeof to === "number" && from < to)
+    ? { from, to }
+    : (typeof dashRange === "function" ? dashRange() : null);
   let res;
-  try { res = await fetch(`${API}/dashboards/query-instant`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expr: p.targets[0].expr, datasource: resolveDS(p), vars: panelVars() }) }).then(r => r.json()); }
+  try { res = await fetch(`${API}/dashboards/query-instant`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expr: p.targets[0].expr, datasource: resolveDS(p), vars: panelVars(), from: win ? win.from : 0, to: win ? win.to : 0 }) }).then(r => r.json()); }
   catch (e) { body.innerHTML = `<div class="dash-empty">查询失败</div>`; return null; }
   if (res && res.available === false) { body.innerHTML = `<div class="dash-empty">数据源不可用（${esc(dsLabel(resolveDS(p)))}）</div>`; return null; }
   const series = (res && res.series) || [];
@@ -1489,12 +1495,12 @@ function isSQLDashDS(id) {
   return d && (d.type === "postgres" || d.type === "postgresql" || d.type === "mysql");
 }
 
-async function loadInstantPanel(p, body) {
+async function loadInstantPanel(p, body, from, to) {
   if (p.type === "table" && isSQLDashDS(resolveDS(p))) {
     await loadSQLTablePanel(p, body);
     return;
   }
-  const series = await instantQuery(p, body);
+  const series = await instantQuery(p, body, from, to);
   if (!series) return;
   if (p.type === "bargauge") {
     const items = dashSortLimit(series.map(s => ({
@@ -1594,8 +1600,8 @@ async function loadStatPanel(p, body, from, to, panelLoad) {
   }
 }
 // loadGaugePanel：ECharts 仪表；多序列时网格分格。
-async function loadGaugePanel(p, body) {
-  const series = await instantQuery(p, body);
+async function loadGaugePanel(p, body, from, to) {
+  const series = await instantQuery(p, body, from, to);
   if (!series) return;
   let items = series.map(s => {
     let lbl = legendFor(p.targets[0].legend, seriesLabels(s));
@@ -1629,8 +1635,8 @@ async function loadGaugePanel(p, body) {
     return `<div class="dash-gauge-item">${svgGauge(pct, dashFmt(p, it.val), col)}<div class="dash-gauge-lbl" title="${esc(it.lbl)}">${esc(it.lbl)}</div></div>`;
   }).join("") + `</div>`;
 }
-async function loadPiePanel(p, body) {
-  const series = await instantQuery(p, body);
+async function loadPiePanel(p, body, from, to) {
+  const series = await instantQuery(p, body, from, to);
   if (!series) return;
   let items = series
     .map((s, i) => ({ val: Math.max(0, seriesVal2(s)), lbl: legendFor(p.targets[0].legend, seriesLabels(s)), col: dashColorAt(p, i) }))
@@ -1669,7 +1675,7 @@ async function loadBarPanel(p, body, from, to, panelLoad) {
     await loadTimeseriesPanel(p2, body, range.from, range.to, panelLoad);
     return;
   }
-  const series = await instantQuery(p, body);
+  const series = await instantQuery(p, body, from, to);
   if (!series) return;
   let items = series.map((s, i) => ({ val: seriesVal2(s), lbl: legendFor(p.targets[0].legend, seriesLabels(s)), col: dashColorAt(p, i) }));
   items = dashSortLimit(items, p, 16);
@@ -1730,8 +1736,8 @@ async function rangeSeries(p, body, from, to) {
   if (!series.length) { body.innerHTML = dashEmptyHint("该范围无数据"); return null; }
   return series;
 }
-async function loadHistogramPanel(p, body) {
-  const series = await instantQuery(p, body);
+async function loadHistogramPanel(p, body, from, to) {
+  const series = await instantQuery(p, body, from, to);
   if (!series) return;
   const vals = series.map(seriesVal2).filter(v => isFinite(v));
   if (!vals.length) { body.innerHTML = dashEmptyHint("无数据"); return; }

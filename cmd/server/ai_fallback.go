@@ -21,6 +21,9 @@ type AgentLoopMeta struct {
 	RoutedModel   string           `json:"routed_model,omitempty"`
 	ExperimentID  string           `json:"experiment_id,omitempty"`
 	Variant       string           `json:"variant,omitempty"`
+	// ToolCites 是本轮工具（当前为 search_knowledge/WeKnora）产生的文档引用。
+	// 按轮返回而非挂在引擎单例上，避免并发会话互相覆盖引用来源。不外发，仅供计数与记忆沉淀。
+	ToolCites []RAGCitation `json:"-"`
 }
 
 func fallbackModelList(cfg AIConfig) []string {
