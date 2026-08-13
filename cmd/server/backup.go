@@ -366,6 +366,13 @@ func (s *Server) restorePGBackup(id, operator string) error {
 		_, _ = s.pg.db.Exec(`INSERT INTO backup_meta(id, created_at, size_bytes, sha256, operator, path, note)
 			VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (id) DO UPDATE SET size_bytes=EXCLUDED.size_bytes, sha256=EXCLUDED.sha256`,
 			safety.ID, safety.CreatedAt, safety.SizeBytes, safety.SHA256, safety.Operator, safety.Path, safety.Note)
+		// 5) Freeze memory→PG mirroring. In-memory state is still pre-restore while
+		// PG now holds the dump; the write-dedup cache also still believes the old
+		// rows are current. The next 15s flush — or worse, the SIGTERM heavy flush
+		// that runs on the "please restart" the API recommends — would UPSERT live
+		// hosts/incidents over the restored rows and leave a hybrid DB. Block all
+		// flushes until a new process reloads memory from PostgreSQL.
+		s.pg.suspendFlushAfterRestore()
 	}
 	slog.Info("PostgreSQL restore completed (drop-and-recreate)", "backup", id, "operator", operator)
 	s.store.AddLog(LogEntry{Kind: KindOperation, Level: "warning", Actor: operator, Message: "从备份还原 PostgreSQL（删库重建）：" + id})
@@ -554,7 +561,7 @@ func (s *Server) handleRestoreBackup(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "hint": "还原已执行（删库重建模式，还原前已自动创建保护性备份），建议重启服务端进程以重新加载内存状态"})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "restart_required": true, "hint": "还原已执行（删库重建模式，还原前已自动创建保护性备份）。内存态与 PG 写回已冻结，必须重启服务端进程以从 PostgreSQL 重新加载内存状态，否则进程内仍是还原前的视图"})
 }
 
 func (s *Server) handleGetRetention(w http.ResponseWriter, r *http.Request) {

@@ -58,6 +58,11 @@ type pgStore struct {
 	// wc 让 15 秒一次的 pgFlush 只写「真的变了」的行/blob。没有它，绝大多数周期
 	// 写都是内容完全相同的重复 UPDATE，只产生死元组和 WAL（见 pgstore_writecache.go）。
 	wc *pgWriteCache
+	// flushSuspend is set after an in-process PG restore. Memory still holds the
+	// pre-restore snapshot while PG holds the dump; any subsequent pgFlush
+	// (15s ticker or graceful-shutdown heavy flush) would partially overwrite
+	// the restored rows using a still-warm write cache. Restart is required.
+	flushSuspend atomic.Bool
 }
 
 // flowJob 是一批待入库的 Flow 明细。
@@ -2730,11 +2735,28 @@ const (
 	pgFlushHeavyEveryNth = 20 // 20 × 15s = 5min
 )
 
+// suspendFlushAfterRestore blocks every subsequent pgFlush until process
+// restart. Called after drop-and-recreate restore succeeds.
+func (p *pgStore) suspendFlushAfterRestore() {
+	if p == nil {
+		return
+	}
+	p.flushSuspend.Store(true)
+}
+
+func (p *pgStore) flushAllowed() bool {
+	return p != nil && !p.flushSuspend.Load()
+}
+
 // pgFlush persists the current relational state to PostgreSQL (also called on
 // shutdown for a final flush). heavy gates the writes whose payload is large or
 // changes every cycle — the aggregated-log blob and the metric-carrying half of
 // the hosts rows — so the 15s flush does not rewrite them every time.
 func (s *Server) pgFlush(ps *pgStore, heavy bool) {
+	if !ps.flushAllowed() {
+		slog.Warn("PG flush skipped: database was restored in-process; restart the server to reload memory from PostgreSQL")
+		return
+	}
 	if err := ps.saveIncidents(s.incidents.Export()); err != nil {
 		slog.Warn("PG 同步事件失败", "err", err)
 	}
