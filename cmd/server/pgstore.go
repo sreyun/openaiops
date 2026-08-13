@@ -55,6 +55,9 @@ type pgStore struct {
 	flowSpill  chan flowJob // 二级有界重试缓冲
 	flowDrop   atomic.Int64
 	flowSpillN atomic.Int64
+	// wc 让 15 秒一次的 pgFlush 只写「真的变了」的行/blob。没有它，绝大多数周期
+	// 写都是内容完全相同的重复 UPDATE，只产生死元组和 WAL（见 pgstore_writecache.go）。
+	wc *pgWriteCache
 }
 
 // flowJob 是一批待入库的 Flow 明细。
@@ -125,7 +128,7 @@ func openPGStore(dsn string) (*pgStore, error) {
 		db.Close()
 		return nil, sql.ErrConnDone
 	}
-	ps := &pgStore{db: db, flowJobs: make(chan flowJob, 512), flowSpill: make(chan flowJob, 256)}
+	ps := &pgStore{db: db, flowJobs: make(chan flowJob, 512), flowSpill: make(chan flowJob, 256), wc: newPGWriteCache()}
 	if err := runMigrationPhases(ps.migrateBootstrap, ps.migrateDualTrackPartitions, ps.runVersionedMigrations); err != nil {
 		db.Close()
 		return nil, err
@@ -849,32 +852,119 @@ func (p *pgStore) loadHosts() ([]*Host, error) {
 	return out, rows.Err()
 }
 
-// saveHosts replaces the host set atomically (DELETE + INSERT in one tx) so
-// operator-deleted hosts don't linger. Host counts are small, so this is cheap.
-func (p *pgStore) saveHosts(hosts []*Host) error {
-	tx, err := p.db.Begin()
-	if err != nil {
-		return err
+// hostIdentityDigest reduces a Host to the fields that identify it, deliberately
+// dropping everything VictoriaMetrics already owns.
+//
+// Host.Latest 是一个完整的指标样本（CPU/内存/每块盘/每种连接状态/GPU/进程名，
+// 实测 0.8–1.9 KB），Custom 是插件上报的自定义仪表盘值——两者都是纯时序数据，
+// **每个上报周期都在变**，而且每一个点都已经由 vmWriter 写进了 VM。它们跟着 hosts
+// 行每 15 秒重写一次，是 PG 体积远超 VM 的真正来源（内容哈希去重对它们完全无效，
+// 因为内容确实每次都不同）。LastSeen 同理：每个周期都变，但启动后几秒内就会被
+// 新上报覆盖，没有任何理由为它每 15 秒烧一个死元组。
+//
+// 摘要里只留「几乎不变」的部分，于是常态下 hosts 表一次写都不发；真正的指标值仍会
+// 被慢周期的整行刷写（含退出前那次）落库，供重启后回填离线主机的最后已知状态。
+func hostIdentityDigest(h *Host) []byte {
+	if h == nil {
+		return nil
 	}
-	defer tx.Rollback()
-	if _, err := tx.Exec(`DELETE FROM hosts`); err != nil {
-		return err
+	raw, _ := json.Marshal([]any{
+		h.ID, h.Hostname, h.OS, h.Platform, h.Arch, h.IP, h.Kernel,
+		h.Category, h.AgentVersion, h.ServerURL, h.Fingerprint, h.FirstSeen,
+	})
+	return raw
+}
+
+// saveHosts mirrors the in-memory host set into PG, writing ONLY rows whose
+// JSON actually changed and deleting only rows that disappeared.
+//
+// 原实现是「DELETE 全表 + 重插全部」，每 15 秒一次。500 台机群下这是每天约 290 万
+// 个死元组、数 GB WAL，而其中绝大部分主机（尤其离线的那些）内容一个字节都没变。
+// hosts 表只在启动时被 loadHosts 读一次（纯重启缓存），所以按需写完全等价。
+//
+// withMetrics=false 是快周期（15s）的轻量刷写：只有主机身份/元信息变了才写，指标
+// 变化一概不写。withMetrics=true 是慢周期（pgFlushHeavyEveryNth）与退出前的整行
+// 刷写，此时 Latest/Custom 的最新值才落库。两种模式共用同一份内容哈希缓存，所以
+// 「轻量刷写跳过 → 下一次整行刷写补上」是自然发生的，不需要额外记账。
+func (p *pgStore) saveHosts(hosts []*Host, withMetrics bool) error {
+	const table = "hosts"
+	// 首次刷写：先learn PG 里已有哪些 id，否则「进程停机期间被删掉的主机」永远删不掉。
+	if p.wc.needsSeed(table) {
+		ids, err := p.selectIDsText(`SELECT id FROM hosts`)
+		if err != nil {
+			return err
+		}
+		p.wc.seed(table, ids)
 	}
-	stmt, err := tx.Prepare(`INSERT INTO hosts(id,data) VALUES($1,$2)`)
-	if err != nil {
-		return err
+
+	live := make(map[string]bool, len(hosts))
+	type pendingHost struct {
+		id    string
+		raw   []byte
+		ident []byte
 	}
-	defer stmt.Close()
+	var pending []pendingHost
 	for _, h := range hosts {
 		if h == nil || h.ID == "" {
 			continue
 		}
 		raw, _ := json.Marshal(h)
-		if _, err := stmt.Exec(h.ID, raw); err != nil {
+		ident := hostIdentityDigest(h)
+		live[h.ID] = true
+		changed := p.wc.isChanged(table+"/"+h.ID, raw)
+		if !withMetrics {
+			// 快周期：指标漂移不算变化，只有身份/元信息变了才值得一次写。
+			changed = changed && p.wc.isChanged(table+"-id/"+h.ID, ident)
+		}
+		if changed {
+			pending = append(pending, pendingHost{id: h.ID, raw: raw, ident: ident})
+		}
+	}
+	removed := p.wc.missingIDs(table, live)
+	if len(pending) == 0 && len(removed) == 0 {
+		return nil // 全员未变化：这一轮一次写都不发
+	}
+
+	tx, err := p.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if len(pending) > 0 {
+		stmt, err := tx.Prepare(`INSERT INTO hosts(id,data) VALUES($1,$2)
+			ON CONFLICT(id) DO UPDATE SET data=EXCLUDED.data`)
+		if err != nil {
+			return err
+		}
+		defer stmt.Close()
+		for _, ph := range pending {
+			if _, err := stmt.Exec(ph.id, ph.raw); err != nil {
+				return err
+			}
+		}
+	}
+	for _, id := range removed {
+		if _, err := tx.Exec(`DELETE FROM hosts WHERE id=$1`, id); err != nil {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		// 事务失败 → 缓存必须退回，否则下轮会以为已经写过而永久跳过。
+		// 身份摘要与整行哈希是同一次写的两半，必须一起退回。
+		p.wc.invalidateTable(table)
+		p.wc.invalidateTable(table + "-id")
+		return err
+	}
+	for _, ph := range pending {
+		p.wc.remember(table+"/"+ph.id, ph.raw)
+		p.wc.remember(table+"-id/"+ph.id, ph.ident)
+	}
+	for _, id := range removed {
+		p.wc.forget(table + "/" + id)
+		p.wc.forget(table + "-id/" + id)
+	}
+	p.wc.setIDs(table, live)
+	return nil
 }
 
 // --- small key-value state blobs (alert-ack states, login sessions) ---
@@ -891,7 +981,21 @@ func (p *pgStore) loadKV(key string) ([]byte, error) {
 func (p *pgStore) saveKV(key string, raw []byte) error {
 	_, err := p.db.Exec(`INSERT INTO kv_state(k,data) VALUES($1,$2)
 		ON CONFLICT(k) DO UPDATE SET data=EXCLUDED.data`, key, raw)
-	return err
+	if err != nil {
+		return err
+	}
+	p.wc.remember("kv/"+key, raw)
+	return nil
+}
+
+// saveKVIfChanged skips the UPDATE when the blob is byte-identical to what was
+// last written. 周期刷写里 sessions / alert_states / slo_burning / playbook_* 这些
+// 大多数时候纹丝不动，但每 15 秒都要被重写一遍——每次都是一个死元组加一份 WAL。
+func (p *pgStore) saveKVIfChanged(key string, raw []byte) error {
+	if !p.wc.isChanged("kv/"+key, raw) {
+		return nil
+	}
+	return p.saveKV(key, raw)
 }
 
 // --- config blob (whole ServerConfig as one JSONB row; replaces the JSON file) ---
@@ -1130,13 +1234,30 @@ func (p *pgStore) saveIncidents(list []Incident) error {
 		return err
 	}
 	defer stmt.Close()
+	// 已关闭的历史事件在内存里一动不动，却被每 15 秒重写一遍；只写变化行。
+	written := make(map[string][]byte, len(list))
 	for _, inc := range list {
 		raw, _ := json.Marshal(inc)
+		key := fmt.Sprintf("incidents/%d", inc.ID)
+		if !p.wc.isChanged(key, raw) {
+			continue
+		}
 		if _, err := stmt.Exec(inc.ID, inc.Status, inc.CreatedAt, raw); err != nil {
 			return err
 		}
+		written[key] = raw
 	}
-	return tx.Commit()
+	if len(written) == 0 {
+		return nil
+	}
+	if err := tx.Commit(); err != nil {
+		p.wc.invalidateTable("incidents")
+		return err
+	}
+	for k, raw := range written {
+		p.wc.remember(k, raw)
+	}
+	return nil
 }
 
 // --- tickets ---
@@ -1173,13 +1294,29 @@ func (p *pgStore) saveTickets(list []Ticket) error {
 		return err
 	}
 	defer stmt.Close()
+	written := make(map[string][]byte, len(list))
 	for _, tk := range list {
 		raw, _ := json.Marshal(tk)
+		key := fmt.Sprintf("tickets/%d", tk.ID)
+		if !p.wc.isChanged(key, raw) {
+			continue
+		}
 		if _, err := stmt.Exec(tk.ID, tk.Status, tk.CreatedAt, raw); err != nil {
 			return err
 		}
+		written[key] = raw
 	}
-	return tx.Commit()
+	if len(written) == 0 {
+		return nil
+	}
+	if err := tx.Commit(); err != nil {
+		p.wc.invalidateTable("tickets")
+		return err
+	}
+	for k, raw := range written {
+		p.wc.remember(k, raw)
+	}
+	return nil
 }
 
 // ============================================================================
@@ -2563,20 +2700,41 @@ func (s *Server) bindPG(ps *pgStore) {
 		}
 	}
 	go func() {
-		t := time.NewTicker(15 * time.Second)
+		t := time.NewTicker(pgFlushEvery)
 		defer t.Stop()
 		tick := 0
 		for range t.C {
 			tick++
-			s.pgFlush(ps, tick%2 == 0) // heavy log blob every ~30s
+			s.pgFlush(ps, tick%pgFlushHeavyEveryNth == 0)
 		}
 	}()
 }
 
+const (
+	// pgFlushEvery 是内存态镜像回写 PG 的周期。
+	pgFlushEvery = 15 * time.Second
+	// pgFlushHeavyEveryNth 决定多少轮 flush 才做一次「重量级」刷写，即活动日志 blob
+	// 加上带指标的整行 hosts 回写。
+	//
+	// 日志 blob 原来是每 2 轮（30 秒）一次，即每天 2880 次 × 约 1.4 MB ≈ 4 GB 的 TOAST
+	// 重写与等量 WAL——而这个 blob 只是重启回填用的缓存，真正的审计留痕已经由
+	// audit_log/audit_log_p 哈希链同步落库。
+	//
+	// hosts 行同理：里面的 Latest/Custom 是纯时序数据，每个上报周期都在变，因此内容
+	// 哈希去重对它完全无效——500 台机群每天约 290 万次整行重写、数 GB WAL，而同一批
+	// 数据在 VictoriaMetrics 里压缩后只有几十 MB。PG 侧只需要「重启后回填最后已知
+	// 状态」，慢周期完全够用。
+	//
+	// 放慢到 5 分钟后，崩溃最多损失几分钟的内存环预热数据与指标快照；审计不受任何
+	// 影响，在线主机重启后几秒内就会用新上报覆盖。退出前那次 flush 一定是重量级的。
+	pgFlushHeavyEveryNth = 20 // 20 × 15s = 5min
+)
+
 // pgFlush persists the current relational state to PostgreSQL (also called on
-// shutdown for a final flush). withLogs gates the large aggregated-log blob so
-// the periodic 15s flush does not rewrite it every time.
-func (s *Server) pgFlush(ps *pgStore, withLogs bool) {
+// shutdown for a final flush). heavy gates the writes whose payload is large or
+// changes every cycle — the aggregated-log blob and the metric-carrying half of
+// the hosts rows — so the 15s flush does not rewrite them every time.
+func (s *Server) pgFlush(ps *pgStore, heavy bool) {
 	if err := ps.saveIncidents(s.incidents.Export()); err != nil {
 		slog.Warn("PG 同步事件失败", "err", err)
 	}
@@ -2589,47 +2747,53 @@ func (s *Server) pgFlush(ps *pgStore, withLogs bool) {
 	if err := ps.saveChangeRecords(s.changes.Export()); err != nil {
 		slog.Warn("PG 同步变更记录失败", "err", err)
 	}
-	if err := ps.saveHosts(s.store.exportHosts()); err != nil {
+	if err := ps.saveHosts(s.store.exportHosts(), heavy); err != nil {
 		slog.Warn("PG 同步主机失败", "err", err)
 	}
+	// 下面这些 blob 每 15 秒都会被序列化一遍，但内容大多数时候完全没变。
+	// saveKVIfChanged 用内容哈希把「没变还要写」的那部分整个掐掉：写才产生死元组
+	// 和 WAL，不写就是零成本（见 pgstore_writecache.go 顶部的实测背景）。
 	if raw, err := json.Marshal(s.store.exportAlertStates()); err == nil {
-		_ = ps.saveKV("alert_states", raw)
+		_ = ps.saveKVIfChanged("alert_states", raw)
 	}
 	if raw, err := json.Marshal(s.auth.exportSessions()); err == nil {
-		_ = ps.saveKV("sessions", raw)
+		_ = ps.saveKVIfChanged("sessions", raw)
 	}
 	if raw, err := json.Marshal(s.messages.export()); err == nil {
-		_ = ps.saveKV("messages", raw)
+		_ = ps.saveKVIfChanged("messages", raw)
 	}
 	// AI inspection history is small (≤ inspectionReportCap) — persist every flush.
 	if raw, err := json.Marshal(s.ai.exportReports()); err == nil {
-		_ = ps.saveKV("ai_inspections", raw)
+		_ = ps.saveKVIfChanged("ai_inspections", raw)
 	}
 	// Remediation run history is small (≤ remediationRunCap) — persist every flush.
 	if raw, err := json.Marshal(s.remediation.Export()); err == nil {
-		_ = ps.saveKV("remediation_runs", raw)
+		_ = ps.saveKVIfChanged("remediation_runs", raw)
 	}
 	// SLO burning state is tiny — persist every flush.
 	if raw, err := json.Marshal(s.slos.exportBurning()); err == nil {
-		_ = ps.saveKV("slo_burning", raw)
+		_ = ps.saveKVIfChanged("slo_burning", raw)
 	}
-	// Aggregated agent logs can be large — only on the slower cadence / shutdown.
-	if withLogs {
+	// 活动日志 blob 是最贵的一个：8000 行整块序列化约 1.4 MB，而且每条日志行
+	// **已经**由 appendLog → appendAudit 同步进了 audit_log/audit_log_p 哈希链
+	// （store.go:791），这个 blob 只是重启时快速回填内存环的缓存。所以它按
+	// pgFlushHeavyEveryNth 的慢节奏走，并且内容没变就不写；进程退出前那次 flush 一定带上它。
+	if heavy {
 		if raw, err := json.Marshal(s.logs.export()); err == nil {
-			_ = ps.saveKV("logs", raw)
+			_ = ps.saveKVIfChanged("logs", raw)
 		}
 	}
 	// Playbook execution history is small (≤ 100 records) — persist every flush.
 	if raw, err := json.Marshal(s.playbooks.exportExecutions()); err == nil {
-		_ = ps.saveKV("playbook_executions", raw)
+		_ = ps.saveKVIfChanged("playbook_executions", raw)
 	}
 	if raw, err := json.Marshal(s.playbooks.exportLastRun()); err == nil {
-		_ = ps.saveKV("playbook_last_run", raw)
+		_ = ps.saveKVIfChanged("playbook_last_run", raw)
 	}
 	{
 		last, hourly := s.remediation.ExportGuards()
 		if raw, err := json.Marshal(map[string]any{"last_run": last, "hourly": hourly}); err == nil {
-			_ = ps.saveKV("remediation_guards", raw)
+			_ = ps.saveKVIfChanged("remediation_guards", raw)
 		}
 	}
 }
@@ -3923,22 +4087,63 @@ func (p *pgStore) loadOnCallPages() ([]OnCallPage, error) {
 }
 
 func (p *pgStore) saveOnCallPages(list []OnCallPage) error {
+	const table = "oncall_pages"
+	if p.wc.needsSeed(table) {
+		ids, err := p.selectIDsText(`SELECT id::text FROM oncall_pages`)
+		if err != nil {
+			return err
+		}
+		p.wc.seed(table, ids)
+	}
+	live := make(map[string]bool, len(list))
+	type pendingPage struct {
+		page OnCallPage
+		raw  []byte
+	}
+	var pending []pendingPage
+	for _, page := range list {
+		raw, _ := json.Marshal(page)
+		id := fmt.Sprint(page.ID)
+		live[id] = true
+		if p.wc.isChanged(table+"/"+id, raw) {
+			pending = append(pending, pendingPage{page: page, raw: raw})
+		}
+	}
+	removed := p.wc.missingIDs(table, live)
+	if len(pending) == 0 && len(removed) == 0 {
+		return nil
+	}
+
 	tx, err := p.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`DELETE FROM oncall_pages`); err != nil {
-		return err
-	}
-	for _, page := range list {
-		b, _ := json.Marshal(page)
-		if _, err := tx.Exec(`INSERT INTO oncall_pages(id, incident_id, status, created_at, data) VALUES($1,$2,$3,$4,$5)`,
-			page.ID, page.IncidentID, page.Status, page.CreatedAt, b); err != nil {
+	for _, pp := range pending {
+		if _, err := tx.Exec(`INSERT INTO oncall_pages(id, incident_id, status, created_at, data) VALUES($1,$2,$3,$4,$5)
+			ON CONFLICT(id) DO UPDATE SET incident_id=EXCLUDED.incident_id, status=EXCLUDED.status,
+				created_at=EXCLUDED.created_at, data=EXCLUDED.data`,
+			pp.page.ID, pp.page.IncidentID, pp.page.Status, pp.page.CreatedAt, pp.raw); err != nil {
 			return err
 		}
 	}
-	return tx.Commit()
+	for _, id := range removed {
+		if _, err := tx.Exec(`DELETE FROM oncall_pages WHERE id::text=$1`, id); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		p.wc.invalidateTable(table)
+		return err
+	}
+	for _, pp := range pending {
+		p.wc.remember(table+"/"+fmt.Sprint(pp.page.ID), pp.raw)
+	}
+	for _, id := range removed {
+		p.wc.forget(table + "/" + id)
+	}
+	p.wc.setIDs(table, live)
+	return nil
 }
 
 func (p *pgStore) loadChangeRecords() ([]ChangeRecord, error) {
@@ -3962,22 +4167,62 @@ func (p *pgStore) loadChangeRecords() ([]ChangeRecord, error) {
 }
 
 func (p *pgStore) saveChangeRecords(list []ChangeRecord) error {
+	const table = "change_records"
+	if p.wc.needsSeed(table) {
+		ids, err := p.selectIDsText(`SELECT id::text FROM change_records`)
+		if err != nil {
+			return err
+		}
+		p.wc.seed(table, ids)
+	}
+	live := make(map[string]bool, len(list))
+	type pendingChange struct {
+		rec ChangeRecord
+		raw []byte
+	}
+	var pending []pendingChange
+	for _, rec := range list {
+		raw, _ := json.Marshal(rec)
+		id := fmt.Sprint(rec.ID)
+		live[id] = true
+		if p.wc.isChanged(table+"/"+id, raw) {
+			pending = append(pending, pendingChange{rec: rec, raw: raw})
+		}
+	}
+	removed := p.wc.missingIDs(table, live)
+	if len(pending) == 0 && len(removed) == 0 {
+		return nil
+	}
+
 	tx, err := p.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`DELETE FROM change_records`); err != nil {
-		return err
-	}
-	for _, rec := range list {
-		b, _ := json.Marshal(rec)
-		if _, err := tx.Exec(`INSERT INTO change_records(id, status, started_at, data) VALUES($1,$2,$3,$4)`,
-			rec.ID, rec.Status, rec.StartedAt, b); err != nil {
+	for _, pc := range pending {
+		if _, err := tx.Exec(`INSERT INTO change_records(id, status, started_at, data) VALUES($1,$2,$3,$4)
+			ON CONFLICT(id) DO UPDATE SET status=EXCLUDED.status, started_at=EXCLUDED.started_at, data=EXCLUDED.data`,
+			pc.rec.ID, pc.rec.Status, pc.rec.StartedAt, pc.raw); err != nil {
 			return err
 		}
 	}
-	return tx.Commit()
+	for _, id := range removed {
+		if _, err := tx.Exec(`DELETE FROM change_records WHERE id::text=$1`, id); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		p.wc.invalidateTable(table)
+		return err
+	}
+	for _, pc := range pending {
+		p.wc.remember(table+"/"+fmt.Sprint(pc.rec.ID), pc.raw)
+	}
+	for _, id := range removed {
+		p.wc.forget(table + "/" + id)
+	}
+	p.wc.setIDs(table, live)
+	return nil
 }
 
 // cleanupFlowRecords deletes flow records older than 7 days (called periodically).

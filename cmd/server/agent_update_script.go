@@ -310,24 +310,70 @@ $ErrorActionPreference='Stop'
 $helperPid = $PID
 function Write-Log($m){ try{ Add-Content -LiteralPath $Log -Value ("[{0}] {1}" -f (Get-Date -Format o), $m) -Encoding UTF8 }catch{} }
 function Invoke-Native {
-  param([string]$File,[string[]]$Args)
+  param([string]$File,[string[]]$Arguments)
   # Never merge native stderr via 2>&1: Windows PowerShell 5.1 turns it into
   # NativeCommandError records that $ErrorActionPreference='Stop' promotes to a
   # terminating error. Judge by exit code instead.
+  #
+  # 参数名不能是 $Args —— 那是 PowerShell 自动变量，声明成参数后每次调用都被清空，
+  # "& $File @Args" 会退化成不带参数裸跑目标程序（详见 agent 侧同名函数的注释）。
   $prevEAP = $ErrorActionPreference
   $out = ''
   $code = -1
   try {
     $ErrorActionPreference = 'Continue'
-    $out = (& $File @Args 2>$null | Out-String)
+    $out = (& $File @Arguments 2>$null | Out-String)
     $code = $LASTEXITCODE
   } catch { $out = $_.Exception.Message; $code = -1 } finally { $ErrorActionPreference = $prevEAP }
   return [pscustomobject]@{ ExitCode = $code; Output = $out.Trim() }
+}
+# 跑 Agent 二进制的 --version 必须有硬超时：探测对象随时可能变成守护进程，
+# 一旦它不退出，助手会永久吊死在换二进制之前，主机静默停在旧版本。
+function Invoke-VersionProbe {
+  param([string]$File,[int]$TimeoutSec = 20)
+  $o = [IO.Path]::GetTempFileName()
+  $e = [IO.Path]::GetTempFileName()
+  try {
+    $p = Start-Process -FilePath $File -ArgumentList '--version' -NoNewWindow -PassThru -RedirectStandardOutput $o -RedirectStandardError $e
+    if (-not $p.WaitForExit($TimeoutSec * 1000)) {
+      try { $p.Kill() } catch {}
+      return [pscustomobject]@{ ExitCode = -1; Output = ("version probe timed out after " + $TimeoutSec + "s") }
+    }
+    $p.WaitForExit()
+    $txt = '' + (Get-Content -LiteralPath $o -Raw -ErrorAction SilentlyContinue) + (Get-Content -LiteralPath $e -Raw -ErrorAction SilentlyContinue)
+    return [pscustomobject]@{ ExitCode = $p.ExitCode; Output = $txt.Trim() }
+  } catch {
+    return [pscustomobject]@{ ExitCode = -1; Output = $_.Exception.Message }
+  } finally {
+    Remove-Item -Force -ErrorAction SilentlyContinue $o, $e
+  }
 }
 $procNames=@('aiops-agent','aiops-agent-windows-amd64','aiops-agent-windows-arm64','aiops-agent-windows-amd64-win2012')
 $svcNames=@('AiopsMonitorAgent','AIOps-Agent','AIOpsAgent')
 function Stop-AgentProcesses {
   Get-Process -Name $procNames -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $helperPid } | Stop-Process -Force -ErrorAction SilentlyContinue
+  # 也清掉「从暂存文件被裸跑起来」的野生 Agent：进程名形如 .aiops-agent.new.<pid>，
+  # 不匹配上面的名字列表，但它的映像路径一定含 aiops-agent。这是老版本 helper 留下的
+  # 残骸（"& $new" 不带参数把刚下载的 Agent 当守护进程拉起，永不退出），救援时必须扫掉，
+  # 否则它会一直占着 CPU 并让后续排障看到一个幽灵进程。
+  Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+    Where-Object {
+      $_.ProcessId -ne $helperPid -and $_.ExecutablePath -and
+      $_.ExecutablePath -match 'aiops-agent' -and
+      (-not ($_.CommandLine -and $_.CommandLine -match 'aiops-agent-(update-helper|legacy-update)'))
+    } |
+    ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch {} }
+}
+# 老版本 helper 会把自己注册成 AIOpsAgentSelfUpdate 一次性计划任务，然后吊死在
+# --version 探测上，任务永远停不下来。救援前先把它连任务带进程一起结束掉。
+function Clear-StuckSelfUpdateTask {
+  try { [void](Invoke-Native "$env:SystemRoot\System32\schtasks.exe" @('/End','/TN','AIOpsAgentSelfUpdate')) } catch {}
+  try { [void](Invoke-Native "$env:SystemRoot\System32\schtasks.exe" @('/Delete','/TN','AIOpsAgentSelfUpdate','/F')) } catch {}
+  try {
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+      Where-Object { $_.CommandLine -and $_.CommandLine -match 'aiops-agent-update-helper\.ps1' -and $_.ProcessId -ne $helperPid } |
+      ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch {} }
+  } catch {}
 }
 # A leftover --desktop-worker is the same binary with the same process name; it
 # must not read as a healthy agent or a failed swap would never roll back.
@@ -379,6 +425,7 @@ try {
   Write-Log ("legacy helper start pid=$helperPid exe=$Exe cfg=$Cfg")
   Start-Sleep -Seconds 3
   if(-not (Test-Path -LiteralPath $New)){ throw "staging missing: $New" }
+  Clear-StuckSelfUpdateTask
   foreach($name in $svcNames){
     if(Get-Service $name -ErrorAction SilentlyContinue){
       [void](Invoke-Native "$env:SystemRoot\System32\sc.exe" @('stop',$name))
@@ -403,7 +450,7 @@ try {
   $swapped = $true
   try{ Unblock-File -Path $Exe -ErrorAction SilentlyContinue }catch{}
   if(-not (Restart-Agent)){ throw 'agent not running after update' }
-  Write-Log ("legacy update ok version=" + (Invoke-Native $Exe @('--version')).Output)
+  Write-Log ("legacy update ok version=" + (Invoke-VersionProbe $Exe).Output)
   exit 0
 } catch {
   Write-Log ("legacy update failed: " + $_.Exception.Message)
@@ -425,19 +472,42 @@ func legacyWindowsAgentUpdateScript(server, bin string) string {
 	ps := fmt.Sprintf(`$ErrorActionPreference='Stop'
 try{[Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor 3072}catch{}
 function Invoke-Native {
-  param([string]$File,[string[]]$Args)
+  param([string]$File,[string[]]$Arguments)
   # Never merge native stderr via 2>&1: Windows PowerShell 5.1 turns it into
   # NativeCommandError records that $ErrorActionPreference='Stop' promotes to a
   # terminating error, so a harmless startup warning aborted the whole update.
+  #
+  # 参数名不能是 $Args —— PowerShell 自动变量会把它清空，见 agent 侧同名函数注释。
   $prevEAP = $ErrorActionPreference
   $out = ''
   $code = -1
   try {
     $ErrorActionPreference = 'Continue'
-    $out = (& $File @Args 2>$null | Out-String)
+    $out = (& $File @Arguments 2>$null | Out-String)
     $code = $LASTEXITCODE
   } catch { $out = $_.Exception.Message; $code = -1 } finally { $ErrorActionPreference = $prevEAP }
   return [pscustomobject]@{ ExitCode = $code; Output = $out.Trim() }
+}
+# --version 探测必须有硬超时，否则一个不退出的二进制会把整条 exec 通道占满 10 分钟，
+# 并在主机上留下一个从暂存路径拉起的野生 Agent 进程。
+function Invoke-VersionProbe {
+  param([string]$File,[int]$TimeoutSec = 20)
+  $o = [IO.Path]::GetTempFileName()
+  $e = [IO.Path]::GetTempFileName()
+  try {
+    $p = Start-Process -FilePath $File -ArgumentList '--version' -NoNewWindow -PassThru -RedirectStandardOutput $o -RedirectStandardError $e
+    if (-not $p.WaitForExit($TimeoutSec * 1000)) {
+      try { $p.Kill() } catch {}
+      return [pscustomobject]@{ ExitCode = -1; Output = ("version probe timed out after " + $TimeoutSec + "s") }
+    }
+    $p.WaitForExit()
+    $txt = '' + (Get-Content -LiteralPath $o -Raw -ErrorAction SilentlyContinue) + (Get-Content -LiteralPath $e -Raw -ErrorAction SilentlyContinue)
+    return [pscustomobject]@{ ExitCode = $p.ExitCode; Output = $txt.Trim() }
+  } catch {
+    return [pscustomobject]@{ ExitCode = -1; Output = $_.Exception.Message }
+  } finally {
+    Remove-Item -Force -ErrorAction SilentlyContinue $o, $e
+  }
 }
 $Server='%s'; $Bin='%s'
 $exeNames=@('aiops-agent.exe','aiops-agent-windows-amd64.exe','aiops-agent-windows-arm64.exe','aiops-agent-windows-amd64-win2012.exe')
@@ -456,7 +526,7 @@ $Expected=((Invoke-WebRequest "$Server/dl/$Bin.sha256" -UseBasicParsing).Content
 $Sha=[Security.Cryptography.SHA256]::Create(); $Stream=[IO.File]::OpenRead($New)
 try{ $Actual=([BitConverter]::ToString($Sha.ComputeHash($Stream))).Replace('-','').ToLowerInvariant() } finally { $Stream.Dispose(); $Sha.Dispose() }
 if(-not $Expected -or $Expected -ne $Actual){ Remove-Item $New -Force; throw 'SHA-256 mismatch' }
-$probe = Invoke-Native $New @('--version')
+$probe = Invoke-VersionProbe $New
 if($probe.ExitCode -ne 0){ Remove-Item $New -Force -ErrorAction SilentlyContinue; throw ("staging not runnable (exit="+$probe.ExitCode+"): "+$probe.Output) }
 
 # ---- hand off to a DETACHED helper --------------------------------------

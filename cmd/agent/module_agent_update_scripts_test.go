@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -221,6 +222,74 @@ func TestArgsRequestVersion(t *testing.T) {
 	for _, c := range cases {
 		if got := argsRequestVersion(c.args); got != c.want {
 			t.Errorf("argsRequestVersion(%q) = %v, want %v", c.args, got, c.want)
+		}
+	}
+}
+
+// psAutomaticVarParams reports every param() declaration in a PowerShell script
+// that reuses the name of an automatic variable.
+//
+// 这不是风格问题，是一个已经把整个 Windows 机群打瘫过的缺陷：PowerShell 会在每次
+// 调用时用「未绑定实参」重新赋值自动变量 $Args，把同名声明参数覆盖成空数组，于是
+//
+//	function Invoke-Native { param([string]$File,[string[]]$Args) ... & $File @Args }
+//	Invoke-Native $new @('--version')
+//
+// 实际执行的是不带任何参数的 "& $new" —— 把刚下载的 Agent 当守护进程前台拉起，
+// 管道永不结束，升级助手在换二进制之前就永久吊死。位置绑定和 -Args 命名绑定都中招。
+func psAutomaticVarParams(script string) []string {
+	// PowerShell automatic variables that are writable, so declaring them as a
+	// parameter silently binds-then-clobbers instead of raising an error.
+	auto := []string{"Args", "Input", "This", "PSItem", "Matches", "Error", "Host", "Foreach", "Switch"}
+	var hits []string
+	for i, line := range strings.Split(script, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") || !strings.Contains(trimmed, "param(") {
+			continue
+		}
+		for _, name := range auto {
+			for _, form := range []string{"$" + name + ",", "$" + name + ")", "$" + name + " ", "$" + name + "="} {
+				if strings.Contains(trimmed+" ", form) {
+					hits = append(hits, fmt.Sprintf("line %d: $%s — %s", i+1, name, trimmed))
+					break
+				}
+			}
+		}
+	}
+	return hits
+}
+
+func TestWindowsHelperNeverDeclaresAutomaticVarAsParam(t *testing.T) {
+	script := buildWindowsUpdateHelperScript(`C:\a\aiops-agent.exe`, `C:\a\.new.exe`,
+		`C:\a\config.yaml`, `C:\log`, `C:\a\r`, `C:\r2`)
+	if hits := psAutomaticVarParams(script); len(hits) > 0 {
+		t.Fatalf("PowerShell automatic variables used as parameter names (they are clobbered to empty on every call):\n  %s",
+			strings.Join(hits, "\n  "))
+	}
+}
+
+// TestWindowsHelperBoundsVersionProbe pins the second half of the same incident:
+// the probe's input is a binary that may not exit at all, so it must never be run
+// through an unbounded pipeline capture.
+func TestWindowsHelperBoundsVersionProbe(t *testing.T) {
+	script := buildWindowsUpdateHelperScript(`C:\a\aiops-agent.exe`, `C:\a\.new.exe`,
+		`C:\a\config.yaml`, `C:\log`, `C:\a\r`, `C:\r2`)
+	if !strings.Contains(script, "function Invoke-VersionProbe") {
+		t.Fatal("helper must define a bounded Invoke-VersionProbe")
+	}
+	if !strings.Contains(script, "WaitForExit($TimeoutSec * 1000)") {
+		t.Fatal("Invoke-VersionProbe must wait with a timeout, not block forever")
+	}
+	if !strings.Contains(script, "$p.Kill()") {
+		t.Fatal("Invoke-VersionProbe must kill a binary that ignores --version")
+	}
+	for i, line := range strings.Split(script, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.Contains(trimmed, "Invoke-Native") && strings.Contains(trimmed, "--version") {
+			t.Fatalf("line %d runs --version through the unbounded Invoke-Native: %s", i+1, trimmed)
 		}
 	}
 }

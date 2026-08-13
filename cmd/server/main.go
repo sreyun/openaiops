@@ -342,6 +342,11 @@ func main() {
 	// Emergency MFA unlock when authenticator is lost/desynced (password login still works after this).
 	resetAdminMFA := flag.Bool("reset-admin-mfa", false, "Clear MFA/TOTP for the first admin (or -reset-mfa-user), then exit — restart server afterwards")
 	resetMFAUser := flag.String("reset-mfa-user", "", "Username for -reset-admin-mfa (default: first admin)")
+	// PostgreSQL storage maintenance. Read-only report is safe any time; the
+	// reclaim takes ACCESS EXCLUSIVE locks and is therefore never automatic.
+	pgReport := flag.Bool("pg-report", false, "Print a PostgreSQL storage/bloat diagnostic (read-only), then exit")
+	pgReclaim := flag.Bool("pg-reclaim", false, "One-time VACUUM (FULL, ANALYZE) of bloated tables, then exit — takes ACCESS EXCLUSIVE locks, run in a maintenance window")
+	pgReclaimTables := flag.String("pg-reclaim-tables", "", "Comma-separated table list for -pg-reclaim (default: auto-detected bloated tables)")
 	flag.Parse()
 
 	// 配置文件支持 JSON 或 YAML/YML：优先用给定路径（存在即用，其扩展名决定解析格式），
@@ -359,6 +364,14 @@ func main() {
 	}
 	if *resetAdminMFA {
 		runResetAdminMFA(*cfgPath, *resetMFAUser)
+		return
+	}
+	if *pgReport {
+		runPGReport()
+		return
+	}
+	if *pgReclaim {
+		runPGReclaim(*pgReclaimTables)
 		return
 	}
 

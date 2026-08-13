@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/base64"
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf16"
@@ -141,5 +142,70 @@ func TestLegacyUnixAgentUpdateScriptPrefersInstallService(t *testing.T) {
 	}
 	if !strings.Contains(sh, "--config") {
 		t.Fatal("linux legacy restart missing --config")
+	}
+}
+
+// psAutomaticVarParamsSrv mirrors the agent-side guard: a param() that reuses a
+// PowerShell automatic variable name is silently clobbered to empty on every
+// call, so "& $File @Args" degenerates into running the target with no arguments.
+// 这条缺陷曾同时命中 module helper 和这里的 legacy 兜底脚本 —— 两条路径一起坏掉，
+// Windows 机群的自动升级因此没有任何逃生口。
+func psAutomaticVarParamsSrv(script string) []string {
+	auto := []string{"Args", "Input", "This", "PSItem", "Matches", "Error", "Host", "Foreach", "Switch"}
+	var hits []string
+	for i, line := range strings.Split(script, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") || !strings.Contains(trimmed, "param(") {
+			continue
+		}
+		for _, name := range auto {
+			for _, form := range []string{"$" + name + ",", "$" + name + ")", "$" + name + " ", "$" + name + "="} {
+				if strings.Contains(trimmed+" ", form) {
+					hits = append(hits, fmt.Sprintf("line %d: $%s — %s", i+1, name, trimmed))
+					break
+				}
+			}
+		}
+	}
+	return hits
+}
+
+func TestLegacyWindowsScriptsNeverDeclareAutomaticVarAsParam(t *testing.T) {
+	// The outer script ships as a UTF-16 base64 -EncodedCommand — assert on the
+	// decoded body, or every check here silently passes against base64 noise.
+	scripts := map[string]string{
+		"legacyWindowsAgentUpdateScript": decodeLegacyWindowsPS(t,
+			legacyWindowsAgentUpdateScript("https://mon.example:8529", "aiops-agent.exe")),
+		"legacyWindowsUpdateHelperPS": legacyWindowsUpdateHelperPS,
+	}
+	for name, script := range scripts {
+		if hits := psAutomaticVarParamsSrv(script); len(hits) > 0 {
+			t.Errorf("%s: PowerShell automatic variables used as parameter names (clobbered to empty on every call):\n  %s",
+				name, strings.Join(hits, "\n  "))
+		}
+	}
+}
+
+func TestLegacyWindowsScriptsBoundVersionProbe(t *testing.T) {
+	// The outer script ships as a UTF-16 base64 -EncodedCommand — assert on the
+	// decoded body, or every check here silently passes against base64 noise.
+	scripts := map[string]string{
+		"legacyWindowsAgentUpdateScript": decodeLegacyWindowsPS(t,
+			legacyWindowsAgentUpdateScript("https://mon.example:8529", "aiops-agent.exe")),
+		"legacyWindowsUpdateHelperPS": legacyWindowsUpdateHelperPS,
+	}
+	for name, script := range scripts {
+		if !strings.Contains(script, "Invoke-VersionProbe") {
+			t.Errorf("%s: --version must go through the bounded Invoke-VersionProbe", name)
+		}
+		for i, line := range strings.Split(script, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			if strings.Contains(trimmed, "Invoke-Native") && strings.Contains(trimmed, "--version") {
+				t.Errorf("%s line %d runs --version through the unbounded Invoke-Native: %s", name, i+1, trimmed)
+			}
+		}
 	}
 }

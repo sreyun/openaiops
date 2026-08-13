@@ -368,14 +368,20 @@ function Write-Result($m){
 # first one to a terminating error — that alone aborted every self-update before
 # the binary swap, because the agent prints a config warning on startup. Judge
 # native commands by their exit code instead.
+#
+# 参数名绝不能叫 $Args：$Args 是 PowerShell 的自动变量，声明成参数后**每次调用都会
+# 被清空成空数组**（位置绑定、-Args 命名绑定一样中招），于是 "& $File @Args" 退化成不带
+# 任何参数地裸跑目标程序。这曾让全部 Windows Agent 的自动升级无一例外地失败：
+# Invoke-Native $new @('--version') 实际执行的是 "& $new"，把刚下载的 Agent 当守护进程
+# 前台拉起，Out-String 永远等不到管道结束，助手就吊死在换二进制之前。
 function Invoke-Native {
-  param([string]$File,[string[]]$Args)
+  param([string]$File,[string[]]$Arguments)
   $prevEAP = $ErrorActionPreference
   $out = ''
   $code = -1
   try {
     $ErrorActionPreference = 'Continue'
-    $out = (& $File @Args 2>$null | Out-String)
+    $out = (& $File @Arguments 2>$null | Out-String)
     $code = $LASTEXITCODE
   } catch {
     $out = $_.Exception.Message
@@ -384,6 +390,28 @@ function Invoke-Native {
     $ErrorActionPreference = $prevEAP
   }
   return [pscustomobject]@{ ExitCode = $code; Output = $out.Trim() }
+}
+# Invoke-VersionProbe 是「跑一个 Agent 二进制的 --version」的唯一入口，且带硬超时。
+# 这类探测的输入正是一个随时可能变成守护进程的程序，一旦它不退出，助手就永久卡死在
+# 换二进制之前 —— 主机静默停在旧版本，且没有任何错误可上报。宁可超时判失败。
+function Invoke-VersionProbe {
+  param([string]$File,[int]$TimeoutSec = 20)
+  $o = [IO.Path]::GetTempFileName()
+  $e = [IO.Path]::GetTempFileName()
+  try {
+    $p = Start-Process -FilePath $File -ArgumentList '--version' -NoNewWindow -PassThru -RedirectStandardOutput $o -RedirectStandardError $e
+    if (-not $p.WaitForExit($TimeoutSec * 1000)) {
+      try { $p.Kill() } catch {}
+      return [pscustomobject]@{ ExitCode = -1; Output = ("version probe timed out after " + $TimeoutSec + "s") }
+    }
+    $p.WaitForExit()
+    $txt = '' + (Get-Content -LiteralPath $o -Raw -ErrorAction SilentlyContinue) + (Get-Content -LiteralPath $e -Raw -ErrorAction SilentlyContinue)
+    return [pscustomobject]@{ ExitCode = $p.ExitCode; Output = $txt.Trim() }
+  } catch {
+    return [pscustomobject]@{ ExitCode = -1; Output = $_.Exception.Message }
+  } finally {
+    Remove-Item -Force -ErrorAction SilentlyContinue $o, $e
+  }
 }
 function Wait-ServiceState([string]$Name, [string]$Want, [int]$Seconds) {
   for ($i=0; $i -lt $Seconds; $i++) {
@@ -469,7 +497,7 @@ function Restart-AgentService {
       foreach ($name in (Get-AgentServiceNames)) {
         if (Wait-ServiceState $name 'Running' 45) {
           Write-Log ("service running: " + $name)
-          Write-Log ("post-restart version: " + (Invoke-Native $Exe @('--version')).Output)
+          Write-Log ("post-restart version: " + (Invoke-VersionProbe $Exe).Output)
           return $true
         }
       }
@@ -511,7 +539,7 @@ try {
     }
   }
   Write-Log ("update begin exe=$exe cfg=$cfg")
-  $probe = Invoke-Native $new @('--version')
+  $probe = Invoke-VersionProbe $new
   if ($probe.ExitCode -ne 0) {
     throw ("staging binary not runnable before swap (exit=" + $probe.ExitCode + "): " + $probe.Output)
   }
@@ -563,7 +591,7 @@ try {
   if (-not (Restart-AgentService -Exe $exe -Cfg $cfg -Dir $dir)) {
     throw 'agent failed to restart after binary replace'
   }
-  $ver = (Invoke-Native $exe @('--version')).Output
+  $ver = (Invoke-VersionProbe $exe).Output
   Write-Log ("update ok version=$ver")
   Write-Result ("ok " + (Get-Date -Format o) + " version=" + $ver)
 } catch {
