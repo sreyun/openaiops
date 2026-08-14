@@ -6,7 +6,7 @@ import (
 )
 
 func TestCanonicalLinuxUnitNameInUpdateScripts(t *testing.T) {
-	sh := buildLegacyAgentUpdateCommand("linux", "http://x:8529", "aiops-agent-linux-amd64", false)
+	sh := buildLegacyAgentUpdateCommand("linux", "http://x:8529", "aiops-agent-linux-amd64", testPinSHA, false)
 	if !strings.Contains(sh, "systemctl restart aiops-agent") {
 		t.Fatal("linux update must prefer aiops-agent")
 	}

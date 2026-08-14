@@ -47,10 +47,9 @@ type Host struct {
 	Custom       map[string]float64  `json:"custom,omitempty"` // latest custom gauges from plugins
 	Desktop      *shared.DesktopInfo `json:"desktop,omitempty"`
 
-	// Time-series history (multi-tier downsampling; persisted via the embedded DB)
-	histRaw  []shared.Sample // raw samples (5s interval, ~1.5h)
-	hist1m   []shared.Sample // 1-min aggregates (last 48h)
-	hist5m   []shared.Sample // 5-min aggregates (last 30 days)
+	histRaw  []shared.Sample // RAM cache only (~1.5h); durable history is VictoriaMetrics
+	hist1m   []shared.Sample // RAM cache (48h of 1-min aggregates) — not persisted
+	hist5m   []shared.Sample // RAM cache (30d of 5-min aggregates) — not persisted
 	last1mTs int64           // timestamp of last 1-min aggregation
 	last5mTs int64           // timestamp of last 5-min aggregation
 }
@@ -132,7 +131,7 @@ func (s *Store) BindPG(pg *pgStore) {
 	if len(events) > 0 {
 		s.events = events
 	}
-	for _, h := range hosts { // host list survives restart (history stays in VM)
+	for _, h := range hosts { // metadata + Latest; durable history lives in VictoriaMetrics
 		if h.ID != "" {
 			hh := *h
 			s.hosts[h.ID] = &hh

@@ -121,32 +121,23 @@ func (s *Server) handleHostHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Prefer in-memory complete snapshots whenever they actually cover the
-	// requested window. hist1m holds 48h and hist5m holds 30d of full agent
-	// rows — they never suffer Prom multi-series join gaps (ephemeral docker
-	// overlay paths, staggered load1/5/15, LOCF flats). The old ≤3h cap sent
-	// 6h/12h/24h/7d to VM even when memory already had clean data, which is
-	// why those chips painted a scribble while 1h/3h looked fine.
 	const hostHistoryAPIMaxPts = 600
-	if mem, ok := s.store.GetHistory(id, from, to); ok && historyCoversWindow(mem, from, to) {
-		writeJSON(w, http.StatusOK, downsampleSamples(mem, hostHistoryAPIMaxPts))
-		return
-	}
-
-	// VM fallback when memory is too short (agent recently restarted) or empty.
-	if s.vm.enabled() {
-		if samples, ok := s.vm.queryHistory(id, from, to); ok {
-			writeJSON(w, http.StatusOK, downsampleSamples(samples, hostHistoryAPIMaxPts))
-			return
-		}
-	}
-	samples, ok := s.store.GetHistory(id, from, to)
-	if !ok {
+	mem, memOK := s.store.GetHistory(id, from, to)
+	if !memOK {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "common.host_not_found")})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, downsampleSamples(samples, hostHistoryAPIMaxPts))
+	// VictoriaMetrics is the durable store for every sample. RAM rings are only
+	// a hot overlay (complete nested disks/gpus for the last few minutes).
+	out := mem
+	if s.vm.enabled() {
+		if vm, ok := s.vm.queryHistory(id, from, to); ok && len(vm) > 0 {
+			out = spliceHistory(vm, recentHistoryTail(mem, memHistoryOverlaySec))
+		}
+	}
+
+	writeJSON(w, http.StatusOK, downsampleSamples(out, hostHistoryAPIMaxPts))
 }
 
 // handleSetCategory sets (or clears, when empty) a manual category override.

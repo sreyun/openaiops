@@ -15,7 +15,11 @@ import (
 // buildLegacyAgentUpdateCommand returns a one-shot shell/PowerShell command that
 // downloads /dl/$bin, verifies SHA-256, replaces the running binary, and restarts
 // the agent service — without wiping config (unlike a full reinstall).
-func buildLegacyAgentUpdateCommand(goos, serverURL, bin string, force bool) string {
+//
+// sha is the server-computed digest of that artifact (see agentDistSHA256). It is
+// optional — an empty value simply means the script falls back to fetching
+// /dl/$bin.sha256 and must then insist on a valid server certificate.
+func buildLegacyAgentUpdateCommand(goos, serverURL, bin, sha string, force bool) string {
 	serverURL = strings.TrimRight(strings.TrimSpace(serverURL), "/")
 	bin = strings.TrimSpace(bin)
 	if serverURL == "" || bin == "" {
@@ -24,12 +28,32 @@ func buildLegacyAgentUpdateCommand(goos, serverURL, bin string, force bool) stri
 	_ = force
 	switch strings.ToLower(goos) {
 	case "linux", "darwin":
-		return legacyUnixAgentUpdateScript(serverURL, bin, goos == "darwin")
+		return legacyUnixAgentUpdateScript(serverURL, bin, sha, goos == "darwin")
 	case "windows":
-		return legacyWindowsAgentUpdateScript(serverURL, bin)
+		return legacyWindowsAgentUpdateScript(serverURL, bin, sha)
 	default:
 		return ""
 	}
+}
+
+// sanitizeSHA256Hex returns v as lowercase hex only when it is a well-formed
+// SHA-256 digest, and "" otherwise. Anything that reaches a generated script must
+// be shell/PowerShell-inert: this value is interpolated into a single-quoted
+// PowerShell literal and a shell variable, and it also decides whether the script
+// is allowed to relax certificate validation — so a malformed digest has to
+// degrade to "unpinned", never to "pinned to something unmatchable" (which would
+// fail every update) and never to injectable text.
+func sanitizeSHA256Hex(v string) string {
+	v = strings.ToLower(strings.TrimSpace(v))
+	if len(v) != 64 {
+		return ""
+	}
+	for _, c := range v {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return ""
+		}
+	}
+	return v
 }
 
 // legacyRestartHelperSh is the body of the *detached* restart helper written by
@@ -171,7 +195,7 @@ ulog "rollback failed: agent still not running"
 exit 1
 `
 
-func legacyUnixAgentUpdateScript(server, bin string, darwin bool) string {
+func legacyUnixAgentUpdateScript(server, bin, sha string, darwin bool) string {
 	// Restart runs in a DETACHED helper (own cgroup / session) so a service stop
 	// cannot kill it mid-swap; this script only stages the binary and hands off.
 	// The server keeps the host in pending_verify until agent_version catches up,
@@ -258,6 +282,7 @@ fi
 	return fmt.Sprintf(`set -e
 SERVER=%q
 BIN=%q
+PINNED=%q
 DIR=""
 for d in /opt/aiops-agent "$HOME/.aiops-agent" /usr/local/aiops-agent; do
   if [ -x "$d/aiops-agent" ]; then DIR="$d"; break; fi
@@ -272,16 +297,50 @@ fi
 cd "$DIR"
 NEW=".aiops-agent.new"
 rm -f "$NEW"
-if command -v curl >/dev/null 2>&1; then
-  curl -fSL --retry 3 -o "$NEW" "$SERVER/dl/$BIN"
-  curl -fsSL -o ".aiops-agent.sha256" "$SERVER/dl/$BIN.sha256"
-elif command -v wget >/dev/null 2>&1; then
-  wget -q -O "$NEW" "$SERVER/dl/$BIN"
-  wget -q -O ".aiops-agent.sha256" "$SERVER/dl/$BIN.sha256"
-else
-  echo "curl/wget required"; exit 1
+# fetch: verify the server certificate first. The insecure retry exists only for
+# the binary, and only when PINNED carries the server-computed digest: that digest
+# travelled the agent's authenticated report channel, so it identifies the artifact
+# independently of this transport. A digest fetched from $BIN.sha256 travels the
+# same connection as the binary and proves nothing against an on-path attacker, so
+# an unpinned fetch never gets the retry. Old distros with an expired DST Root CA X3
+# (or a private/enterprise CA, or a TLS-inspecting proxy) are the reason it exists.
+#
+# Every conditional below is written as an "if", never as "cmd && return": under
+# set -e an AND-OR list whose left side fails takes the whole script down, which
+# would skip the very fallback this function exists for.
+fetch() {
+  url="$1"; out="$2"; allow_insecure="$3"
+  if command -v curl >/dev/null 2>&1; then
+    if curl -fSL --retry 3 -o "$out" "$url"; then return 0; fi
+    if [ "$allow_insecure" != "1" ]; then return 1; fi
+    echo "warning: TLS verification failed for $url; retrying without it (payload pinned to sha256=$PINNED)" >&2
+    if curl -fSLk --retry 2 -o "$out" "$url"; then return 0; fi
+    return 1
+  fi
+  if command -v wget >/dev/null 2>&1; then
+    if wget -q -O "$out" "$url"; then return 0; fi
+    if [ "$allow_insecure" != "1" ]; then return 1; fi
+    echo "warning: TLS verification failed for $url; retrying without it (payload pinned to sha256=$PINNED)" >&2
+    if wget -q --no-check-certificate -O "$out" "$url"; then return 0; fi
+    return 1
+  fi
+  echo "curl/wget required" >&2
+  return 1
+}
+ALLOW=0
+if [ -n "$PINNED" ]; then ALLOW=1; fi
+if ! fetch "$SERVER/dl/$BIN" "$NEW" "$ALLOW"; then
+  echo "download failed: $SERVER/dl/$BIN (check the server certificate chain on this host, or the agent's ca_cert setting)"
+  rm -f "$NEW"; exit 1
 fi
-EXPECTED=$(awk '{print $1}' .aiops-agent.sha256 | tr 'A-F' 'a-f')
+EXPECTED="$PINNED"
+if [ -z "$EXPECTED" ]; then
+  if ! fetch "$SERVER/dl/$BIN.sha256" ".aiops-agent.sha256" 0; then
+    echo "checksum download failed: $SERVER/dl/$BIN.sha256"
+    rm -f "$NEW"; exit 1
+  fi
+  EXPECTED=$(awk '{print $1}' .aiops-agent.sha256 | tr 'A-F' 'a-f')
+fi
 if command -v sha256sum >/dev/null 2>&1; then
   ACTUAL=$(sha256sum "$NEW" | awk '{print $1}')
 elif command -v shasum >/dev/null 2>&1; then
@@ -297,7 +356,7 @@ mv -f "$NEW" aiops-agent
 chmod +x aiops-agent
 %s
 echo "legacy agent update ok sha=$ACTUAL"
-`, server, bin, restart)
+`, server, bin, sanitizeSHA256Hex(sha), restart)
 }
 
 // windowsUpdateHelperPS is the COMPLETE Windows update helper: it locates the
@@ -320,19 +379,70 @@ echo "legacy agent update ok sha=$ACTUAL"
 //     正文里出现非 ASCII 字符就会在 GBK/Latin-1 机器上解析错乱。中文说明一律留在
 //     Go 注释里。
 //
-// $Server / $Bin 由引导脚本作为命令行参数传入；其余路径本脚本自行推导。
+// $Server / $Bin / $Sha 由引导脚本作为命令行参数传入；其余路径本脚本自行推导。$Sha 是
+// 服务端算出的产物摘要，见下面 Get-Payload 的注释——它是证书链断裂时仍能安全升级的前提。
 //
 // 第三条隐性约束，踩过一次：**本脚本绝不能终止 AIOpsAgentLegacyUpdate 这个计划任务**。
 // 它自己就是该任务的运行实例，`schtasks /End` 会连整个任务进程树一起终止——而历史上
 // 那行调用恰好落在停服务、换二进制之前，于是每一次救援都死在那里：主机停在旧版本，
 // 助手日志停在 "staging --version"，与「Windows 无法自动升级」的症状完全一致。清理上
 // 一轮吊死的实例只能由引导脚本在 Start-ScheduledTask 之前做。
-const windowsUpdateHelperPS = `param([string]$Server,[string]$Bin)
+const windowsUpdateHelperPS = `param([string]$Server,[string]$Bin,[string]$Sha)
 $ErrorActionPreference='Stop'
 $helperPid = $PID
 $Work = Split-Path -Parent $PSCommandPath
 $Log = Join-Path $Work 'aiops-agent-update.log'
 function Write-Log($m){ try{ Add-Content -LiteralPath $Log -Value ("[{0}] {1}" -f (Get-Date -Format o), $m) -Encoding UTF8 }catch{} }
+# Panels published on a real domain are served over HTTPS, so every download in
+# this helper is a TLS handshake that has to succeed on hosts nobody has touched
+# in years. Two things break there and neither is a server problem:
+#   * TLS 1.2 is not in the default SecurityProtocol of .NET < 4.7 (the numeric
+#     3072 is used because the Tls12 enum member does not exist on 4.0), and
+#     TLS 1.3 (12288) throws on anything older than 4.8 -- so each flag is set in
+#     its own try, or one unsupported value would discard the other.
+#   * Server 2012 / 2008 R2 root stores predate ISRG Root X1 and friends, so a
+#     perfectly valid Let's Encrypt chain is untrusted here until Windows Update
+#     ships a root refresh. Private/enterprise CAs and TLS-inspecting proxies
+#     land in the same place.
+function Enable-ModernTls {
+  foreach($v in @(3072,12288)){
+    try{ [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor $v }catch{}
+  }
+}
+# Download with certificate validation ON, and fall back to an unvalidated retry
+# ONLY when the caller holds an out-of-band SHA-256 pin for the payload.
+#
+# The pin arrives inside this script's arguments, which came from the bootstrap,
+# which the server generated and delivered over the agent's own authenticated,
+# certificate-verified report channel. So it describes the artifact independently
+# of whatever the download connection is. Fetching '<bin>.sha256' over the SAME
+# connection proves nothing against an on-path attacker -- both halves would be
+# swapped together -- which is why an unpinned download never gets the retry: the
+# payload is a binary that will run as LocalSystem on every host in the fleet.
+function Get-Payload {
+  param([string]$Url,[string]$Dest,[string]$Pin)
+  $err = $null
+  try {
+    Remove-Item -LiteralPath $Dest -Force -ErrorAction SilentlyContinue
+    (New-Object Net.WebClient).DownloadFile($Url, $Dest)
+    return
+  } catch { $err = $_.Exception }
+  Write-Log ("strict TLS download failed for " + $Url + ": " + $err.Message)
+  if(-not $Pin){
+    throw ("download failed for " + $Url + ": " + $err.Message +
+      " (no server-pinned SHA-256 for this artifact, so retrying without certificate validation would be unsafe;" +
+      " install the CA chain on this host, or point the agent at a server whose certificate it trusts)")
+  }
+  Write-Log ("retrying without certificate validation -- the payload is pinned to sha256=" + $Pin + ", so its integrity does not depend on the transport")
+  $prev = [Net.ServicePointManager]::ServerCertificateValidationCallback
+  try {
+    [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+    Remove-Item -LiteralPath $Dest -Force -ErrorAction SilentlyContinue
+    (New-Object Net.WebClient).DownloadFile($Url, $Dest)
+  } finally {
+    [Net.ServicePointManager]::ServerCertificateValidationCallback = $prev
+  }
+}
 function Invoke-Native {
   param([string]$File,[string[]]$Arguments)
   # Never merge native stderr via 2>&1: Windows PowerShell 5.1 turns it into
@@ -546,12 +656,21 @@ try {
   # Give the exec channel time to hand the bootstrap's output back to the server
   # before the agent that carries that channel is stopped.
   Start-Sleep -Seconds 3
-  try{[Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor 3072}catch{}
-  Remove-Item -LiteralPath $New -Force -ErrorAction SilentlyContinue
-  (New-Object Net.WebClient).DownloadFile("$Server/dl/$Bin", $New)
-  $Expected = ((New-Object Net.WebClient).DownloadString("$Server/dl/$Bin.sha256") -split '\s+')[0].Trim().ToLowerInvariant()
-  $Sha=[Security.Cryptography.SHA256]::Create(); $Stream=[IO.File]::OpenRead($New)
-  try{ $Actual=([BitConverter]::ToString($Sha.ComputeHash($Stream))).Replace('-','').ToLowerInvariant() } finally { $Stream.Dispose(); $Sha.Dispose() }
+  Enable-ModernTls
+  # Keep only what a hex digest can contain, so a malformed argument degrades to
+  # "unpinned" (strict TLS, digest fetched over the wire) instead of pinning the
+  # download to a value nothing can ever match.
+  $Pin = ''
+  if($Sha){ $Pin = ((($Sha -replace '[^0-9a-fA-F]','')).ToLowerInvariant()) }
+  if($Pin.Length -ne 64){ $Pin = '' }
+  if($Pin){ Write-Log ("server-pinned sha256=" + $Pin) } else { Write-Log 'no server-pinned sha256; download must validate the server certificate' }
+  Get-Payload "$Server/dl/$Bin" $New $Pin
+  $Expected = $Pin
+  if(-not $Expected){
+    $Expected = ((New-Object Net.WebClient).DownloadString("$Server/dl/$Bin.sha256") -split '\s+')[0].Trim().ToLowerInvariant()
+  }
+  $Hasher=[Security.Cryptography.SHA256]::Create(); $Stream=[IO.File]::OpenRead($New)
+  try{ $Actual=([BitConverter]::ToString($Hasher.ComputeHash($Stream))).Replace('-','').ToLowerInvariant() } finally { $Stream.Dispose(); $Hasher.Dispose() }
   if(-not $Expected -or $Expected -ne $Actual){ Remove-Item $New -Force -ErrorAction SilentlyContinue; throw "SHA-256 mismatch (want $Expected got $Actual)" }
   Write-Log ("downloaded $Bin sha=$Actual")
   $probe = Invoke-VersionProbe $New
@@ -663,7 +782,7 @@ const windowsUpdateBootstrapMaxLen = 6000
 // 会一遍遍生成同一段坏脚本，新版本的修复永远送不到它们手上——因为「装上新版本」
 // 这件事本身就要靠那段坏脚本。把正文交给服务端下发，服务端一升级就能单方面修好
 // 所有老 Agent（见 rescueWindowsAgentUpdate）。
-func legacyWindowsAgentUpdateScript(server, bin string) string {
+func legacyWindowsAgentUpdateScript(server, bin, sha string) string {
 	// The bootstrap runs INLINE, inside the agent's service Job Object: stopping
 	// the service here would kill this very process mid-swap. It therefore only
 	// downloads + verifies + spawns, and never touches the service or the binary.
@@ -673,33 +792,47 @@ func legacyWindowsAgentUpdateScript(server, bin string) string {
 	// 换二进制之前）；而计划任务默认 MultipleInstances=IgnoreNew，上一轮吊死的实例不
 	// 清掉，Start-ScheduledTask 会静默地什么都不做。所以陈旧实例只能在这里、在拉起新
 	// 实例之前清理。
+	//
+	// 长度：本文经 base64(UTF-16LE) 膨胀 8/3 倍后要塞进 cmd.exe 的 8191 字符硬上限，所以
+	// 这里的写法有意压缩过——`$R` 复用三处 System32 路径、`"$W\$N.ps1"` 代替 Join-Path、
+	// 助手的启动参数用 `-nop -noni -ep`（powershell.exe 的标准缩写）、WMI 兜底用
+	// `[wmiclass]` 而不是 Invoke-CimMethod（短 67 字符，且 PowerShell 2.0 上也有；本文始终
+	// 由绝对路径的 Windows PowerShell 执行，不会落到没有 [wmiclass] 的 pwsh 上）。预算见
+	// windowsUpdateBootstrapMaxLen；新增逻辑请优先放进服务端下发的助手正文。
+	//
+	// TLS：这段引导只下载助手脚本一个文件，而它的 SHA-256（$H）在服务端生成时就写死在
+	// 本文里，经 Agent 已鉴权、已验证证书的 exec 通道送达。因此严格校验失败时降级重试
+	// 一次是安全的——摘要对不上照样 throw。老 Windows 的根证书库里没有 ISRG Root X1
+	// 这类新根，HTTPS 域名部署下这一步曾是整条兜底链路的第一个死点。回调只影响本进程，
+	// 而本进程紧接着就退出了；真正下载二进制的助手在另一个进程里，自行判断是否降级。
 	ps := fmt.Sprintf(`$ErrorActionPreference='Stop'
-try{[Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor 3072}catch{}
-$S='%s';$B='%s';$H='%s';$T='AIOpsAgentLegacyUpdate';$N='aiops-agent-update'
-$W=Join-Path $env:ProgramData $N
-try{md $W -Force|Out-Null}catch{$W=Join-Path $env:TEMP $N;md $W -Force|Out-Null}
-$F=Join-Path $W "$N.ps1"
-Remove-Item -LiteralPath $F -Force -EA 0
-(New-Object Net.WebClient).DownloadFile("$S%s",$F)
+foreach($v in @(3072,12288)){try{[Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor $v}catch{}}
+$S='%s';$B='%s';$D='%s';$H='%s';$T='AIOpsAgentLegacyUpdate';$N='aiops-agent-update'
+$R="$env:SystemRoot\System32"
+$W="$env:ProgramData\$N"
+try{md $W -Force|Out-Null}catch{$W="$env:TEMP\$N";md $W -Force|Out-Null}
+$F="$W\$N.ps1";$U="$S%s"
+rm $F -Force -EA 0
+try{(New-Object Net.WebClient).DownloadFile($U,$F)}catch{[Net.ServicePointManager]::ServerCertificateValidationCallback={$true};(New-Object Net.WebClient).DownloadFile($U,$F)}
 $sha=[Security.Cryptography.SHA256]::Create();$fs=[IO.File]::OpenRead($F)
 try{$a=([BitConverter]::ToString($sha.ComputeHash($fs))).Replace('-','').ToLowerInvariant()}finally{$fs.Dispose();$sha.Dispose()}
-if($a -ne $H){Remove-Item -LiteralPath $F -Force -EA 0;throw "update helper sha256 mismatch (want $H got $a)"}
-$P="$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-$A='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$F+'" -Server "'+$S+'" -Bin "'+$B+'"'
-try{[void](& "$env:SystemRoot\System32\schtasks.exe" /End /TN $T 2>$null)}catch{}
+if($a -ne $H){rm $F -Force -EA 0;throw "update helper sha256 mismatch (want $H got $a)"}
+$P="$R\WindowsPowerShell\v1.0\powershell.exe"
+$A='-nop -noni -ep Bypass -File "'+$F+'" -Server "'+$S+'" -Bin "'+$B+'" -Sha "'+$D+'"'
+try{[void](& "$R\schtasks.exe" /End /TN $T 2>$null)}catch{}
 $k=$false
 try{
- $t=New-ScheduledTaskAction -Execute $P -Argument $A
- $g=New-ScheduledTaskTrigger -Once -At ((Get-Date).AddYears(10))
- try{$n=New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest;Register-ScheduledTask -TaskName $T -Action $t -Trigger $g -Principal $n -Force|Out-Null}catch{Register-ScheduledTask -TaskName $T -Action $t -Trigger $g -Force|Out-Null}
+ $q=@{TaskName=$T;Action=(New-ScheduledTaskAction -Execute $P -Argument $A);Trigger=(New-ScheduledTaskTrigger -Once -At ((Get-Date).AddYears(10)));Force=$true}
+ try{Register-ScheduledTask @q -Principal (New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest)|Out-Null}catch{Register-ScheduledTask @q|Out-Null}
  Start-ScheduledTask -TaskName $T -EA Stop;$k=$true
 }catch{}
-if(-not $k){try{$c=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=('"'+$P+'" '+$A)};if($c -and $c.ReturnValue -eq 0){$k=$true}}catch{}}
-if(-not $k){Start-Process -FilePath "$env:SystemRoot\System32\cmd.exe" -ArgumentList ('/c start "" /b "'+$P+'" '+$A) -WindowStyle Hidden}
-Write-Output ("legacy agent update ok helper=$($a.Substring(0,12)) -> restart scheduled (detached, log $W\$N.log)")
+if(-not $k){try{if(([wmiclass]'Win32_Process').Create('"'+$P+'" '+$A).ReturnValue -eq 0){$k=$true}}catch{}}
+if(-not $k){Start-Process -FilePath "$R\cmd.exe" -ArgumentList ('/c start "" /b "'+$P+'" '+$A) -WindowStyle Hidden}
+Write-Output "legacy agent update ok helper=$($a.Substring(0,12)) log=$W\$N.log"
 `,
 		strings.ReplaceAll(server, "'", "''"),
 		strings.ReplaceAll(bin, "'", "''"),
+		sanitizeSHA256Hex(sha),
 		windowsUpdateHelperSHA256(),
 		windowsUpdateHelperPath,
 	)

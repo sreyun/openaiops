@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"aiops-monitor/shared"
@@ -71,6 +72,7 @@ type vmWriter struct {
 	apiCh   chan vmAPISample
 	httpc   *http.Client
 	breaker *vmCircuitBreaker
+	dropped atomic.Uint64
 }
 
 func newVMWriter(cfg *ConfigStore) *vmWriter {
@@ -122,7 +124,11 @@ func (v *vmWriter) enqueue(hostID, hostname, category string, ts int64, m shared
 	}
 	select {
 	case v.ch <- vmSample{hostID, hostname, category, ts, m}:
-	default: // drop on overflow rather than block
+	default: // drop on overflow rather than block ingest
+		n := v.dropped.Add(1)
+		if n == 1 || n%200 == 0 {
+			slog.Warn("VictoriaMetrics 写入队列已满，样本被丢弃（历史以 VM 为准，丢点会在曲线上形成空洞）", "dropped", n, "host", hostID)
+		}
 	}
 }
 
@@ -873,6 +879,32 @@ func (v *vmWriter) push(url string, samples []vmSample) {
 		w("load5", s.m.Load5)
 		w("load15", s.m.Load15)
 		w("proc_count", float64(s.m.ProcCount))
+		w("cpu_idle_percent", 100-s.m.CPUPercent)
+		if s.m.MemTotal >= s.m.MemUsed {
+			w("mem_free_bytes", float64(s.m.MemTotal-s.m.MemUsed))
+		}
+		w("mem_free_percent", 100-s.m.MemPercent)
+		if s.m.SwapTotal >= s.m.SwapUsed {
+			w("swap_free_bytes", float64(s.m.SwapTotal-s.m.SwapUsed))
+		}
+		if s.m.DiskTotal >= s.m.DiskUsed {
+			w("disk_free_bytes", float64(s.m.DiskTotal-s.m.DiskUsed))
+		}
+		w("disk_free_percent", 100-s.m.DiskPercent)
+		w("net_total_rate", s.m.NetSentRate+s.m.NetRecvRate)
+		if s.m.CPUCores > 0 {
+			w("load1_per_core", s.m.Load1/float64(s.m.CPUCores))
+			w("load5_per_core", s.m.Load5/float64(s.m.CPUCores))
+			w("load15_per_core", s.m.Load15/float64(s.m.CPUCores))
+		}
+		w("api_avail_percent", s.m.APIAvailPercent)
+		w("api_avg_resp_ms", s.m.APIAvgRespMs)
+		w("api_p95_resp_ms", s.m.APIP95RespMs)
+		w("api_throughput_rps", s.m.APIThroughputRPS)
+		w("task_fail_count", float64(s.m.TaskFailCount))
+		w("task_timeout_sec", s.m.TaskTimeoutSec)
+		w("gpus_count", float64(len(s.m.GPUs)))
+		w("mounts_count", float64(len(s.m.Disks)))
 		for _, d := range s.m.Disks {
 			dl := lbl + fmt.Sprintf(`,path="%s"`, lblEsc(d.Path))
 			fmt.Fprintf(&b, "aiops_disk_vol_percent{%s} %g %d\n", dl, d.Percent, ms)
@@ -901,10 +933,17 @@ func (v *vmWriter) push(url string, samples []vmSample) {
 	req.Header.Set("Content-Type", "text/plain")
 	resp, err := v.doVMRequest(req)
 	if err != nil {
-		slog.Warn("VictoriaMetrics 写入失败", "err", err)
+		slog.Warn("VictoriaMetrics 写入失败", "err", err, "n", len(samples))
 		return
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		slog.Warn("VictoriaMetrics 写入被拒绝", "status", resp.StatusCode, "n", len(samples))
+		// 5xx already tripped the breaker in doVMRequest; 4xx did not.
+		if resp.StatusCode < 500 && v.breaker != nil {
+			v.breaker.failure()
+		}
+	}
 }
 
 // enabled reports whether VM is the active time-series store.
@@ -967,6 +1006,18 @@ func setSampleMetric(s *shared.Sample, name string, val float64) {
 		s.Load15 = val
 	case "proc_count":
 		s.ProcCount = int(val)
+	case "api_avail_percent":
+		s.APIAvailPercent = val
+	case "api_avg_resp_ms":
+		s.APIAvgRespMs = val
+	case "api_p95_resp_ms":
+		s.APIP95RespMs = val
+	case "api_throughput_rps":
+		s.APIThroughputRPS = val
+	case "task_fail_count":
+		s.TaskFailCount = int(val)
+	case "task_timeout_sec":
+		s.TaskTimeoutSec = val
 	}
 }
 
@@ -1090,9 +1141,12 @@ func (v *vmWriter) queryHistory(hostID string, from, to int64) ([]shared.Sample,
 	if out, ok := v.queryHistoryRange(hostID, from, to, step); ok && len(out) > 0 {
 		return out, true
 	}
-	// Short windows: raw export preserves labeled GPU/disk/conn detail when
-	// query_range selector isn't supported by older VM builds.
-	if to-from <= 3*3600 {
+	// query_range used to be `{__name__=~"aiops_.*"}` which exploded on
+	// overlay/PVC paths and timed out for 6h+ — then there was no export
+	// fallback, so the API served a few minutes of RAM. The allowlist
+	// (~50 names + ephemeral path filter) is the default; /export still
+	// covers ≤24h when the selector is missing.
+	if queryHistoryAllowsExportFallback(to - from) {
 		return v.queryHistoryExport(hostID, from, to)
 	}
 	return nil, false
@@ -1104,7 +1158,7 @@ func (v *vmWriter) queryHistoryExport(hostID string, from, to int64) ([]shared.S
 		return nil, false
 	}
 	q := url.Values{
-		"match[]": {fmt.Sprintf(`{host=%q,__name__=~"aiops_.*"}`, hostID)},
+		"match[]": {fmt.Sprintf(`{host=%q,__name__=~"%s",path!~"%s"}`, hostID, hostHistoryNameRE(), ephemeralDiskPathRE)},
 		"start":   {strconv.FormatInt(from, 10)},
 		"end":     {strconv.FormatInt(to, 10)},
 	}
@@ -1130,7 +1184,7 @@ func (v *vmWriter) queryHistoryExport(hostID string, from, to int64) ([]shared.S
 // queryHistoryRange uses MetricsQL series selector + query_range so long windows
 // stay bounded. Reassembles the same Sample shape as parseVMExport.
 func (v *vmWriter) queryHistoryRange(hostID string, from, to, step int64) ([]shared.Sample, bool) {
-	expr := fmt.Sprintf(`{__name__=~"aiops_.*",host=%q}`, hostID)
+	expr := hostHistoryRangeExpr(hostID)
 	series, ok := v.vmQueryRangeSeries(expr, from, to, step)
 	if !ok || len(series) == 0 {
 		return nil, false

@@ -7,10 +7,17 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"strings"
 	"testing"
 	"unicode/utf16"
 )
+
+// testPinSHA stands in for the server-computed digest of a dist artifact.
+// Written as four repeats so its length is 64 by construction — a 65th nibble
+// would make sanitizeSHA256Hex reject it and quietly turn every assertion here
+// into "unpinned", which is exactly the state under test.
+const testPinSHA = "0123456789abcdef" + "0123456789abcdef" + "0123456789abcdef" + "0123456789abcdef"
 
 // decodeLegacyWindowsPS extracts the PowerShell body from the -EncodedCommand.
 func decodeLegacyWindowsPS(t *testing.T, cmd string) string {
@@ -46,11 +53,13 @@ func TestLegacyWindowsUpdateCommandFitsWindowsShellLimit(t *testing.T) {
 	const agentWrapperOverhead = 260
 	const cmdExeHardLimit = 8191
 
+	// Always measure WITH a pinned digest: that is the production shape (the
+	// artifact is on disk next to the server) and the longer of the two.
 	for _, tc := range []struct{ server, bin string }{
 		{"https://monitoring.some-quite-long-corporate-domain.example.com:8529", "aiops-agent-windows-amd64-win2012.exe"},
 		{"http://10.0.0.5:8529", "aiops-agent.exe"},
 	} {
-		cmd := legacyWindowsAgentUpdateScript(tc.server, tc.bin)
+		cmd := legacyWindowsAgentUpdateScript(tc.server, tc.bin, testPinSHA)
 		total := len(cmd) + agentWrapperOverhead
 		if total > windowsUpdateBootstrapMaxLen {
 			t.Errorf("windows update command is %d chars (+%d wrapper = %d), budget is %d.\n"+
@@ -68,7 +77,7 @@ func TestLegacyWindowsUpdateCommandFitsWindowsShellLimit(t *testing.T) {
 // Windows update fails the integrity check on the host with no way to notice
 // here — so assert they are derived from the same bytes.
 func TestWindowsUpdateBootstrapPinsHelperSHA256(t *testing.T) {
-	ps := decodeLegacyWindowsPS(t, legacyWindowsAgentUpdateScript("https://mon.example:8529", "aiops-agent.exe"))
+	ps := decodeLegacyWindowsPS(t, legacyWindowsAgentUpdateScript("https://mon.example:8529", "aiops-agent.exe", testPinSHA))
 	want := windowsUpdateHelperSHA256()
 	if !strings.Contains(ps, "$H='"+want+"'") {
 		t.Fatalf("bootstrap does not pin the served helper digest %s", want)
@@ -138,7 +147,7 @@ func TestWindowsUpdateHelperUsesInstallService(t *testing.T) {
 // process mid-swap — the exact failure the module path avoids with
 // schtasks/CREATE_BREAKAWAY_FROM_JOB. It must only ever hand off.
 func TestLegacyWindowsBootstrapDetachesBeforeTouchingTheAgent(t *testing.T) {
-	inline := decodeLegacyWindowsPS(t, legacyWindowsAgentUpdateScript("https://mon.example", "aiops-agent.exe"))
+	inline := decodeLegacyWindowsPS(t, legacyWindowsAgentUpdateScript("https://mon.example", "aiops-agent.exe", testPinSHA))
 	for _, forbidden := range []string{"sc.exe", "Stop-Service", "Stop-Process", "Move-Item", "--install-service"} {
 		if strings.Contains(inline, forbidden) {
 			t.Fatalf("inline (in-job) bootstrap must not %q — it would kill itself mid-swap", forbidden)
@@ -182,7 +191,7 @@ func TestWindowsUpdateHelperNeverEndsItsOwnScheduledTask(t *testing.T) {
 	}
 	// Scheduled tasks default to MultipleInstances=IgnoreNew, so a previous run
 	// left hanging would make Start-ScheduledTask a silent no-op.
-	inline := decodeLegacyWindowsPS(t, legacyWindowsAgentUpdateScript("https://mon.example", "aiops-agent.exe"))
+	inline := decodeLegacyWindowsPS(t, legacyWindowsAgentUpdateScript("https://mon.example", "aiops-agent.exe", testPinSHA))
 	if !strings.Contains(inline, "/End") || !strings.Contains(inline, "$T") {
 		t.Fatal("bootstrap must end a stale instance of its own task before starting a new one")
 	}
@@ -253,7 +262,7 @@ func TestWindowsUpdateHelperIgnoresDesktopWorker(t *testing.T) {
 
 func TestLegacyUnixAgentUpdateScriptIgnoresDesktopWorker(t *testing.T) {
 	for _, darwin := range []bool{false, true} {
-		sh := legacyUnixAgentUpdateScript("https://mon.example", "aiops-agent-linux-amd64", darwin)
+		sh := legacyUnixAgentUpdateScript("https://mon.example", "aiops-agent-linux-amd64", testPinSHA, darwin)
 		if !strings.Contains(sh, "--desktop-worker") {
 			t.Fatalf("legacy unix script (darwin=%v) must exclude the desktop worker from liveness checks", darwin)
 		}
@@ -261,7 +270,7 @@ func TestLegacyUnixAgentUpdateScriptIgnoresDesktopWorker(t *testing.T) {
 }
 
 func TestLegacyUnixAgentUpdateScriptPrefersInstallService(t *testing.T) {
-	sh := legacyUnixAgentUpdateScript("http://mon.example:8529", "aiops-agent-linux-amd64", false)
+	sh := legacyUnixAgentUpdateScript("http://mon.example:8529", "aiops-agent-linux-amd64", testPinSHA, false)
 	if !strings.Contains(sh, "--install-service") {
 		t.Fatal("linux legacy restart missing --install-service")
 	}
@@ -277,7 +286,7 @@ func windowsUpdateScriptsUnderTest(t *testing.T) map[string]string {
 	t.Helper()
 	return map[string]string{
 		"bootstrap": decodeLegacyWindowsPS(t,
-			legacyWindowsAgentUpdateScript("https://mon.example:8529", "aiops-agent.exe")),
+			legacyWindowsAgentUpdateScript("https://mon.example:8529", "aiops-agent.exe", testPinSHA)),
 		"windowsUpdateHelperPS": windowsUpdateHelperScript(),
 	}
 }
@@ -329,5 +338,190 @@ func TestWindowsUpdateHelperBoundsVersionProbe(t *testing.T) {
 		if strings.Contains(trimmed, "Invoke-Native") && strings.Contains(trimmed, "--version") {
 			t.Errorf("line %d runs --version through the unbounded Invoke-Native: %s", i+1, trimmed)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TLS / certificate handling in the legacy (server-generated) update path.
+//
+// 现网面板是 HTTPS + 域名，而兜底路径的下载不走 Agent 的 Go HTTP 客户端——它走主机上的
+// PowerShell / curl，因此完全用不上 Agent 配置里的 ca_cert 与 tls_skip_verify。老 Windows
+// 的根证书库里没有 ISRG Root X1 一类的新根，私有 CA、TLS 审计代理同理：模块路径能升级，
+// 兜底脚本却在第一步下载就失败，而兜底恰恰是模块路径坏掉时唯一的逃生口。
+//
+// 解法不是"关掉校验"，而是把完整性凭证挪到带外：产物摘要由服务端算好、写进脚本，经
+// Agent 已鉴权已验证证书的 exec 通道下发。有了带外摘要，降级重试才不会把机群交出去。
+// ---------------------------------------------------------------------------
+
+func TestSanitizeSHA256Hex(t *testing.T) {
+	if got := sanitizeSHA256Hex("  " + strings.ToUpper(testPinSHA) + "\n"); got != testPinSHA {
+		t.Fatalf("well-formed digest not normalized: %q", got)
+	}
+	if len(testPinSHA) != 64 {
+		t.Fatalf("testPinSHA is %d chars, not a SHA-256 digest", len(testPinSHA))
+	}
+	for _, bad := range []string{
+		"", "abc", testPinSHA + "0", strings.Repeat("z", 64),
+		// A digest is interpolated into a single-quoted PowerShell literal and a
+		// %q shell string; anything that is not pure hex must become "unpinned".
+		"'; iex 'calc", strings.Repeat("a", 63) + "$",
+	} {
+		if got := sanitizeSHA256Hex(bad); got != "" {
+			t.Fatalf("sanitizeSHA256Hex(%q) = %q, want empty", bad, got)
+		}
+	}
+}
+
+// The pin has to reach the helper, or the helper can only trust the checksum it
+// downloads over the very connection under suspicion.
+func TestLegacyScriptsCarryTheServerPinnedDigest(t *testing.T) {
+	inline := decodeLegacyWindowsPS(t, legacyWindowsAgentUpdateScript("https://mon.example", "aiops-agent.exe", testPinSHA))
+	if !strings.Contains(inline, "$D='"+testPinSHA+"'") {
+		t.Fatal("bootstrap does not carry the server-computed artifact digest")
+	}
+	if !strings.Contains(inline, `-Sha "'+$D+'"`) {
+		t.Fatal("bootstrap does not hand the digest to the helper as -Sha")
+	}
+	// No digest available (artifact not on this server's disk) must degrade to
+	// "unpinned", never to a value the helper can pin to and always fail.
+	unpinned := decodeLegacyWindowsPS(t, legacyWindowsAgentUpdateScript("https://mon.example", "aiops-agent.exe", ""))
+	if !strings.Contains(unpinned, "$D=''") {
+		t.Fatal("missing digest must render as an empty pin")
+	}
+
+	sh := legacyUnixAgentUpdateScript("https://mon.example", "aiops-agent-linux-amd64", testPinSHA, false)
+	if !strings.Contains(sh, `PINNED="`+testPinSHA+`"`) {
+		t.Fatal("unix script does not carry the server-computed artifact digest")
+	}
+	if !strings.Contains(sh, `EXPECTED="$PINNED"`) {
+		t.Fatal("unix script must prefer the pinned digest over the downloaded .sha256")
+	}
+}
+
+// TLS 1.2 is not in the default SecurityProtocol of .NET < 4.7, and the Tls12
+// enum member does not exist on 4.0 — hence the numeric flags. Each flag needs
+// its own try: TLS 1.3 (12288) throws on < 4.8 and would otherwise discard 3072.
+func TestWindowsUpdateScriptsEnableModernTLS(t *testing.T) {
+	for name, script := range windowsUpdateScriptsUnderTest(t) {
+		for _, want := range []string{"3072", "12288", "SecurityProtocol"} {
+			if !strings.Contains(script, want) {
+				t.Errorf("%s does not enable modern TLS (%q missing)", name, want)
+			}
+		}
+	}
+}
+
+// The unvalidated retry is the dangerous half of the fix: the payload is a
+// binary that runs as LocalSystem on every host in the fleet. It is allowed
+// ONLY behind the out-of-band pin, and never for the .sha256 fallback, which
+// travels the same connection as the binary it is supposed to vouch for.
+func TestWindowsUpdateHelperRelaxesTLSOnlyBehindThePin(t *testing.T) {
+	ps := windowsUpdateHelperScript()
+	if !strings.Contains(ps, "function Get-Payload") {
+		t.Fatal("helper must funnel downloads through Get-Payload")
+	}
+	relax := strings.Index(ps, "ServerCertificateValidationCallback = { $true }")
+	if relax < 0 {
+		t.Fatal("helper has no certificate-validation fallback at all")
+	}
+	guard := strings.Index(ps, "if(-not $Pin){")
+	if guard < 0 || guard > relax {
+		t.Fatal("the unvalidated retry must sit behind the 'no pin -> throw' guard")
+	}
+	if restore := strings.Index(ps, "ServerCertificateValidationCallback = $prev"); restore < relax {
+		t.Fatal("helper must restore the previous validation callback in finally")
+	}
+	// A malformed -Sha must degrade to unpinned rather than pin the download to
+	// something no artifact can match.
+	if !strings.Contains(ps, `[^0-9a-fA-F]`) || !strings.Contains(ps, "$Pin.Length -ne 64") {
+		t.Fatal("helper must validate the -Sha argument before treating it as a pin")
+	}
+	// The .sha256 fallback must stay on a plain, validated WebClient call.
+	sumAt := strings.Index(ps, `DownloadString("$Server/dl/$Bin.sha256")`)
+	if sumAt < 0 {
+		t.Fatal("helper lost the unpinned checksum fallback")
+	}
+	if strings.Contains(ps[sumAt:], "ServerCertificateValidationCallback") {
+		t.Fatal("the .sha256 fallback must never relax certificate validation")
+	}
+	// $Sha is now a parameter; the SHA256 object it used to name would silently
+	// clobber the pin.
+	if strings.Contains(ps, "$Sha=[Security.Cryptography.SHA256]::Create()") {
+		t.Fatal("the hasher variable still shadows the -Sha parameter")
+	}
+}
+
+// The bootstrap only ever downloads the helper script, whose digest ($H) is
+// baked in by the server and checked right after — so it may retry without
+// validation unconditionally. It must still verify the digest afterwards.
+func TestWindowsBootstrapFallsBackOnCertFailureButKeepsThePinCheck(t *testing.T) {
+	inline := decodeLegacyWindowsPS(t, legacyWindowsAgentUpdateScript("https://mon.example", "aiops-agent.exe", testPinSHA))
+	dl := strings.Index(inline, "ServerCertificateValidationCallback")
+	if dl < 0 {
+		t.Fatal("bootstrap cannot recover from an untrusted certificate chain")
+	}
+	check := strings.Index(inline, "update helper sha256 mismatch")
+	if check < 0 || check < dl {
+		t.Fatal("the helper digest must still be verified after the relaxed download")
+	}
+}
+
+func TestUnixLegacyScriptRelaxesTLSOnlyBehindThePin(t *testing.T) {
+	sh := legacyUnixAgentUpdateScript("https://mon.example", "aiops-agent-linux-amd64", testPinSHA, false)
+	if !strings.Contains(sh, "curl -fSLk") || !strings.Contains(sh, "--no-check-certificate") {
+		t.Fatal("unix script has no fallback for an untrusted certificate chain")
+	}
+	if !strings.Contains(sh, `if [ "$allow_insecure" != "1" ]; then return 1; fi`) {
+		t.Fatal("the insecure retry must be gated on the caller passing allow_insecure")
+	}
+	// Binary: gated on the pin. Checksum: never.
+	if !strings.Contains(sh, `fetch "$SERVER/dl/$BIN" "$NEW" "$ALLOW"`) {
+		t.Fatal("binary download must pass the pin-derived ALLOW flag")
+	}
+	if !strings.Contains(sh, `fetch "$SERVER/dl/$BIN.sha256" ".aiops-agent.sha256" 0`) {
+		t.Fatal("the .sha256 fallback must be fetched with the insecure retry disabled")
+	}
+	if !strings.Contains(sh, `if [ -n "$PINNED" ]; then ALLOW=1; fi`) {
+		t.Fatal("ALLOW must be derived from the pin")
+	}
+	// `set -e` kills the script on any failing AND-OR list, which would skip the
+	// fallback entirely — the retries must be written as `if`.
+	for i, line := range strings.Split(sh, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.Contains(trimmed, "curl ") && strings.Contains(trimmed, "&& return") {
+			t.Errorf("line %d: `cmd && return` under set -e aborts before the fallback: %s", i+1, trimmed)
+		}
+	}
+}
+
+// The unix script is generated text that nothing else ever parses before it runs
+// as root on a production host. Hand it to /bin/sh -n so a structural mistake
+// (an unbalanced if/fi, a stray quote from a future edit) fails here instead of
+// halfway through a fleet upgrade.
+func TestLegacyUnixAgentUpdateScriptParses(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no /bin/sh on this platform")
+	}
+	for _, tc := range []struct {
+		name   string
+		darwin bool
+		pin    string
+	}{
+		{"linux-pinned", false, testPinSHA},
+		{"linux-unpinned", false, ""},
+		{"darwin-pinned", true, testPinSHA},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			script := legacyUnixAgentUpdateScript("https://mon.example", "aiops-agent-linux-amd64", tc.pin, tc.darwin)
+			cmd := exec.Command(sh, "-n")
+			cmd.Stdin = strings.NewReader(script)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("generated script is not valid POSIX sh: %v\n%s", err, out)
+			}
+		})
 	}
 }

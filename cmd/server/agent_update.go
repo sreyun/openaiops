@@ -971,7 +971,12 @@ func (s *Server) runLegacyAgentUpdateScriptKind(h *Host, serverURL string, force
 			return "", execExit, err
 		}
 	}
-	cmd := buildLegacyAgentUpdateCommand(goos, serverURL, bin, force)
+	// Pin the artifact digest into the script. Without it the script can only get
+	// the expected checksum from the same connection that carries the binary,
+	// which is both weaker (an on-path attacker swaps the pair) and stricter (a
+	// host whose root store cannot chain to the panel's certificate has no safe
+	// way to finish the download at all). See agentDistSHA256.
+	cmd := buildLegacyAgentUpdateCommand(goos, serverURL, bin, s.agentDistSHA256(bin), force)
 	if cmd == "" {
 		return "", execExit, fmt.Errorf("no legacy update script for %s", goos)
 	}

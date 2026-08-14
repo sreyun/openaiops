@@ -167,6 +167,34 @@ func cachedFileSHA256(path string, fi os.FileInfo) (string, error) {
 	return sum, nil
 }
 
+// agentDistSHA256 returns the digest of a dist artifact, or "" when it is not on
+// disk here.
+//
+// 这个摘要是 legacy 升级脚本唯一的**带外**完整性凭证。脚本本身经 Agent 已鉴权、已校验
+// 证书的 exec 通道下发，所以写在脚本里的摘要是可信的；而脚本在主机上用 PowerShell /
+// curl 去取 `/dl/<bin>` 和 `/dl/<bin>.sha256` 时，两者走的是同一条链路——摘要跟二进制
+// 一起被替换掉的话，校验等于没做。把摘要在服务端钉进脚本，才让"下载链路是否可信"与
+// "装上去的二进制是否正确"彻底解耦，也才使得证书链断裂时的降级重试是安全的。
+func (s *Server) agentDistSHA256(name string) string {
+	if s == nil || s.distDir == "" {
+		return ""
+	}
+	name = strings.TrimSpace(name)
+	if name == "" || name != filepath.Base(name) || strings.Contains(name, "..") {
+		return ""
+	}
+	p := filepath.Join(s.distDir, name)
+	fi, err := os.Stat(p)
+	if err != nil || fi.IsDir() {
+		return ""
+	}
+	sum, err := cachedFileSHA256(p, fi)
+	if err != nil {
+		return ""
+	}
+	return sum
+}
+
 func (s *Server) agentDistHas(goos, goarch string) bool {
 	_, ok := s.agentDistResolve(goos, goarch)
 	return ok

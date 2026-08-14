@@ -1226,6 +1226,14 @@ function formatChartXLabel(d, spanSec, t0, t1) {
   return hhmm;
 }
 
+function fmtHistoryCoverage(sec) {
+  sec = Math.max(0, Math.round(Number(sec) || 0));
+  if (sec < 120) return sec + "秒";
+  if (sec < 7200) return Math.round(sec / 60) + "分钟";
+  if (sec < 172800) return (sec / 3600).toFixed(1).replace(/\.0$/, "") + "小时";
+  return (sec / 86400).toFixed(1).replace(/\.0$/, "") + "天";
+}
+
 function downsampleChartSamples(samples, maxPts) {
   const n = (samples || []).length;
   if (!n || n <= maxPts) return samples;
@@ -1305,6 +1313,11 @@ async function loadAndRenderCharts() {
     // 组织图表：每个图表包裹在 .chart-wrap 内，右上角提供放大按钮；真正绘制延后到可见时（懒加载）。
     DETAIL_CHARTS = {};
     const gran = spanH <= 2 ? I18N.t("time.raw") : spanH <= 48 ? I18N.t("time.1m_agg") : I18N.t("time.5m_agg");
+    const dataSpan = samples.length > 1 ? (samples[samples.length - 1].timestamp - samples[0].timestamp) : 0;
+    const reqSpan = Math.max(0, to - from);
+    const coverHint = (reqSpan > 3600 && dataSpan > 0 && dataSpan < reqSpan * 0.5)
+      ? ` · ${I18N.t("section.partial_history", "仅覆盖")} ${fmtHistoryCoverage(dataSpan)} / ${fmtHistoryCoverage(reqSpan)}`
+      : "";
     const hasGPU = samples.some(s => Array.isArray(s.gpus) && s.gpus.length);
     const hasConns = samples.some(s => Array.isArray(s.conns) && s.conns.length);
     const pct = v => v.toFixed(1) + '%';
@@ -1315,12 +1328,12 @@ async function loadAndRenderCharts() {
       <div class="chart-container">
         ${wrap('chartCombo')}${wrap('chartCPU')}${wrap('chartMem')}${wrap('chartLoad')}${wrap('chartDisk')}${hasGPU ? wrap('chartGPU') + wrap('chartGPUTemp') + wrap('chartGPUMemPct') + wrap('chartGPUMem') : ''}${wrap('chartNet')}${hasConns ? wrap('chartConns') + wrap('chartConnStates') : ''}${wrap('chartDiskIO')}${wrap('chartIOPS')}${wrap('chartProc')}
       </div>
-      <div class="hint">${I18N.t("section.sample_points")}: ${samples.length} · ${I18N.t("section.granularity")}: ${gran}</div>
+      <div class="hint">${I18N.t("section.sample_points")}: ${samples.length} · ${I18N.t("section.granularity")}: ${gran}${coverHint}</div>
     `;
 
     // 先只登记「如何画」；进入视口后再 createChart，避免一次同步创建十多张 Canvas 卡顿。
     const lazy = (id, series, yMin, yMax, title) => {
-      DETAIL_CHART_PENDING[id] = { samples, series, yMin, yMax, title };
+      DETAIL_CHART_PENDING[id] = { samples, series, yMin, yMax, title, axisFrom: from, axisTo: to };
     };
     // 资源组合：磁盘用聚合 disk_percent（与分盘图语义不同，标题注明）
     lazy('chartCombo', [
@@ -1495,7 +1508,9 @@ function mountDetailLazyCharts(root, loadSeq, loadHandle) {
     const fcOn = typeof isChartForecastOn === "function" && isChartForecastOn("host-detail");
     const legendMode = fcOn ? "wrap" : "dash";
     const chartOpts = { title: spec.title, noEntrance: true, cssH: 220, legendMode, forecastScope: "host-detail",
+      axisFrom: spec.axisFrom || 0, axisTo: spec.axisTo || 0,
       _fcBase: { samples: spec.samples, series: spec.series, yMin: spec.yMin, yMax: spec.yMax, title: spec.title,
+        axisFrom: spec.axisFrom || 0, axisTo: spec.axisTo || 0,
         reload: { hostId: DETAIL_HOST_ID, mode: "fields", forecastScope: "host-detail" } } };
     if (fcOn && DETAIL_SHARED_FC && typeof sliceForecastForChart === "function") {
       if (!isCurrent()) return;
@@ -1818,6 +1833,8 @@ function createChart(canvasId, allSamples, series, yMin = null, yMax = null, opt
     title: opts.title || "", isZoom: !!opts.isZoom,
     legendMode, // full | dash | wrap
     nowTs: opts.nowTs || 0, // realtime|forecast boundary (unix sec)
+    axisFrom: +opts.axisFrom || 0,
+    axisTo: +opts.axisTo || 0,
     forecastScope: opts.forecastScope || "",
     _fcBase: opts._fcBase || null,
     reload: opts.reload || (opts._fcBase && opts._fcBase.reload) || null,
@@ -1983,6 +2000,11 @@ function drawChart(state) {
 
   // 仅当存在「现在」之后的预测采样点时才居中拆分；否则不预留未来空白
   let axisT0 = n ? vis[0].timestamp : 0, axisT1 = n ? vis[n - 1].timestamp : 1;
+  const zoomed = state.i0 > 0 || state.i1 < (state.all.length - 1);
+  if (!state.nowTs && !zoomed && state.axisFrom > 0 && state.axisTo > state.axisFrom) {
+    axisT0 = state.axisFrom;
+    axisT1 = state.axisTo;
+  }
   if (state.nowTs && n >= 2) {
     const nowTs = +state.nowTs;
     const t0 = vis[0].timestamp, t1 = vis[n - 1].timestamp;
@@ -2563,6 +2585,7 @@ async function refreshChartZoomFromSrc() {
   }
   const z = createChart("chartZoomCanvas", sm, ser, yMin, yMax, {
     title, isZoom: true, nowTs, forecastScope: scope,
+    axisFrom: src.axisFrom || 0, axisTo: src.axisTo || 0,
     _fcBase: base || { samples, series, yMin, yMax, title, horizonSec, reload: src.reload || (base && base.reload) }
   });
   if (z) {
@@ -2615,6 +2638,7 @@ function openChartZoom(src) {
   const z = createChart("chartZoomCanvas", samples, histSeries.length ? histSeries : src.series, src.yMin, src.yMax, {
     title: src.title, isZoom: true, nowTs: 0,
     forecastScope: scope,
+    axisFrom: src.axisFrom || 0, axisTo: src.axisTo || 0,
     _fcBase: base || null
   });
   if (z) { z.i0 = 0; z.i1 = (z.all ? z.all.length : 1) - 1; drawChart(z); }

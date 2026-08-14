@@ -101,7 +101,7 @@ func TestNormalizeCSVList(t *testing.T) {
 }
 
 func TestBuildLegacyAgentUpdateCommand(t *testing.T) {
-	sh := buildLegacyAgentUpdateCommand("linux", "http://x:8529", "aiops-agent-linux-amd64", false)
+	sh := buildLegacyAgentUpdateCommand("linux", "http://x:8529", "aiops-agent-linux-amd64", testPinSHA, false)
 	for _, p := range []string{"curl", "sha256", "nohup"} {
 		if !strings.Contains(sh, p) {
 			t.Fatalf("linux script missing %q", p)
@@ -110,13 +110,13 @@ func TestBuildLegacyAgentUpdateCommand(t *testing.T) {
 	if strings.Contains(sh, "systemctl restart") && strings.Contains(sh, "|| true\necho") {
 		// ensure we no longer mask restart failure with trailing || true before ok echo
 	}
-	darwin := buildLegacyAgentUpdateCommand("darwin", "http://x:8529", "aiops-agent-darwin-arm64", false)
+	darwin := buildLegacyAgentUpdateCommand("darwin", "http://x:8529", "aiops-agent-darwin-arm64", testPinSHA, false)
 	for _, p := range []string{"xattr", "system/com.aiops.agent", "gui/"} {
 		if !strings.Contains(darwin, p) {
 			t.Fatalf("darwin script missing %q", p)
 		}
 	}
-	ps := buildLegacyAgentUpdateCommand("windows", "http://x:8529", "aiops-agent.exe", false)
+	ps := buildLegacyAgentUpdateCommand("windows", "http://x:8529", "aiops-agent.exe", testPinSHA, false)
 	if !strings.Contains(ps, "powershell") || !strings.Contains(ps, "EncodedCommand") {
 		t.Fatalf("windows script incomplete: %s", ps[:minInt(120, len(ps))])
 	}
