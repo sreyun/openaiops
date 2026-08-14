@@ -1343,15 +1343,10 @@ safeAddEventListener("checkHistBody", "click", e => {
 });
 // 读取两个 datetime-local 输入，校验后按自定义绝对区间重新拉取（与主机趋势图一致）
 function applyChkCustomRange() {
-  const fEl = $("chkCustomFrom"), tEl = $("chkCustomTo");
-  if (!fEl || !tEl || !fEl.value || !tEl.value) { toast(I18N.t("time.custom_incomplete") || "请选择开始和结束时间", "warn"); return; }
-  const from = Math.floor(new Date(fEl.value).getTime() / 1000);
-  const to = Math.floor(new Date(tEl.value).getTime() / 1000);
-  if (!Number.isFinite(from) || !Number.isFinite(to)) { toast(I18N.t("time.custom_invalid") || "时间格式无效", "err"); return; }
-  if (to <= from) { toast(I18N.t("time.custom_order") || "结束时间必须晚于开始时间", "warn"); return; }
-  if (to - from < 60) { toast(I18N.t("time.custom_tooshort") || "时间范围太短（至少 1 分钟）", "warn"); return; }
-  CHK_HIST.custom = { from, to };
-  loadCheckHistory();
+  applyCustomRangeFromInputs($("chkCustomFrom"), $("chkCustomTo"), (from, to) => {
+    CHK_HIST.custom = { from, to };
+    loadCheckHistory();
+  });
 }
 async function loadHostsMeta() {
   try { HOST_META = await fetch(`${API}/hosts/meta`).then(r => r.json()); } catch (e) { /* ignore */ }

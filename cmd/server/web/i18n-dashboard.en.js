@@ -668,6 +668,7 @@ window.DICT_EN = {
   "time.custom_invalid": "Invalid time format",
   "time.custom_order": "End time must be after start time",
   "time.custom_tooshort": "Range too short (at least 1 minute)",
+  "time.now": "Now",
   "time.records": "records",
   "misc.critical_alert_title": "AIOps - Critical Alert",
   "misc.new_alerts_count": "new critical alerts need attention (total ",

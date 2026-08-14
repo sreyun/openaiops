@@ -671,6 +671,7 @@
   "time.custom_invalid": "时间格式无效",
   "time.custom_order": "结束时间必须晚于开始时间",
   "time.custom_tooshort": "时间范围太短（至少 1 分钟）",
+  "time.now": "此刻",
   "time.records": "条",
   "misc.critical_alert_title": "AIOps - 严重告警",
   "misc.new_alerts_count": "条新的严重告警需要处理（总计",

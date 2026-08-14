@@ -158,7 +158,7 @@ func moduleAgentUpdate(args map[string]string, allowedBases []string) ([]byte, i
 		}
 	}
 
-	cfgPath := resolveAgentConfigBesideExe(dir)
+	cfgPath := agentUpdateConfigPath(dir)
 	if err := agentReplaceAndRestart(exe, staging, cfgPath); err != nil {
 		_ = os.Remove(staging)
 		return []byte("agent_update: " + err.Error()), 1
@@ -192,12 +192,32 @@ func moduleAgentRollback() ([]byte, int) {
 		return []byte("agent_update rollback: " + err.Error()), 1
 	}
 	_ = os.Chmod(staging, 0o755)
-	cfgPath := resolveAgentConfigBesideExe(filepath.Dir(exe))
+	cfgPath := agentUpdateConfigPath(filepath.Dir(exe))
 	if err := agentReplaceAndRestart(exe, staging, cfgPath); err != nil {
 		_ = os.Remove(staging)
 		return []byte("agent_update rollback: " + err.Error()), 1
 	}
 	return []byte("agent_update: rollback to .bak scheduled"), 0
+}
+
+// agentActiveConfigPath is the config file THIS process was started with,
+// absolute. Set once during startup (main), read-only afterwards.
+//
+// 它不等于「exe 旁边的 config.yaml」：--install-service 会把当时解析出的绝对路径原样写进
+// 服务 ImagePath，安装目录之外的配置完全合法。升级助手拿不到配置路径时会拒绝启动 Agent，
+// 所以这里必须用进程真正在用的那一份，而不是靠猜。
+var agentActiveConfigPath string
+
+// agentUpdateConfigPath returns the config the restart helpers should pass to
+// the new binary: the one this process is actually running with, falling back to
+// a file sitting beside the executable.
+func agentUpdateConfigPath(dir string) string {
+	if p := strings.TrimSpace(agentActiveConfigPath); p != "" {
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p
+		}
+	}
+	return resolveAgentConfigBesideExe(dir)
 }
 
 // resolveAgentConfigBesideExe returns an absolute config path next to the agent

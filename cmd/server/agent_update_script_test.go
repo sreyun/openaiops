@@ -161,6 +161,65 @@ func TestLegacyWindowsBootstrapDetachesBeforeTouchingTheAgent(t *testing.T) {
 	}
 }
 
+// The helper runs AS the AIOpsAgentLegacyUpdate scheduled task, and
+// `schtasks /End /TN <task>` terminates that task's whole process tree. A call
+// to it from inside the helper is therefore suicide — and it sat immediately
+// before the service stop and the binary swap, so every rescue died there with
+// the log ending at "staging --version" and the host still on the old version.
+// Clearing a stale instance is the BOOTSTRAP's job, before the task is started.
+func TestWindowsUpdateHelperNeverEndsItsOwnScheduledTask(t *testing.T) {
+	const ownTask = "AIOpsAgentLegacyUpdate"
+	for i, line := range strings.Split(windowsUpdateHelperScript(), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") || !strings.Contains(trimmed, ownTask) {
+			continue
+		}
+		for _, kill := range []string{"/End", "Stop-ScheduledTask", "Unregister-ScheduledTask"} {
+			if strings.Contains(trimmed, kill) {
+				t.Fatalf("helper line %d terminates the task it is itself running under (%s): %s", i+1, kill, trimmed)
+			}
+		}
+	}
+	// Scheduled tasks default to MultipleInstances=IgnoreNew, so a previous run
+	// left hanging would make Start-ScheduledTask a silent no-op.
+	inline := decodeLegacyWindowsPS(t, legacyWindowsAgentUpdateScript("https://mon.example", "aiops-agent.exe"))
+	if !strings.Contains(inline, "/End") || !strings.Contains(inline, "$T") {
+		t.Fatal("bootstrap must end a stale instance of its own task before starting a new one")
+	}
+	endAt := strings.Index(inline, "/End")
+	startAt := strings.Index(inline, "Start-ScheduledTask")
+	if startAt < 0 || endAt > startAt {
+		t.Fatal("the stale-instance /End must come before Start-ScheduledTask, not after")
+	}
+}
+
+// After the swap the service is stopped and the host is offline until something
+// starts it again. A registered service already carries
+// '--service --config <abs>' in its ImagePath, so plain start always works —
+// gating the only start path on "a config file sits beside the exe" left hosts
+// with a brand-new binary they never ran.
+func TestWindowsUpdateHelperStartsExistingServiceWithoutConfig(t *testing.T) {
+	ps := windowsUpdateHelperScript()
+	const guard = "if(-not $ok -and $svcs.Count -gt 0){"
+	guardAt := strings.Index(ps, guard)
+	if guardAt < 0 {
+		t.Fatal("helper must try to start an already-registered service even when no config is known")
+	}
+	// The plain service start must live under that config-independent guard, not
+	// nested inside the "install-service with a config" branch above it.
+	startAt := strings.Index(ps, `@('start',$n)`)
+	if startAt < 0 || startAt < guardAt {
+		t.Fatal("sc.exe start must sit under the config-independent guard")
+	}
+	if cfgGate := strings.Index(ps, "if($hasSvc -and $Cfg){"); cfgGate < 0 || cfgGate > guardAt {
+		t.Fatal("expected the install-service branch to precede the unconditional service start")
+	}
+	// ...and it must know about installs whose config is not beside the binary.
+	if !strings.Contains(ps, "function Get-ConfigFromCommandLine") || !strings.Contains(ps, `'--config\s+`) {
+		t.Fatal("helper must read --config out of the service ImagePath, not only guess beside the exe")
+	}
+}
+
 // Windows PowerShell 5.1 turns native stderr captured via 2>&1 into terminating
 // errors under $ErrorActionPreference='Stop'; the agent prints a startup warning,
 // so the pre-swap probe aborted the whole update.

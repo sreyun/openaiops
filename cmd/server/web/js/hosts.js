@@ -1089,13 +1089,6 @@ let DETAIL_LOAD_SEQ = 0;
 let DETAIL_ANCHOR = null; // { hostId, rangeH, from, to } | null
 let DETAIL_SHARED_FC = null; // shared enrich result for current load
 
-// 把 unix 秒格式化为 <input type="datetime-local"> 需要的本地时间字符串 YYYY-MM-DDTHH:mm
-function toLocalDatetimeValue(unixSec) {
-  const d = new Date(unixSec * 1000);
-  const p = n => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
-}
-
 // 统一的时间跨度控件渲染函数（主机图表和监控图表共用）
 // 快捷时间跨度（小时）：1/3/6/12 小时 + 1/3/7/14 天（+ 自定义，由各视图单独渲染）
 const CHART_SPANS = [1, 3, 6, 12, 24, 72, 168, 336];
@@ -1104,9 +1097,27 @@ function chartSpanLabel(h) {
 }
 function renderChartControls(currentRange, prefix) {
   return CHART_SPANS.map(h =>
-    `<button class="chip-btn ${currentRange === h ? "active" : ""}" data-${prefix}="${h}">${chartSpanLabel(h)}</button>`
+    `<button type="button" class="chip-btn ${currentRange === h ? "active" : ""}" data-${prefix}="${h}">${chartSpanLabel(h)}</button>`
   ).join("");
 }
+
+function renderDetailToolbar(from, to) {
+  const f = (typeof toLocalDatetimeValue === "function") ? toLocalDatetimeValue(from) : "";
+  const t = (typeof toLocalDatetimeValue === "function") ? toLocalDatetimeValue(to) : "";
+  return `<div class="chart-controls" id="detailChartControls">
+        ${renderChartControls(DETAIL_CUSTOM ? -1 : DETAIL_TIME_RANGE, "range")}
+        <button type="button" class="chip-btn ${DETAIL_CUSTOM ? "active" : ""}" data-custom-toggle title="${I18N.t("time.custom_range") || "自定义时间范围"}">${I18N.t("time.custom") || "自定义"}</button>
+        ${typeof forecastChipHTML === "function" ? forecastChipHTML("host-detail") : ""}
+        <button type="button" class="chip-btn ai-assist-btn" id="detailAIBtn" title="${I18N.t("hosts.ai_analyze_title","用 AI 解读该主机近期指标趋势")}"><span class="ai-assist-btn-ic">🤖</span>${I18N.t("hosts.ai_analyze","AI 分析")}</button>
+        <span class="chart-custom-range" id="detailCustomPanel"${DETAIL_CUSTOM ? "" : " hidden"}>
+          <input type="datetime-local" id="detailCustomFrom" class="dt-input" value="${f}">
+          <span class="dt-sep">→</span>
+          <input type="datetime-local" id="detailCustomTo" class="dt-input" value="${t}">
+          <button type="button" class="chip-btn primary" data-custom-apply>${I18N.t("time.custom_apply") || "应用"}</button>
+        </span>
+      </div>`;
+}
+
 async function openDetail(id, name) {
   DETAIL_HOST_ID = id;
   DETAIL_HOST_NAME = name || id;
@@ -1118,7 +1129,8 @@ async function openDetail(id, name) {
   if (typeof setChartForecastOn === "function") setChartForecastOn("host-detail", false);
   $("detailTitle").textContent = name + " " + I18N.t("section.recent_trend");
   const body = $("detailBody");
-  body.innerHTML = `<div class="empty-line">${I18N.t("ui.loading")}</div>`;
+  const win = resolveDetailWindow();
+  body.innerHTML = `${renderDetailToolbar(win.from, win.to)}<div class="empty-line">${I18N.t("ui.loading")}</div>`;
   $("detailMask").classList.add("show");
   await loadAndRenderCharts();
 }
@@ -1216,12 +1228,13 @@ async function loadAndRenderCharts() {
     const r = await fetch(`${API}/hosts/${encodeURIComponent(DETAIL_HOST_ID)}/history?from=${from}&to=${to}`,
       load.signal ? { signal: load.signal } : undefined);
     if (!load.isCurrent()) return;
+    if (!r.ok) throw new Error("HTTP " + r.status);
     const rawSamples = await r.json().catch(() => []);
     if (!load.isCurrent()) return;
     const samples = alignHistoryGaugeSamples(Array.isArray(rawSamples) ? rawSamples : []);
     if (!samples.length) {
       DETAIL_SAMPLES = [];
-      body.innerHTML = `<div class="empty-line">${I18N.t("empty.no_history")}</div>`;
+      body.innerHTML = `${renderDetailToolbar(from, to)}<div class="empty-line">${I18N.t("empty.no_history")}</div>`;
       return;
     }
     DETAIL_SAMPLES = samples;
@@ -1235,18 +1248,7 @@ async function loadAndRenderCharts() {
     const wrap = id => `<div class="chart-wrap" data-lazy-chart="${id}"><canvas id="${id}" width="1000" height="240"></canvas>` +
       `<button class="chart-enlarge" data-chart="${id}" title="${I18N.t('ui.zoom_preview')}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg></button></div>`;
     body.innerHTML = `
-      <div class="chart-controls">
-        ${renderChartControls(DETAIL_CUSTOM ? -1 : DETAIL_TIME_RANGE, "range")}
-        <button class="chip-btn ${DETAIL_CUSTOM ? "active" : ""}" data-custom-toggle title="${I18N.t("time.custom_range") || "自定义时间范围"}">${I18N.t("time.custom") || "自定义"}</button>
-        ${typeof forecastChipHTML === "function" ? forecastChipHTML("host-detail") : ""}
-        <button class="chip-btn ai-assist-btn" id="detailAIBtn" title="${I18N.t("hosts.ai_analyze_title","用 AI 解读该主机近期指标趋势")}"><span class="ai-assist-btn-ic">🤖</span>${I18N.t("hosts.ai_analyze","AI 分析")}</button>
-        <span class="chart-custom-range" id="detailCustomPanel"${DETAIL_CUSTOM ? "" : " hidden"}>
-          <input type="datetime-local" id="detailCustomFrom" class="dt-input" value="${toLocalDatetimeValue(from)}">
-          <span class="dt-sep">→</span>
-          <input type="datetime-local" id="detailCustomTo" class="dt-input" value="${toLocalDatetimeValue(to)}">
-          <button class="chip-btn primary" data-custom-apply>${I18N.t("time.custom_apply") || "应用"}</button>
-        </span>
-      </div>
+      ${renderDetailToolbar(from, to)}
       <div class="chart-container">
         ${wrap('chartCombo')}${wrap('chartCPU')}${wrap('chartMem')}${wrap('chartLoad')}${wrap('chartDisk')}${hasGPU ? wrap('chartGPU') + wrap('chartGPUTemp') + wrap('chartGPUMemPct') + wrap('chartGPUMem') : ''}${wrap('chartNet')}${hasConns ? wrap('chartConns') + wrap('chartConnStates') : ''}${wrap('chartDiskIO')}${wrap('chartIOPS')}${wrap('chartProc')}
       </div>
@@ -1403,7 +1405,7 @@ async function loadAndRenderCharts() {
   } catch (e) {
     if (e && (e.name === "AbortError" || e.message === "The user aborted a request.")) return;
     if (!load.isCurrent()) return;
-    body.innerHTML = `<div class="empty-line">加载失败: ${esc(e)}</div>`;
+    body.innerHTML = `${renderDetailToolbar(from, to)}<div class="empty-line">加载失败: ${esc(e)}</div>`;
   }
 }
 
@@ -1538,8 +1540,9 @@ safeAddEventListener("detailBody", "click", e => {
   if (e.target.closest("[data-custom-apply]")) { applyDetailCustomRange(); return; }
   const btn = e.target.closest(".chip-btn[data-range]");
   if (!btn) return;
+  const next = parseInt(btn.dataset.range, 10);
+  if (!Number.isFinite(next) || next <= 0) return;
   DETAIL_CUSTOM = null; // 切回预设跨度
-  const next = parseInt(btn.dataset.range);
   if (DETAIL_TIME_RANGE !== next) DETAIL_ANCHOR = null; // 新预设 → 重建冻结窗口
   DETAIL_TIME_RANGE = next;
   loadAndRenderCharts();
@@ -1584,16 +1587,11 @@ function analyzeHostDetailAI() {
 
 // 读取两个 datetime-local 输入，校验后按自定义绝对时间范围重新拉取并渲染
 function applyDetailCustomRange() {
-  const fEl = $("detailCustomFrom"), tEl = $("detailCustomTo");
-  if (!fEl || !tEl || !fEl.value || !tEl.value) { toast(I18N.t("time.custom_incomplete") || "请选择开始和结束时间", "warn"); return; }
-  const from = Math.floor(new Date(fEl.value).getTime() / 1000);
-  const to = Math.floor(new Date(tEl.value).getTime() / 1000);
-  if (!Number.isFinite(from) || !Number.isFinite(to)) { toast(I18N.t("time.custom_invalid") || "时间格式无效", "err"); return; }
-  if (to <= from) { toast(I18N.t("time.custom_order") || "结束时间必须晚于开始时间", "warn"); return; }
-  if (to - from < 60) { toast(I18N.t("time.custom_tooshort") || "时间范围太短（至少 1 分钟）", "warn"); return; }
-  DETAIL_CUSTOM = { from, to };
-  DETAIL_ANCHOR = null;
-  loadAndRenderCharts();
+  applyCustomRangeFromInputs($("detailCustomFrom"), $("detailCustomTo"), (from, to) => {
+    DETAIL_CUSTOM = { from, to };
+    DETAIL_ANCHOR = null;
+    loadAndRenderCharts();
+  });
 }
 
 /* ---------- Canvas 折线图（交互：悬停十字线 + 数值气泡 / 框选放大 / 双击还原 / 点击放大预览） ---------- */
@@ -2420,6 +2418,12 @@ async function reloadZoomChartData() {
     }
     if (!samples.length) {
       if (typeof toast === "function") toast(I18N.t("empty.no_history", "暂无历史数据"), "err");
+      $("chartZoomTitle").textContent = zoomTitleWithRange(ZOOM_CTX.titleBase || "", win.from, win.to);
+      renderZoomRangeControls();
+      const z = createChart("chartZoomCanvas", [], [], ZOOM_CTX.yMin, ZOOM_CTX.yMax, {
+        title: ZOOM_CTX.titleBase || "", isZoom: true
+      });
+      DETAIL_CHARTS.__zoom = z;
       return;
     }
     const series = (ZOOM_CTX.series || []).map(s => Object.assign({}, s, { kind: "history", dashed: false }));
@@ -2665,29 +2669,12 @@ safeAddEventListener("chartZoomCustomApply", "click", (e) => {
   e.preventDefault();
   e.stopPropagation();
   if (!ZOOM_CTX) return;
-  const fEl = $("chartZoomCustomFrom"), tEl = $("chartZoomCustomTo");
-  if (!fEl || !tEl || !fEl.value || !tEl.value) {
-    if (typeof toast === "function") toast(I18N.t("time.custom_incomplete") || "请选择开始和结束时间", "warn");
-    return;
-  }
-  const from = Math.floor(new Date(fEl.value).getTime() / 1000);
-  const to = Math.floor(new Date(tEl.value).getTime() / 1000);
-  if (!Number.isFinite(from) || !Number.isFinite(to)) {
-    if (typeof toast === "function") toast(I18N.t("time.custom_invalid") || "时间格式无效", "err");
-    return;
-  }
-  if (to <= from) {
-    if (typeof toast === "function") toast(I18N.t("time.custom_order") || "结束时间必须晚于开始时间", "warn");
-    return;
-  }
-  if (to - from < 60) {
-    if (typeof toast === "function") toast(I18N.t("time.custom_tooshort") || "时间范围太短（至少 1 分钟）", "warn");
-    return;
-  }
-  ZOOM_CTX.custom = { from, to };
-  ZOOM_CTX.rangeH = Math.max(1, Math.round((to - from) / 3600));
-  renderZoomRangeControls();
-  reloadZoomChartData();
+  applyCustomRangeFromInputs($("chartZoomCustomFrom"), $("chartZoomCustomTo"), (from, to) => {
+    ZOOM_CTX.custom = { from, to };
+    ZOOM_CTX.rangeH = Math.max(1, Math.round((to - from) / 3600));
+    renderZoomRangeControls();
+    reloadZoomChartData();
+  });
 });
 function sparkBlock(title, series, color) {
   const last = series.length ? series[series.length - 1] : 0;

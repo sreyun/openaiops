@@ -73,6 +73,40 @@ func TestBuildWindowsUpdateHelperScriptPrefersServiceConfig(t *testing.T) {
 	}
 }
 
+// The helper stops the service before swapping the PE, so whatever it does next
+// is the only thing standing between the host and permanent silence. A service
+// that is already registered carries "--service --config <abs>" in its
+// ImagePath, so plain start is always correct — but the start loop used to be
+// nested inside "a config file sits beside the exe", and the user-mode fallback
+// below it refuses outright without a config. Installs configured with an
+// absolute --config elsewhere therefore ended the update offline, holding a
+// brand-new binary they had never run.
+func TestWindowsHelperStartsRegisteredServiceWithoutConfig(t *testing.T) {
+	script := buildWindowsUpdateHelperScript(`C:\a\aiops-agent.exe`, `C:\a\.new.exe`,
+		"", `C:\log`, `C:\a\r`, `C:\r2`)
+	startAt := strings.Index(script, `@('start',$name)`)
+	if startAt < 0 {
+		t.Fatal("helper must start an already-registered service")
+	}
+	gate := strings.Index(script, "if ($hasSvc -and $Cfg -and (Test-Path -LiteralPath $Cfg)) {")
+	if gate < 0 {
+		t.Fatal("expected the install-service branch to stay gated on a usable config")
+	}
+	if startAt < gate {
+		t.Fatal("unexpected script layout: service start precedes the install-service branch")
+	}
+	// The start loop must iterate the collected service list at function scope,
+	// i.e. outside the config-gated branch.
+	loop := strings.Index(script, "foreach ($name in $svcs) {")
+	if loop < 0 || loop < gate {
+		t.Fatal("service start loop must sit after — and outside — the config-gated branch")
+	}
+	userMode := strings.Index(script, "return (Restart-AgentUserMode")
+	if userMode < 0 || userMode < loop {
+		t.Fatal("user-mode fallback must be the last resort, after the service start attempt")
+	}
+}
+
 // Windows PowerShell 5.1 converts native-command stderr captured via `2>&1`
 // into NativeCommandError records, which $ErrorActionPreference='Stop' promotes
 // to a terminating error. The agent prints a config warning on startup, so the

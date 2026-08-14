@@ -321,6 +321,12 @@ echo "legacy agent update ok sha=$ACTUAL"
 //     Go 注释里。
 //
 // $Server / $Bin 由引导脚本作为命令行参数传入；其余路径本脚本自行推导。
+//
+// 第三条隐性约束，踩过一次：**本脚本绝不能终止 AIOpsAgentLegacyUpdate 这个计划任务**。
+// 它自己就是该任务的运行实例，`schtasks /End` 会连整个任务进程树一起终止——而历史上
+// 那行调用恰好落在停服务、换二进制之前，于是每一次救援都死在那里：主机停在旧版本，
+// 助手日志停在 "staging --version"，与「Windows 无法自动升级」的症状完全一致。清理上
+// 一轮吊死的实例只能由引导脚本在 Start-ScheduledTask 之前做。
 const windowsUpdateHelperPS = `param([string]$Server,[string]$Bin)
 $ErrorActionPreference='Stop'
 $helperPid = $PID
@@ -372,26 +378,52 @@ function Invoke-VersionProbe {
 $procNames=@('aiops-agent','aiops-agent-windows-amd64','aiops-agent-windows-arm64','aiops-agent-windows-amd64-win2012')
 $svcNames=@('AiopsMonitorAgent','AIOps-Agent','AIOpsAgent')
 $exeNames=@('aiops-agent.exe','aiops-agent-windows-amd64.exe','aiops-agent-windows-arm64.exe','aiops-agent-windows-amd64-win2012.exe')
-# Resolve the installed binary. The service ImagePath is authoritative and is
-# tried first: a directory guess cannot find installs outside the standard
-# locations, and under a SYSTEM scheduled task $env:LOCALAPPDATA points at
-# systemprofile, so a per-user install would never be found by path guessing.
-function Resolve-AgentExe {
+# The service ImagePath is the authoritative description of the install: it
+# carries BOTH the binary path and the --config the service was registered with
+# (installAgentService writes '"<exe>" --service --config "<abs>"'). Read it once
+# and derive everything from it; a directory guess cannot find installs outside
+# the standard locations, and under a SYSTEM scheduled task $env:LOCALAPPDATA
+# points at systemprofile, so a per-user install would never be found that way.
+function Get-AgentServiceCommandLine {
   foreach($n in $svcNames){
     try{
       $svc = Get-CimInstance Win32_Service -Filter ("Name='" + $n + "'") -ErrorAction SilentlyContinue
-      if(-not $svc -or -not $svc.PathName){ continue }
-      $p = $svc.PathName.Trim()
-      if($p.StartsWith('"')){
-        $end = $p.IndexOf('"',1)
-        if($end -gt 1){ $p = $p.Substring(1, $end-1) }
-      } else {
-        $ix = $p.ToLowerInvariant().IndexOf('.exe')
-        if($ix -gt 0){ $p = $p.Substring(0, $ix+4) }
-      }
-      if($p -and (Test-Path -LiteralPath $p)){ return $p }
+      if($svc -and $svc.PathName){ return $svc.PathName.Trim() }
     }catch{}
   }
+  return $null
+}
+function Get-ExeFromCommandLine {
+  param([string]$Line)
+  if(-not $Line){ return $null }
+  $p = $Line.Trim()
+  if($p.StartsWith('"')){
+    $end = $p.IndexOf('"',1)
+    if($end -gt 1){ $p = $p.Substring(1, $end-1) }
+  } else {
+    $ix = $p.ToLowerInvariant().IndexOf('.exe')
+    if($ix -gt 0){ $p = $p.Substring(0, $ix+4) }
+  }
+  if($p -and (Test-Path -LiteralPath $p)){ return $p }
+  return $null
+}
+# The config does NOT have to sit beside the exe: --install-service embeds
+# whatever absolute path it was given. Guessing "config.yaml next to the binary"
+# misses those installs, and a missing config used to make the restart refuse to
+# run at all -- leaving the host with a swapped binary and a stopped service.
+function Get-ConfigFromCommandLine {
+  param([string]$Line)
+  if(-not $Line){ return $null }
+  $m = [regex]::Match($Line, '--config\s+(?:"([^"]+)"|([^\s"]+))')
+  if(-not $m.Success){ return $null }
+  $c = $m.Groups[1].Value
+  if(-not $c){ $c = $m.Groups[2].Value }
+  if($c -and (Test-Path -LiteralPath $c)){ return $c }
+  return $null
+}
+function Resolve-AgentExe {
+  $p = Get-ExeFromCommandLine (Get-AgentServiceCommandLine)
+  if($p){ return $p }
   $dirs=@()
   foreach($d in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramData, $env:LOCALAPPDATA)){
     if($d){ $dirs += (Join-Path $d 'AIOps Agent'); $dirs += (Join-Path $d 'aiops-agent') }
@@ -420,17 +452,19 @@ function Stop-AgentProcesses {
     } |
     ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch {} }
 }
-# Older helpers registered themselves as the one-shot AIOpsAgentSelfUpdate task
-# and then hung on the --version probe, so the task never stops. Clear the task
-# and its process before taking over.
+# Older agent-generated helpers registered themselves as the one-shot
+# AIOpsAgentSelfUpdate task and then hung on the --version probe, so the task
+# never stops. Clear that task and any stray helper process before taking over.
+#
+# NEVER end AIOpsAgentLegacyUpdate here: this script IS that task's running
+# instance, so schtasks /End would terminate its own process tree. Clearing a
+# stale instance belongs in the bootstrap, before the task is started.
 function Clear-StuckSelfUpdateTask {
-  foreach($tn in @('AIOpsAgentSelfUpdate','AIOpsAgentLegacyUpdate')){
-    try { [void](Invoke-Native "$env:SystemRoot\System32\schtasks.exe" @('/End','/TN',$tn)) } catch {}
-  }
+  try { [void](Invoke-Native "$env:SystemRoot\System32\schtasks.exe" @('/End','/TN','AIOpsAgentSelfUpdate')) } catch {}
   try { [void](Invoke-Native "$env:SystemRoot\System32\schtasks.exe" @('/Delete','/TN','AIOpsAgentSelfUpdate','/F')) } catch {}
   try {
     Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-      Where-Object { $_.CommandLine -and $_.CommandLine -match 'aiops-agent-update-helper\.ps1' -and $_.ProcessId -ne $helperPid } |
+      Where-Object { $_.CommandLine -and $_.CommandLine -match 'aiops-agent-update(-helper)?\.ps1' -and $_.ProcessId -ne $helperPid } |
       ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch {} }
   } catch {}
 }
@@ -450,16 +484,28 @@ function Test-Running {
 }
 function Restart-Agent {
   $ok=$false
-  $hasSvc=$false
-  foreach($n in $svcNames){ if(Get-Service $n -ErrorAction SilentlyContinue){ $hasSvc=$true; break } }
+  $svcs=@()
+  foreach($n in $svcNames){ if(Get-Service $n -ErrorAction SilentlyContinue){ $svcs += $n } }
+  $hasSvc = ($svcs.Count -gt 0)
+  Write-Log ("restart path hasService=$hasSvc cfg=$Cfg")
   if($hasSvc -and $Cfg){
     $p=Start-Process -FilePath $Exe -ArgumentList @('--install-service','--config',$Cfg) -WorkingDirectory $Dir -Wait -PassThru -WindowStyle Hidden
     if($p -and $p.ExitCode -eq 0){ $ok=$true }
-    if(-not $ok){
-      foreach($n in $svcNames){
-        $svc=Get-Service $n -ErrorAction SilentlyContinue
-        if($svc){ try{ Start-Service $n; Start-Sleep 3; if(Test-Running){ $ok=$true; break } }catch{} }
+  }
+  # A registered service already carries '--service --config <abs>' in its
+  # ImagePath, so plain start is the correct recovery -- including when no config
+  # could be resolved at all. Gating this on $Cfg is how a host ended up with a
+  # freshly swapped binary, a stopped service and no way back online.
+  if(-not $ok -and $svcs.Count -gt 0){
+    foreach($n in $svcs){
+      [void](Invoke-Native "$env:SystemRoot\System32\sc.exe" @('start',$n))
+      try{ Start-Service -Name $n -ErrorAction SilentlyContinue }catch{}
+      for($i=0;$i -lt 30;$i++){
+        $s=Get-Service $n -ErrorAction SilentlyContinue
+        if($s -and $s.Status -eq 'Running'){ $ok=$true; break }
+        Start-Sleep -Seconds 1
       }
+      if($ok){ Write-Log ("service started: " + $n); break }
     }
   }
   if(-not $ok){
@@ -483,13 +529,16 @@ function Write-Result($m){
     try{ Set-Content -LiteralPath $p -Value $m -Encoding UTF8 }catch{}
   }
 }
+$SvcCmd = Get-AgentServiceCommandLine
 $Exe = Resolve-AgentExe
 if(-not $Exe){ Write-Log 'FATAL: agent exe not found (service ImagePath and known dirs)'; exit 1 }
 $Dir = Split-Path -Parent $Exe
 $Bak = $Exe + '.bak'
 $New = Join-Path $Dir '.aiops-agent.update.exe'
-$Cfg = $null
-foreach($n in @('config.yaml','config.yml','config.json')){ $c=Join-Path $Dir $n; if(Test-Path -LiteralPath $c){ $Cfg=$c; break } }
+$Cfg = Get-ConfigFromCommandLine $SvcCmd
+if(-not $Cfg){
+  foreach($n in @('config.yaml','config.yml','config.json')){ $c=Join-Path $Dir $n; if(Test-Path -LiteralPath $c){ $Cfg=$c; break } }
+}
 $swapped = $false
 try {
   Write-Log ("helper start pid=$helperPid exe=$Exe cfg=$Cfg bin=$Bin")
@@ -618,6 +667,12 @@ func legacyWindowsAgentUpdateScript(server, bin string) string {
 	// The bootstrap runs INLINE, inside the agent's service Job Object: stopping
 	// the service here would kill this very process mid-swap. It therefore only
 	// downloads + verifies + spawns, and never touches the service or the binary.
+	//
+	// 它还负责一件助手自己做不了的事：`schtasks /End /TN AIOpsAgentLegacyUpdate`。
+	// 助手正是以该任务实例的身份运行的，在助手内部调用 /End 等于自杀（历史上就死在
+	// 换二进制之前）；而计划任务默认 MultipleInstances=IgnoreNew，上一轮吊死的实例不
+	// 清掉，Start-ScheduledTask 会静默地什么都不做。所以陈旧实例只能在这里、在拉起新
+	// 实例之前清理。
 	ps := fmt.Sprintf(`$ErrorActionPreference='Stop'
 try{[Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor 3072}catch{}
 $S='%s';$B='%s';$H='%s';$T='AIOpsAgentLegacyUpdate';$N='aiops-agent-update'
@@ -631,6 +686,7 @@ try{$a=([BitConverter]::ToString($sha.ComputeHash($fs))).Replace('-','').ToLower
 if($a -ne $H){Remove-Item -LiteralPath $F -Force -EA 0;throw "update helper sha256 mismatch (want $H got $a)"}
 $P="$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 $A='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$F+'" -Server "'+$S+'" -Bin "'+$B+'"'
+try{[void](& "$env:SystemRoot\System32\schtasks.exe" /End /TN $T 2>$null)}catch{}
 $k=$false
 try{
  $t=New-ScheduledTaskAction -Execute $P -Argument $A

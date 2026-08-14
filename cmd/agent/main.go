@@ -163,6 +163,14 @@ func main() {
 			cfgPath = os.Args[i+1]
 		}
 	}
+	// Remember the config this process actually runs with: the Windows/Linux
+	// update helpers must relaunch the new binary with the SAME --config, and it
+	// is not necessarily the one sitting beside the executable.
+	if abs, err := filepath.Abs(cfgPath); err == nil {
+		agentActiveConfigPath = abs
+	} else {
+		agentActiveConfigPath = cfgPath
+	}
 	// Load configuration: file-not-found is expected on first manual run, but
 	// parse errors MUST surface — a silently-failed parse would leave the
 	// agent pointing at the hardcoded default (localhost:8529), which is the

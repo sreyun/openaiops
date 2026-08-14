@@ -1793,7 +1793,8 @@ svg.sparkline{width:100%; height:46px; display:block}
 .desktop-btn svg{width:14px;height:14px}
 
 /* ---------- 趋势图交互 ---------- */
-.chart-controls{display:flex; gap:8px; margin-bottom:18px; padding:0 2px; flex-wrap:wrap; align-items:center}
+.chart-controls{display:flex; gap:8px; margin-bottom:18px; padding:4px 2px 10px; flex-wrap:wrap; align-items:center;
+  position:sticky; top:0; z-index:6; background:var(--panel)}
 .chip-select,.fc-model-sel{
   appearance:none; -webkit-appearance:none;
   background:var(--panel2); border:1px solid var(--line2); color:var(--muted);
@@ -1813,6 +1814,32 @@ svg.sparkline{width:100%; height:46px; display:block}
   border:1px solid var(--line2); border-radius:var(--r-sm); padding:5px 8px; line-height:1.2}
 .chart-custom-range .dt-input:focus{outline:none; border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft)}
 .chart-custom-range .dt-sep{color:var(--muted); font-size:12px; user-select:none}
+.chart-custom-range .dt-input{cursor:pointer}
+/* Body-level datetime popover — sits above .mask (400) so hour/minute clicks register. */
+.dt-pop{
+  position:fixed; z-index:520; width:292px; padding:10px;
+  background:var(--panel); color:var(--txt); border:1px solid var(--line2);
+  border-radius:var(--r); box-shadow:var(--shadow-xl);
+  font-family:inherit; font-size:12px;
+}
+.dt-pop-head{display:flex; align-items:center; gap:6px; margin-bottom:8px}
+.dt-pop-title{flex:1; text-align:center; font-weight:650; font-variant-numeric:tabular-nums}
+.dt-pop-nav{width:28px; height:28px; border:1px solid var(--line2); background:var(--panel2);
+  color:var(--txt); border-radius:var(--r-sm); cursor:pointer; font-size:16px; line-height:1}
+.dt-pop-nav:hover{border-color:var(--hover-border); color:var(--txt)}
+.dt-pop-week,.dt-pop-grid{display:grid; grid-template-columns:repeat(7, 1fr); gap:2px}
+.dt-pop-week{margin-bottom:4px; color:var(--muted); font-size:10px; text-align:center}
+.dt-pop-day{height:28px; border:0; background:transparent; color:var(--txt); border-radius:6px;
+  cursor:pointer; font:inherit; font-variant-numeric:tabular-nums}
+.dt-pop-day.is-pad{visibility:hidden; pointer-events:none}
+.dt-pop-day:hover{background:var(--accent-soft)}
+.dt-pop-day.is-today{box-shadow:inset 0 0 0 1px var(--accent-border)}
+.dt-pop-day.is-sel{background:var(--accent); color:#fff}
+.dt-pop-time{display:flex; align-items:center; gap:8px; margin:10px 0 8px; padding-top:8px; border-top:1px solid var(--line)}
+.dt-pop-time label{display:flex; align-items:center; gap:6px; color:var(--muted); font-size:11px}
+.dt-pop-sel{font:inherit; font-variant-numeric:tabular-nums; color:var(--txt); background:var(--bg2);
+  border:1px solid var(--line2); border-radius:var(--r-sm); padding:4px 6px; min-width:56px}
+.dt-pop-act{display:flex; justify-content:flex-end; gap:6px}
 .chip-btn.primary{background:var(--accent); color:#fff; border-color:var(--accent)}
 .chip-btn.primary:hover{filter:brightness(1.06); color:#fff}
 /* Two-up responsive grid on the wide detail modal; collapses to one column on

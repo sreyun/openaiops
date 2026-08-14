@@ -424,12 +424,6 @@ function Wait-ServiceState([string]$Name, [string]$Want, [int]$Seconds) {
 function Get-AgentServiceNames {
   return @('AiopsMonitorAgent','AIOps-Agent','AIOpsAgent')
 }
-function Test-AgentServicePresent {
-  foreach ($name in (Get-AgentServiceNames)) {
-    if (Get-Service -Name $name -ErrorAction SilentlyContinue) { return $true }
-  }
-  return $false
-}
 function Stop-AgentProcesses {
   $names = @('aiops-agent','aiops-agent-windows-amd64','aiops-agent-windows-arm64','aiops-agent-windows-amd64-win2012')
   Get-Process -Name $names -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $helperPid } | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -488,8 +482,12 @@ function Restart-AgentUserMode {
 }
 function Restart-AgentService {
   param([string]$Exe,[string]$Cfg,[string]$Dir)
-  $hasSvc = Test-AgentServicePresent
-  Write-Log ("restart path hasService=$hasSvc cfg=$Cfg")
+  $svcs = @()
+  foreach ($name in (Get-AgentServiceNames)) {
+    if (Get-Service -Name $name -ErrorAction SilentlyContinue) { $svcs += $name }
+  }
+  $hasSvc = ($svcs.Count -gt 0)
+  Write-Log ("restart path hasService=$hasSvc services=" + ($svcs -join ',') + " cfg=$Cfg")
   if ($hasSvc -and $Cfg -and (Test-Path -LiteralPath $Cfg)) {
     Write-Log ("install-service with config: " + $Cfg)
     $p = Start-Process -FilePath $Exe -ArgumentList @('--install-service','--config', $Cfg) -WorkingDirectory $Dir -Wait -PassThru -WindowStyle Hidden
@@ -505,18 +503,21 @@ function Restart-AgentService {
       $code = if ($p) { $p.ExitCode } else { 'null' }
       Write-Log ("install-service exit=" + $code)
     }
-    foreach ($name in (Get-AgentServiceNames)) {
-      $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
-      if (-not $svc) { continue }
-      try {
-        [void](Invoke-Native "$env:SystemRoot\System32\sc.exe" @('start',$name))
-        Start-Service -Name $name -ErrorAction SilentlyContinue
-      } catch {
-        Write-Log ("Start-Service $name failed: " + $_.Exception.Message)
-        continue
-      }
-      if (Wait-ServiceState $name 'Running' 45) { Write-Log ("Start-Service ok: " + $name); return $true }
+  }
+  # 已注册的服务，它的 ImagePath 里本来就带着 "--service --config <绝对路径>"，所以
+  # **直接启动**永远是正确的恢复动作——包括「exe 旁边找不到配置」的安装（--config 可以
+  # 指向任意绝对路径）。这一步原先被锁在 $Cfg 判断里：换完二进制、停掉服务之后直接掉进
+  # user-mode 分支，而 user-mode 又以「没有配置」为由拒绝启动，主机就带着一个崭新的、
+  # 从未跑起来过的二进制永久离线。
+  foreach ($name in $svcs) {
+    try {
+      [void](Invoke-Native "$env:SystemRoot\System32\sc.exe" @('start',$name))
+      Start-Service -Name $name -ErrorAction SilentlyContinue
+    } catch {
+      Write-Log ("Start-Service $name failed: " + $_.Exception.Message)
+      continue
     }
+    if (Wait-ServiceState $name 'Running' 45) { Write-Log ("Start-Service ok: " + $name); return $true }
   }
   return (Restart-AgentUserMode -Exe $Exe -Cfg $Cfg -Dir $Dir)
 }

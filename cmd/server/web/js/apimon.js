@@ -785,12 +785,9 @@ safeAddEventListener("apiHistBody", "click", e => {
   const ch = API_HIST_CHARTS[en.dataset.chart]; if (ch) openChartZoom(ch);
 });
 function applyAhistCustomRange() {
-  const fEl = $("ahistCustomFrom"), tEl = $("ahistCustomTo");
-  if (!fEl || !tEl || !fEl.value || !tEl.value) { toast(I18N.t("time.custom_incomplete", "请选择开始和结束时间"), "warn"); return; }
-  const from = Math.floor(new Date(fEl.value).getTime() / 1000), to = Math.floor(new Date(tEl.value).getTime() / 1000);
-  if (!(to > from)) { toast(I18N.t("time.custom_order", "结束时间必须晚于开始时间"), "warn"); return; }
-  if (to - from < 60) { toast(I18N.t("time.custom_tooshort", "时间范围太短（至少 1 分钟）"), "warn"); return; }
-  API_HIST.custom = { from, to }; loadAPIHistory();
+  applyCustomRangeFromInputs($("ahistCustomFrom"), $("ahistCustomTo"), (from, to) => {
+    API_HIST.custom = { from, to }; loadAPIHistory();
+  });
 }
 
 // 把当前 API 业务监控快照汇总为纯文本供 AI 分析；仅人工采纳/反馈后的结果进入学习闭环。

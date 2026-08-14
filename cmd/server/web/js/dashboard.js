@@ -2200,11 +2200,9 @@ document.addEventListener("keydown", e => {
   if (e.shiftKey) redoDashEdit(); else undoDashEdit();
 });
 function applyDashCustom() {
-  const f = $("dashCustomFrom"), tt = $("dashCustomTo");
-  if (!f || !tt || !f.value || !tt.value) { toast("请选择起止时间", "warn"); return; }
-  const from = Math.floor(new Date(f.value).getTime() / 1000), to = Math.floor(new Date(tt.value).getTime() / 1000);
-  if (!(to > from)) { toast("结束时间必须晚于开始时间", "warn"); return; }
-  DASH_RANGE = { hours: 0, custom: { from, to } }; renderDashDetail();
+  applyCustomRangeFromInputs($("dashCustomFrom"), $("dashCustomTo"), (from, to) => {
+    DASH_RANGE = { hours: 0, custom: { from, to } }; renderDashDetail();
+  });
 }
 function panelTrendState(pid) {
   if (!DASH_PANEL_TREND[pid]) DASH_PANEL_TREND[pid] = { forecast: false, pop: false, yoy: false, horizonSec: 0, method: "auto" };

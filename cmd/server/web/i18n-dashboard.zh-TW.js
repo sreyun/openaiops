@@ -668,6 +668,7 @@ window.DICT_TW = {
   "time.custom_invalid": "時間格式無效",
   "time.custom_order": "結束時間必須晚於開始時間",
   "time.custom_tooshort": "時間範圍太短（至少 1 分鐘）",
+  "time.now": "此刻",
   "time.records": "條",
   "misc.critical_alert_title": "AIOps - 嚴重告警",
   "misc.new_alerts_count": "條新的嚴重告警需要處理（總計",

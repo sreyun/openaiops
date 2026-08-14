@@ -157,6 +157,300 @@ function clearAnchoredRange(key) {
   if (window.__rangeAnchors) delete window.__rangeAnchors[key];
 }
 
+/** Format unix seconds as `<input type="datetime-local">` local value (YYYY-MM-DDTHH:mm). */
+function toLocalDatetimeValue(unixSec) {
+  const d = new Date((Number(unixSec) || 0) * 1000);
+  if (!Number.isFinite(d.getTime())) return "";
+  const p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/**
+ * Parse a datetime-local (or "YYYY-MM-DD HH:mm") string as **local** time.
+ * `new Date("2024-01-15T14:30")` is implementation-defined (UTC vs local) and
+ * is why "apply custom range" sometimes silently no-ops or shifts by 8h.
+ */
+function parseLocalDatetimeValue(s) {
+  const str = String(s || "").trim();
+  if (!str) return NaN;
+  const m = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?/.exec(str);
+  if (m) {
+    const d = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0));
+    const ms = d.getTime();
+    return Number.isFinite(ms) ? Math.floor(ms / 1000) : NaN;
+  }
+  const ms = Date.parse(str);
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : NaN;
+}
+
+/** @returns {{ok:true,from:number,to:number}|{ok:false,reason:string}} */
+function readCustomRangeInputs(fromEl, toEl) {
+  if (!fromEl || !toEl || !String(fromEl.value || "").trim() || !String(toEl.value || "").trim()) {
+    return { ok: false, reason: "incomplete" };
+  }
+  const from = parseLocalDatetimeValue(fromEl.value);
+  const to = parseLocalDatetimeValue(toEl.value);
+  if (!Number.isFinite(from) || !Number.isFinite(to)) return { ok: false, reason: "invalid" };
+  if (to <= from) return { ok: false, reason: "order" };
+  if (to - from < 60) return { ok: false, reason: "tooshort" };
+  return { ok: true, from, to };
+}
+
+function toastCustomRangeError(reason) {
+  const map = {
+    incomplete: ["time.custom_incomplete", "请选择开始和结束时间"],
+    invalid: ["time.custom_invalid", "时间格式无效"],
+    order: ["time.custom_order", "结束时间必须晚于开始时间"],
+    tooshort: ["time.custom_tooshort", "时间范围太短（至少 1 分钟）"]
+  };
+  const pair = map[reason] || map.invalid;
+  const msg = (typeof I18N !== "undefined" && I18N.t) ? (I18N.t(pair[0], pair[1]) || pair[1]) : pair[1];
+  if (typeof toast === "function") toast(msg, reason === "invalid" ? "err" : "warn");
+}
+
+function applyCustomRangeFromInputs(fromEl, toEl, onOk) {
+  const r = readCustomRangeInputs(fromEl, toEl);
+  if (!r.ok) { toastCustomRangeError(r.reason); return false; }
+  onOk(r.from, r.to);
+  return true;
+}
+
+/**
+ * Native `<input type="datetime-local">` pickers inside `.mask` / `overflow:auto`
+ * (host history, zoom, checks, …) swallow clicks on the time spinner on Chromium
+ * Windows — the calendar paints, but hour/minute clicks do nothing.
+ * Replace the native picker with a body-level popover (date grid + <select> time).
+ */
+let _dtPop = null;
+let _dtPopInput = null;
+let _dtPopView = null; // { y, mo } month being shown
+
+function _dtT(key, fallback) {
+  return (typeof I18N !== "undefined" && I18N.t) ? (I18N.t(key, fallback) || fallback) : fallback;
+}
+
+function closeDtPopover() {
+  if (_dtPop && _dtPop.parentNode) _dtPop.parentNode.removeChild(_dtPop);
+  _dtPop = null;
+  _dtPopInput = null;
+  _dtPopView = null;
+}
+
+function _dtWeekdays() {
+  const lang = (document.documentElement.lang || (typeof I18N !== "undefined" && I18N.getLang && I18N.getLang()) || "").toLowerCase();
+  if (lang.indexOf("en") === 0) return ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
+  if (lang.indexOf("zh-tw") === 0 || lang.indexOf("zh-hant") === 0) return ["日", "一", "二", "三", "四", "五", "六"];
+  return ["日", "一", "二", "三", "四", "五", "六"];
+}
+
+function _dtPad(n) { return String(n).padStart(2, "0"); }
+
+function _dtReadInput(input) {
+  const parsed = parseLocalDatetimeValue(input && input.value);
+  if (Number.isFinite(parsed)) return new Date(parsed * 1000);
+  return new Date();
+}
+
+function _dtCommit(input, d) {
+  if (!input || !d || !Number.isFinite(d.getTime())) return;
+  input.value = toLocalDatetimeValue(Math.floor(d.getTime() / 1000));
+  try {
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  } catch (_) {}
+}
+
+function _dtPosition(pop, input) {
+  const r = input.getBoundingClientRect();
+  const pw = pop.offsetWidth || 292;
+  const ph = pop.offsetHeight || 340;
+  let left = r.left;
+  let top = r.bottom + 6;
+  if (left + pw > window.innerWidth - 8) left = Math.max(8, window.innerWidth - pw - 8);
+  if (left < 8) left = 8;
+  if (top + ph > window.innerHeight - 8 && r.top - ph - 6 > 8) top = r.top - ph - 6;
+  pop.style.left = Math.round(left) + "px";
+  pop.style.top = Math.round(top) + "px";
+}
+
+function _dtRenderCal(pop, selected) {
+  const cal = pop.querySelector("[data-dt-cal]");
+  if (!cal || !_dtPopView) return;
+  const { y, mo } = _dtPopView;
+  const first = new Date(y, mo, 1);
+  const startPad = first.getDay();
+  const daysInMo = new Date(y, mo + 1, 0).getDate();
+  const selY = selected.getFullYear(), selM = selected.getMonth(), selD = selected.getDate();
+  const today = new Date();
+  const wd = _dtWeekdays();
+  let html = `<div class="dt-pop-week">${wd.map(w => `<span>${w}</span>`).join("")}</div><div class="dt-pop-grid">`;
+  for (let i = 0; i < startPad; i++) html += `<span class="dt-pop-day is-pad"></span>`;
+  for (let d = 1; d <= daysInMo; d++) {
+    const isSel = selY === y && selM === mo && selD === d;
+    const isToday = today.getFullYear() === y && today.getMonth() === mo && today.getDate() === d;
+    html += `<button type="button" class="dt-pop-day${isSel ? " is-sel" : ""}${isToday ? " is-today" : ""}" data-dt-day="${d}">${d}</button>`;
+  }
+  html += "</div>";
+  cal.innerHTML = html;
+  const title = pop.querySelector("[data-dt-title]");
+  if (title) title.textContent = `${y}-${_dtPad(mo + 1)}`;
+}
+
+function openDtPopover(input) {
+  if (!input || input.disabled || input.readOnly) return;
+  if (_dtPopInput === input && _dtPop) { closeDtPopover(); return; }
+  closeDtPopover();
+  const cur = _dtReadInput(input);
+  _dtPopInput = input;
+  _dtPopView = { y: cur.getFullYear(), mo: cur.getMonth() };
+  const pop = document.createElement("div");
+  pop.className = "dt-pop";
+  pop.setAttribute("role", "dialog");
+  pop.setAttribute("aria-label", _dtT("time.custom_range", "自定义时间范围"));
+  const hours = Array.from({ length: 24 }, (_, i) => `<option value="${i}"${i === cur.getHours() ? " selected" : ""}>${_dtPad(i)}</option>`).join("");
+  const mins = Array.from({ length: 60 }, (_, i) => `<option value="${i}"${i === cur.getMinutes() ? " selected" : ""}>${_dtPad(i)}</option>`).join("");
+  pop.innerHTML = `<div class="dt-pop-head">
+      <button type="button" class="dt-pop-nav" data-dt-prev aria-label="prev">‹</button>
+      <div class="dt-pop-title" data-dt-title></div>
+      <button type="button" class="dt-pop-nav" data-dt-next aria-label="next">›</button>
+    </div>
+    <div data-dt-cal></div>
+    <div class="dt-pop-time">
+      <label>${_dtT("time.hour", "小时")}
+        <select data-dt-h class="dt-pop-sel">${hours}</select>
+      </label>
+      <span class="dt-sep">:</span>
+      <label>${_dtT("time.min", "分")}
+        <select data-dt-mi class="dt-pop-sel">${mins}</select>
+      </label>
+    </div>
+    <div class="dt-pop-act">
+      <button type="button" class="chip-btn" data-dt-now>${_dtT("time.now", "此刻")}</button>
+      <button type="button" class="chip-btn primary" data-dt-ok>${_dtT("time.custom_apply", "应用")}</button>
+    </div>`;
+  document.body.appendChild(pop);
+  _dtPop = pop;
+  _dtRenderCal(pop, cur);
+  _dtPosition(pop, input);
+
+  const hourSel = pop.querySelector("[data-dt-h]");
+  const minSel = pop.querySelector("[data-dt-mi]");
+  const selected = () => {
+    const dayBtn = pop.querySelector(".dt-pop-day.is-sel");
+    const day = dayBtn ? parseInt(dayBtn.getAttribute("data-dt-day"), 10) : cur.getDate();
+    const y = _dtPopView.y, mo = _dtPopView.mo;
+    const h = hourSel ? parseInt(hourSel.value, 10) : cur.getHours();
+    const mi = minSel ? parseInt(minSel.value, 10) : cur.getMinutes();
+    return new Date(y, mo, day, h, mi, 0);
+  };
+
+  pop.addEventListener("mousedown", e => { e.stopPropagation(); });
+  pop.addEventListener("click", e => {
+    e.stopPropagation();
+    const t = e.target;
+    if (!(t instanceof Element)) return;
+    if (t.closest("[data-dt-prev]")) {
+      _dtPopView.mo -= 1;
+      if (_dtPopView.mo < 0) { _dtPopView.mo = 11; _dtPopView.y -= 1; }
+      _dtRenderCal(pop, selected());
+      return;
+    }
+    if (t.closest("[data-dt-next]")) {
+      _dtPopView.mo += 1;
+      if (_dtPopView.mo > 11) { _dtPopView.mo = 0; _dtPopView.y += 1; }
+      _dtRenderCal(pop, selected());
+      return;
+    }
+    const day = t.closest("[data-dt-day]");
+    if (day) {
+      pop.querySelectorAll(".dt-pop-day.is-sel").forEach(el => el.classList.remove("is-sel"));
+      day.classList.add("is-sel");
+      return;
+    }
+    if (t.closest("[data-dt-now]")) {
+      const n = new Date();
+      _dtPopView = { y: n.getFullYear(), mo: n.getMonth() };
+      if (hourSel) hourSel.value = String(n.getHours());
+      if (minSel) minSel.value = String(n.getMinutes());
+      _dtRenderCal(pop, n);
+      _dtCommit(input, n);
+      closeDtPopover();
+      return;
+    }
+    if (t.closest("[data-dt-ok]")) {
+      _dtCommit(input, selected());
+      closeDtPopover();
+    }
+  });
+}
+
+function bindDatetimeLocal(input) {
+  if (!input || input._dtBound) return;
+  input._dtBound = true;
+  input.setAttribute("autocomplete", "off");
+  input.addEventListener("mousedown", e => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    try { input.focus(); } catch (_) {}
+    openDtPopover(input);
+  }, true);
+  input.addEventListener("keydown", e => {
+    if (e.key === "Escape" && _dtPopInput === input) {
+      e.stopPropagation();
+      closeDtPopover();
+    } else if ((e.key === "Enter" || e.key === " ") && !_dtPop) {
+      e.preventDefault();
+      openDtPopover(input);
+    }
+  });
+}
+
+function installDatetimeLocalGuard() {
+  if (document._dtGuard) return;
+  document._dtGuard = true;
+  const scan = root => {
+    if (!root) return;
+    if (root.matches && root.matches("input[type='datetime-local']")) bindDatetimeLocal(root);
+    if (root.querySelectorAll) root.querySelectorAll("input[type='datetime-local']").forEach(bindDatetimeLocal);
+  };
+  scan(document);
+  const mo = new MutationObserver(muts => {
+    muts.forEach(m => {
+      m.addedNodes.forEach(n => {
+        if (n.nodeType === 1) scan(n);
+      });
+      if (_dtPopInput && m.removedNodes) {
+        m.removedNodes.forEach(n => {
+          if (n === _dtPopInput || (n.contains && n.contains(_dtPopInput))) closeDtPopover();
+        });
+      }
+    });
+  });
+  mo.observe(document.documentElement, { childList: true, subtree: true });
+  document.addEventListener("mousedown", e => {
+    if (!_dtPop) return;
+    const t = e.target;
+    if (t === _dtPop || (_dtPop.contains && _dtPop.contains(t))) return;
+    if (t === _dtPopInput) return;
+    closeDtPopover();
+  }, true);
+  document.addEventListener("keydown", e => {
+    if (e.key === "Escape" && _dtPop) {
+      e.stopPropagation();
+      closeDtPopover();
+    }
+  }, true);
+  window.addEventListener("resize", () => { if (_dtPop && _dtPopInput) _dtPosition(_dtPop, _dtPopInput); });
+  window.addEventListener("scroll", () => { if (_dtPop && _dtPopInput) _dtPosition(_dtPop, _dtPopInput); }, true);
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", installDatetimeLocalGuard);
+} else {
+  installDatetimeLocalGuard();
+}
+
 // Account password policy (mirrors the server): >=8 chars incl. upper/lower/digit/special.
 function pwPolicyOK(pw){
   return typeof pw==="string" && pw.length>=8 && /[A-Z]/.test(pw) && /[a-z]/.test(pw) && /[0-9]/.test(pw) && /[^A-Za-z0-9]/.test(pw);

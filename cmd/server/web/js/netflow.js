@@ -469,15 +469,10 @@ document.addEventListener("chart-forecast-toggle", (ev) => {
 });
 
 function nfApplyIPCustomRange() {
-  const f = $("nfhCustomFrom"), t = $("nfhCustomTo");
-  if (!f || !t || !f.value || !t.value) return;
-  const from = Math.floor(new Date(f.value).getTime() / 1000), to = Math.floor(new Date(t.value).getTime() / 1000);
-  if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from || to - from < 60) {
-    toast(I18N.t("time.custom_order") || "请选择有效的时间范围（至少 1 分钟）", "warn");
-    return;
-  }
-  nfIPHist.custom = { from, to };
-  nfLoadIPHistory();
+  applyCustomRangeFromInputs($("nfhCustomFrom"), $("nfhCustomTo"), (from, to) => {
+    nfIPHist.custom = { from, to };
+    nfLoadIPHistory();
+  });
 }
 
 // Register with navigation

@@ -438,15 +438,10 @@ document.addEventListener("chart-forecast-toggle", (ev) => {
 });
 
 function snApplyCustomRange() {
-  const f = $("snhCustomFrom"), t = $("snhCustomTo");
-  if (!f || !t || !f.value || !t.value) return;
-  const from = Math.floor(new Date(f.value).getTime() / 1000), to = Math.floor(new Date(t.value).getTime() / 1000);
-  if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from || to - from < 60) {
-    toast(I18N.t("time.custom_order") || "请选择有效的时间范围（至少 1 分钟）", "warn");
-    return;
-  }
-  snHist.custom = { from, to };
-  snLoadInterfaceHistory();
+  applyCustomRangeFromInputs($("snhCustomFrom"), $("snhCustomTo"), (from, to) => {
+    snHist.custom = { from, to };
+    snLoadInterfaceHistory();
+  });
 }
 
 // 事件委托（CSP: script-src 'self'，内联 onclick 会被拦）。

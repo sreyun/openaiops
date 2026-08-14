@@ -2730,12 +2730,9 @@ async function loadSloTrend(){
   }
 }
 function applySloCustomRange(){
-  const fEl=$("sloCustomFrom"), tEl=$("sloCustomTo");
-  if(!fEl||!tEl||!fEl.value||!tEl.value){ toast(I18N.t("time.custom_incomplete","请选择开始和结束时间"),"warn"); return; }
-  const from=Math.floor(new Date(fEl.value).getTime()/1000), to=Math.floor(new Date(tEl.value).getTime()/1000);
-  if(!(to>from)){ toast(I18N.t("time.custom_order","结束时间必须晚于开始时间"),"warn"); return; }
-  if(to-from<60){ toast(I18N.t("time.custom_tooshort","时间范围太短（至少 1 分钟）"),"warn"); return; }
-  SLO_TREND.custom={from,to}; loadSloTrend();
+  applyCustomRangeFromInputs($("sloCustomFrom"), $("sloCustomTo"), (from, to) => {
+    SLO_TREND.custom={from,to}; loadSloTrend();
+  });
 }
 safeAddEventListener("sloTrendBody","click",e=>{
   const tog=e.target.closest("[data-slo-custom-toggle]");

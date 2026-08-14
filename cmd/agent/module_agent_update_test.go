@@ -25,6 +25,42 @@ func TestResolveAgentConfigBesideExe(t *testing.T) {
 	}
 }
 
+// The restart helpers relaunch the new binary with --config. Guessing
+// "config.yaml beside the exe" is wrong whenever the service was installed with
+// an absolute --config pointing elsewhere: the helper then finds nothing, and
+// its user-mode path refuses to start an agent without a config at all.
+func TestAgentUpdateConfigPathPrefersTheLiveConfig(t *testing.T) {
+	prev := agentActiveConfigPath
+	t.Cleanup(func() { agentActiveConfigPath = prev })
+
+	exeDir := t.TempDir()
+	beside := filepath.Join(exeDir, "config.yaml")
+	if err := os.WriteFile(beside, []byte("server: http://x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	elsewhere := filepath.Join(t.TempDir(), "aiops.yaml")
+	if err := os.WriteFile(elsewhere, []byte("server: http://y\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	agentActiveConfigPath = elsewhere
+	if got := agentUpdateConfigPath(exeDir); got != elsewhere {
+		t.Fatalf("live config ignored: got %q want %q", got, elsewhere)
+	}
+
+	// A stale/removed live path must not shadow a perfectly good local config.
+	agentActiveConfigPath = filepath.Join(t.TempDir(), "gone.yaml")
+	want, _ := filepath.Abs(beside)
+	if got := agentUpdateConfigPath(exeDir); got != want {
+		t.Fatalf("missing live config did not fall back: got %q want %q", got, want)
+	}
+
+	agentActiveConfigPath = ""
+	if got := agentUpdateConfigPath(exeDir); got != want {
+		t.Fatalf("unset live config did not fall back: got %q want %q", got, want)
+	}
+}
+
 func TestAgentDistBinaryName(t *testing.T) {
 	cases := []struct{ goos, goarch, want string }{
 		{"linux", "amd64", "aiops-agent-linux-amd64"},
