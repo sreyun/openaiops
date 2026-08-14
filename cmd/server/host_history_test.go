@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"aiops-monitor/shared"
 )
@@ -85,5 +86,87 @@ func TestQueryHistoryExportFallbackWindow(t *testing.T) {
 	}
 	if queryHistoryAllowsExportFallback(14 * 24 * 3600) {
 		t.Fatal("14d export is unbounded; rely on bounded query_range")
+	}
+}
+
+func TestVmNamesForMetricKeysSlim(t *testing.T) {
+	if got := vmNamesForMetricKeys(nil); got != nil {
+		t.Fatalf("empty keys should mean full allowlist (nil): %v", got)
+	}
+	got := vmNamesForMetricKeys([]string{"cpu", "memory"})
+	joined := strings.Join(got, ",")
+	if !strings.Contains(joined, "aiops_cpu_percent") || !strings.Contains(joined, "aiops_mem_percent") {
+		t.Fatalf("missing core gauges: %v", got)
+	}
+	if strings.Contains(joined, "gpu_util") || strings.Contains(joined, "netflow") {
+		t.Fatalf("slim cpu/mem query must not pull GPU/netflow: %v", got)
+	}
+	expr := hostHistoryRangeExprNames("h1", got)
+	if strings.Contains(expr, "aiops_.*") {
+		t.Fatal("subset expr still unbounded")
+	}
+	if !strings.Contains(expr, `host="h1"`) || !strings.Contains(expr, "path!~") {
+		t.Fatalf("subset expr missing host/path filter: %s", expr)
+	}
+}
+
+func TestForecastFitLookback(t *testing.T) {
+	if got := forecastFitLookback(300); got != 3600 {
+		t.Fatalf("short window lookback=%d want 1h", got)
+	}
+	if got := forecastFitLookback(2 * 3600); got != 6*3600 {
+		t.Fatalf("2h window lookback=%d want 6h", got)
+	}
+	if got := forecastFitLookback(10 * 24 * 3600); got != 7*24*3600 {
+		t.Fatalf("cap lookback=%d want 7d", got)
+	}
+}
+
+func TestPrependHistoryPoints(t *testing.T) {
+	pts := [][2]float64{{200, 50}, {300, 60}}
+	extra := []shared.Sample{
+		{Timestamp: 100, Metrics: shared.Metrics{CPUPercent: 10}},
+		{Timestamp: 150, Metrics: shared.Metrics{CPUPercent: 20}},
+		{Timestamp: 250, Metrics: shared.Metrics{CPUPercent: 99}}, // inside visible window — skip
+	}
+	got := prependHistoryPoints(pts, extra, "cpu_percent")
+	if len(got) != 4 || got[0][0] != 100 || got[0][1] != 10 || got[2][0] != 200 {
+		t.Fatalf("%v", got)
+	}
+}
+
+func TestLoadDurableHostHistoryFallsBackToRAM(t *testing.T) {
+	st := NewStore()
+	st.RegisterHost("h1", "node-1", "fp-aaa")
+	rep := newTestReport("h1", "node-1", "fp-aaa", 42)
+	if _, ok := st.UpsertAuthenticated(rep, "fp-aaa"); !ok {
+		t.Fatal("upsert failed")
+	}
+	srv := &Server{store: st}
+	now := time.Now().Unix()
+	samples, ok := srv.loadDurableHostHistory("h1", now-3600, now, vmNamesForMetricKeys([]string{"cpu"}))
+	if !ok {
+		t.Fatal("host should exist")
+	}
+	if len(samples) == 0 {
+		t.Fatal("expected RAM fallback samples")
+	}
+	if _, ok := srv.loadDurableHostHistory("ghost", now-3600, now, nil); ok {
+		t.Fatal("missing host")
+	}
+}
+
+func TestFormatHostTrendLine(t *testing.T) {
+	samples := []shared.Sample{
+		{Timestamp: 1, Metrics: shared.Metrics{CPUPercent: 10, MemPercent: 20, DiskPercent: 30, Load1: 1}},
+		{Timestamp: 2, Metrics: shared.Metrics{CPUPercent: 20, MemPercent: 30, DiskPercent: 40, Load1: 2}},
+		{Timestamp: 3, Metrics: shared.Metrics{CPUPercent: 30, MemPercent: 40, DiskPercent: 50, Load1: 3}},
+	}
+	got := formatHostTrendLine(samples, 6)
+	if !strings.Contains(got, "近6h趋势") || !strings.Contains(got, "CPU") || !strings.Contains(got, "3点") {
+		t.Fatalf("%s", got)
+	}
+	if formatHostTrendLine(nil, 6) != "" {
+		t.Fatal("empty samples")
 	}
 }

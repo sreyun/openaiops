@@ -94,20 +94,14 @@ func (s *Server) handleDashboardQueryForecast(w http.ResponseWriter, r *http.Req
 	// Longer fit window for short panels: bursty metrics need more context than the visible 3–5 min.
 	lookback := req.HistoryLookback
 	if lookback <= 0 {
-		lookback = rangeSec * 3
-		if lookback < 3600 {
-			lookback = 3600 // at least 1h of fit data when possible
-		}
-		if lookback > 7*24*3600 {
-			lookback = 7 * 24 * 3600
-		}
+		lookback = forecastFitLookback(rangeSec)
 	}
 	fitFrom := req.From - lookback
 	if fitFrom < req.To-90*24*3600 {
 		fitFrom = req.To - 90*24*3600
 	}
 
-	expr := substituteVars(req.Expr, req.Vars, req.Step, rangeSec)
+	expr := substituteVars(healPanelQueryExpr(req.DataSource, req.Expr), req.Vars, req.Step, rangeSec)
 	wantForecast := strings.Contains(mode, "forecast")
 	wantPoP := strings.Contains(mode, "pop")
 	wantYoY := strings.Contains(mode, "yoy")
@@ -323,15 +317,15 @@ func robustForecastWithKey(hist [][2]float64, fromTS, horizon, step int64, learn
 
 // seriesProfile 刻画时序形态，驱动模型候选与选型偏置。
 type seriesProfile struct {
-	period     int
-	cv         float64 // 标准差 / (|均值|+ε)
-	trendStr   float64 // |后半均值-前半均值| / (IQR+ε)
-	seasonStr  float64 // 最佳自相关
-	lag1       float64 // 一阶自相关：低 → 高频采样噪声（勿原样回放）
-	bursty     bool    // 稀疏尖刺（磁盘 IO 等），适合平滑后的形态回放
-	jittery    bool    // 密集高频抖动（连接数等），禁止锯齿回放
-	stationary bool    // 低趋势低季节 → 才适合偏 flat
-	monotonicUp bool   // 稳态单调上升（磁盘占用、容量类），偏向近线性外推
+	period      int
+	cv          float64 // 标准差 / (|均值|+ε)
+	trendStr    float64 // |后半均值-前半均值| / (IQR+ε)
+	seasonStr   float64 // 最佳自相关
+	lag1        float64 // 一阶自相关：低 → 高频采样噪声（勿原样回放）
+	bursty      bool    // 稀疏尖刺（磁盘 IO 等），适合平滑后的形态回放
+	jittery     bool    // 密集高频抖动（连接数等），禁止锯齿回放
+	stationary  bool    // 低趋势低季节 → 才适合偏 flat
+	monotonicUp bool    // 稳态单调上升（磁盘占用、容量类），偏向近线性外推
 }
 
 func profileSeries(vals []float64) seriesProfile {

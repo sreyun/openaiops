@@ -63,15 +63,15 @@ type DashThreshold struct {
 
 // DashValueMapping maps raw values to display text/color (Grafana fieldConfig.mappings).
 type DashValueMapping struct {
-	Type        string   `json:"type"`                   // value|range|regex|special
-	Value       string   `json:"value,omitempty"`        // value mapping key
-	From        *float64 `json:"from,omitempty"`         // range start
-	To          *float64 `json:"to,omitempty"`           // range end
-	Pattern     string   `json:"pattern,omitempty"`      // regex
-	Special     string   `json:"special,omitempty"`      // null|nan|null+nan|true|false|empty
-	Text        string   `json:"text,omitempty"`         // display text
-	Color       string   `json:"color,omitempty"`        // display color
-	Index       int      `json:"index,omitempty"`        // Grafana options.index
+	Type    string   `json:"type"`              // value|range|regex|special
+	Value   string   `json:"value,omitempty"`   // value mapping key
+	From    *float64 `json:"from,omitempty"`    // range start
+	To      *float64 `json:"to,omitempty"`      // range end
+	Pattern string   `json:"pattern,omitempty"` // regex
+	Special string   `json:"special,omitempty"` // null|nan|null+nan|true|false|empty
+	Text    string   `json:"text,omitempty"`    // display text
+	Color   string   `json:"color,omitempty"`   // display color
+	Index   int      `json:"index,omitempty"`   // Grafana options.index
 }
 
 // DashFieldOverride is a simplified Grafana fieldConfig.overrides entry.
@@ -89,14 +89,14 @@ type DashFieldOverride struct {
 // DashPanelOptions holds commercial BI display settings (sort, palette, legend…).
 // Omitted fields keep legacy defaults so existing dashboard JSON stays valid.
 type DashPanelOptions struct {
-	Sort          string              `json:"sort,omitempty"`           // desc|asc|none
-	Limit         int                 `json:"limit,omitempty"`          // Top-N; 0 = type default
-	Decimals      *int                `json:"decimals,omitempty"`       // overrides panel.Decimals when set
-	Palette       string              `json:"palette,omitempty"`        // classic|warm|cool|traffic|mono|custom
-	Colors        []string            `json:"colors,omitempty"`         // used when Palette=custom
-	Legend        string              `json:"legend,omitempty"`         // top|bottom|right|hidden
+	Sort          string              `json:"sort,omitempty"`     // desc|asc|none
+	Limit         int                 `json:"limit,omitempty"`    // Top-N; 0 = type default
+	Decimals      *int                `json:"decimals,omitempty"` // overrides panel.Decimals when set
+	Palette       string              `json:"palette,omitempty"`  // classic|warm|cool|traffic|mono|custom
+	Colors        []string            `json:"colors,omitempty"`   // used when Palette=custom
+	Legend        string              `json:"legend,omitempty"`   // top|bottom|right|hidden
 	Stacked       bool                `json:"stacked,omitempty"`
-	ChartStyle    string              `json:"chart_style,omitempty"`    // line|area|bar (timeseries)
+	ChartStyle    string              `json:"chart_style,omitempty"` // line|area|bar (timeseries)
 	ShowPoints    bool                `json:"show_points,omitempty"`
 	Smooth        bool                `json:"smooth,omitempty"`
 	Thresholds    []DashThreshold     `json:"thresholds,omitempty"`
@@ -254,11 +254,11 @@ const (
 )
 
 var (
-	dashVarNameValid    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
-	dashColorValid      = regexp.MustCompile(`(?i)^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$|^rgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}(?:\s*,\s*(?:0|1|0?\.\d+))?\s*\)$`)
-	dashAssetURLValid   = regexp.MustCompile(`^/api/v1/dashboards/assets/[A-Za-z0-9_-]{1,64}/[A-Za-z0-9._-]{1,128}$`)
-	dashAssetNameValid  = regexp.MustCompile(`^[a-f0-9]{8,32}\.(png|jpe?g|webp|svg)$`)
-	dashAssetDashIDRe   = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+	dashVarNameValid   = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
+	dashColorValid     = regexp.MustCompile(`(?i)^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$|^rgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}(?:\s*,\s*(?:0|1|0?\.\d+))?\s*\)$`)
+	dashAssetURLValid  = regexp.MustCompile(`^/api/v1/dashboards/assets/[A-Za-z0-9_-]{1,64}/[A-Za-z0-9._-]{1,128}$`)
+	dashAssetNameValid = regexp.MustCompile(`^[a-f0-9]{8,32}\.(png|jpe?g|webp|svg)$`)
+	dashAssetDashIDRe  = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 )
 
 // normalizeDashAppearance 校验并规整看板外观字段。
@@ -1063,7 +1063,7 @@ func healImportedDashboard(d *Dashboard) bool {
 			expr := p.Targets[j].Expr
 			neu := promoteTemplateVarEq(expandGrafanaClassicVars(expr), varNames)
 			// AI 看板：惰性把 Grafana node_* 公式纠成平台 aiops_*，修复「大面积空白」存量板。
-			if isAIDashboardSource(d.Source) {
+			if isAIDashboardSource(d.Source) && p.Type != "logs" {
 				neu = healAIDashExprWithTitle(p.Title, neu)
 			}
 			if neu != expr {

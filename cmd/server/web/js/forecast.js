@@ -188,6 +188,7 @@ async function enrichSamplesWithForecast(samples, seriesDefs, opts) {
         horizon_sec: opts.horizonSec || Math.max(0, Math.round(globalSpan)),
         step: opts.step || 0,
         now_ts: globalLast || 0,
+        host_id: opts.hostId || (opts.forecastScope === "host-detail" && typeof DETAIL_HOST_ID !== "undefined" ? DETAIL_HOST_ID : "") || "",
         method: opts.method != null && opts.method !== ""
           ? opts.method
           : (getChartForecastModel(opts.forecastScope || "") || "auto")
@@ -447,7 +448,8 @@ async function mountChartsWithForecast(scope, specs, loadOpts) {
     horizonSec: loadOpts.horizonSec || 0,
     step: loadOpts.step || 0,
     method: getChartForecastModel(scope),
-    forecastScope: scope
+    forecastScope: scope,
+    hostId: loadOpts.hostId || ""
   });
   if (!isCurrent() || (en && en.stale)) return out;
 

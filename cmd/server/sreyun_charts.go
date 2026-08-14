@@ -115,12 +115,12 @@ func (h *SreyunCore) registerChartTools() {
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"name":     map[string]string{"type": "string", "description": "技能名"},
-				"trigger":  map[string]string{"type": "string", "description": "触发条件"},
-				"steps":    map[string]string{"type": "string", "description": "步骤（含预期结果与回滚）"},
-				"tags":     map[string]string{"type": "string", "description": "标签"},
-				"confirm":  map[string]any{"type": "boolean", "description": "true=入库 draft"},
-				"pattern":  map[string]string{"type": "string", "description": "模式指纹，用于累计重复次数"},
+				"name":    map[string]string{"type": "string", "description": "技能名"},
+				"trigger": map[string]string{"type": "string", "description": "触发条件"},
+				"steps":   map[string]string{"type": "string", "description": "步骤（含预期结果与回滚）"},
+				"tags":    map[string]string{"type": "string", "description": "标签"},
+				"confirm": map[string]any{"type": "boolean", "description": "true=入库 draft"},
+				"pattern": map[string]string{"type": "string", "description": "模式指纹，用于累计重复次数"},
 			},
 			"required": []string{"name", "steps"},
 		},
@@ -277,14 +277,11 @@ func sampleMetricValue(s shared.Sample, key string) (float64, bool) {
 	}
 }
 
-func (h *SreyunCore) loadHostSamples(hostID string, from, to int64) []shared.Sample {
-	var samples []shared.Sample
-	if h.s != nil && h.s.vm != nil && h.s.vm.enabled() {
-		samples, _ = h.s.vm.queryHistory(hostID, from, to)
+func (h *SreyunCore) loadHostSamples(hostID string, from, to int64, keys ...string) []shared.Sample {
+	if h.s == nil {
+		return nil
 	}
-	if len(samples) == 0 && h.s != nil && h.s.store != nil {
-		samples, _ = h.s.store.GetHistory(hostID, from, to)
-	}
+	samples, _ := h.s.loadDurableHostHistory(hostID, from, to, vmNamesForMetricKeys(keys))
 	return samples
 }
 
@@ -319,9 +316,15 @@ func hostSamplesToChatChart(samples []shared.Sample, metrics []string, title str
 		})
 	}
 	rows := make([]map[string]any, 0, len(samples))
-	statAcc := map[string]*struct{ min, max, sum float64; n int }{}
+	statAcc := map[string]*struct {
+		min, max, sum float64
+		n             int
+	}{}
 	for _, m := range metrics {
-		statAcc[m] = &struct{ min, max, sum float64; n int }{min: math.Inf(1), max: math.Inf(-1)}
+		statAcc[m] = &struct {
+			min, max, sum float64
+			n             int
+		}{min: math.Inf(1), max: math.Inf(-1)}
 	}
 	for _, s := range samples {
 		row := map[string]any{"timestamp": s.Timestamp}
@@ -539,7 +542,7 @@ func (h *SreyunCore) renderHostChart(hostRef, metricsRaw string, from, to int64,
 		return capabilityJSON(capabilityResult{OK: false, Error: fmt.Sprintf("未找到主机 %q", hostRef)}), nil
 	}
 	metrics := normalizeMetricKeys(metricsRaw, "cpu")
-	samples := h.loadHostSamples(hst.ID, from, to)
+	samples := h.loadHostSamples(hst.ID, from, to, metrics...)
 	if len(samples) < 2 {
 		return capabilityJSON(capabilityResult{
 			OK:    false,
@@ -637,7 +640,7 @@ func (h *SreyunCore) execShowInstantStat(args map[string]any) (string, error) {
 		value, ok = sampleMetricValue(*hst.Latest, key)
 	}
 	from, to, rangeLabel := parseChartRange(rangeRaw, 1)
-	samples := h.loadHostSamples(hst.ID, from, to)
+	samples := h.loadHostSamples(hst.ID, from, to, key)
 	spark := make([][2]float64, 0, 60)
 	if len(samples) > 0 {
 		ds := downsampleSamples(samples, 60)
@@ -707,7 +710,7 @@ func (h *SreyunCore) execAnalyzeMetricTrend(args map[string]any) (string, error)
 	from := time.Now().Unix() - int64(hours)*3600
 	to := time.Now().Unix()
 	rangeLabel := fmt.Sprintf("%.0fh", hours)
-	samples := h.loadHostSamples(hst.ID, from, to)
+	samples := h.loadHostSamples(hst.ID, from, to, metrics...)
 	if len(samples) < 2 {
 		return capabilityJSON(capabilityResult{
 			OK:    false,
@@ -827,13 +830,13 @@ func (h *SreyunCore) execAnalyzeMetricTrend(args map[string]any) (string, error)
 		OK:      true,
 		Summary: sum,
 		Data: map[string]any{
-			"chart_id": id,
-			"host_id":  hst.ID,
-			"hostname": hst.Hostname,
-			"range":    rangeLabel,
-			"trends":   trends,
-			"stats":    stats,
-			"points":   len(samples),
+			"chart_id":          id,
+			"host_id":           hst.ID,
+			"hostname":          hst.Hostname,
+			"range":             rangeLabel,
+			"trends":            trends,
+			"stats":             stats,
+			"points":            len(samples),
 			"forecast_warnings": warnParts,
 		},
 		UIActions: actions,
@@ -885,7 +888,8 @@ func (h *SreyunCore) execForecastMetric(args map[string]any) (string, error) {
 	metricKey := "cpu"
 	var hostID, hostname string
 	if strings.TrimSpace(expr) != "" {
-		series, ok := h.s.dashRangeSeries(strings.TrimSpace(ds), strings.TrimSpace(expr), from, to, step)
+		fitFrom := from - forecastFitLookback(rangeSec)
+		series, ok := h.s.dashRangeSeries(strings.TrimSpace(ds), strings.TrimSpace(expr), fitFrom, to, step)
 		if !ok || len(series) == 0 || len(series[0].Points) == 0 {
 			return capabilityJSON(capabilityResult{OK: false, Error: "PromQL 历史数据不足，无法预测"}), nil
 		}
@@ -900,7 +904,8 @@ func (h *SreyunCore) execForecastMetric(args map[string]any) (string, error) {
 		keys := normalizeMetricKeys(metric, "cpu")
 		metricKey = keys[0]
 		hostID, hostname = hst.ID, hst.Hostname
-		samples := h.loadHostSamples(hst.ID, from, to)
+		fitFrom := from - forecastFitLookback(rangeSec)
+		samples := h.loadHostSamples(hst.ID, fitFrom, to, metricKey)
 		for _, s := range samples {
 			if v, ok := sampleMetricValue(s, metricKey); ok {
 				hist = append(hist, [2]float64{float64(s.Timestamp), v})

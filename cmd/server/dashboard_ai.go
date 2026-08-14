@@ -39,11 +39,11 @@ type aiDashVar struct {
 }
 
 type aiDashPanel struct {
-	Title   string `json:"title"`
-	Type    string `json:"type"`
-	Unit    string `json:"unit"`
-	W       int    `json:"w"`
-	H       int    `json:"h"`
+	Title   string   `json:"title"`
+	Type    string   `json:"type"`
+	Unit    string   `json:"unit"`
+	W       int      `json:"w"`
+	H       int      `json:"h"`
 	GridPos struct { // Grafana 原生布局
 		W int `json:"w"`
 		H int `json:"h"`
@@ -55,6 +55,7 @@ type aiDashPanel struct {
 	OptionsRaw  json.RawMessage  `json:"options"`     // lenient: Grafana objects / bad types
 	Options     DashPanelOptions `json:"-"`           // filled after coerceAIDashOptions
 	FieldConfig json.RawMessage  `json:"fieldConfig"` // optional Grafana-style blob from LLM
+	DataSource  json.RawMessage  `json:"datasource"`  // string id/name, or Grafana {uid,type,name}
 	Targets     []aiDashTarget   `json:"targets"`
 	Panels      []aiDashPanel    `json:"panels"` // Grafana row nesting
 }
@@ -280,7 +281,7 @@ const aiDashSchemaHint = "严格只输出一个 JSON 对象（可放在 ```json 
 	`     "options":{"palette":"classic|warm|cool|traffic|mono","legend":"top|bottom|right|hidden","sort":"desc|asc|none","limit":10,` + "\n" +
 	`       "chart_style":"line|area|bar","smooth":false,"stacked":false,"show_points":false},` + "\n" +
 	`       "mappings":[{"type":"value","value":"0","text":"正常","color":"var(--ok)"}]},` + "\n" +
-	`     "targets":[{"expr":"<PromQL>","legend":"{{标签}}"}]}]` + "\n" +
+	`     "datasource":"","targets":[{"expr":"<PromQL 或 LogQL>","legend":"{{标签}}"}]}]` + "\n" +
 	"}\n" +
 	"【角色】按专业 BI 产品经理 + BI 设计师 + SRE 可观测性专家水准设计看板，信息架构清晰、视觉节奏稳定、查询可落地。\n" +
 	"要求：① 只用【可用指标】/【本平台内置指标】里真实存在的指标名，不要臆造 node_* / node_exporter 指标；" +
@@ -290,7 +291,7 @@ const aiDashSchemaHint = "严格只输出一个 JSON 对象（可放在 ```json 
 	"· 时序/变化→timeseries；可用性时段→state-timeline；分布→histogram；密度矩阵→heatmap；OHLC/波动→candlestick；\n" +
 	"· 关键当前值→stat；利用率水位→gauge（比纯数字更直观）；构成占比→piechart；Top-N→barchart；多实例横比→bargauge；多维评分→radar；\n" +
 	"· 流量/请求路径走向→sankey；网络拓扑/依赖→nodegraph；地理分布→geomap；CPU/函数耗时剖析→flamegraph；\n" +
-	"· 清单明细/SQL→table；当前告警→alertlist；说明文案→text；实时时钟→clock；资讯/RSS→news。\n" +
+	"· 清单明细/SQL→table；日志流→logs（expr 为 LogQL，datasource 必填 Loki id）；当前告警→alertlist；说明文案→text；实时时钟→clock；资讯/RSS→news。\n" +
 	"叙事节奏：顶部 KPI(stat/gauge) → 趋势(timeseries) → 对比/构成(pie/bar/bargauge/radar/sankey) → 明细(table/heatmap) → 告警(alertlist)。" +
 	"高质量看板须混用至少 5 种不同 type，且至少包含 1 个 text 说明区。切忌全是 timeseries。" +
 	"未知/不会画的类型不要硬造——可输出该 type（平台会占位），或回退 timeseries。" +
@@ -317,11 +318,21 @@ const aiopsBuiltinMetricsHint = "【本平台内置主机指标（只能用这�
 	"aiops_disk_read_iops, aiops_disk_write_iops。\n" +
 	"容量：aiops_mem_used_bytes, aiops_mem_total_bytes, aiops_swap_used_bytes, aiops_swap_total_bytes, " +
 	"aiops_disk_used_bytes, aiops_disk_total_bytes, aiops_cpu_cores。\n" +
-	"其它：aiops_net_conns, aiops_net_conn_count, aiops_uptime_seconds, aiops_proc_count, aiops_gpu_util_percent。\n" +
+	"其它：aiops_net_conns, aiops_net_conn_count, aiops_uptime_seconds, aiops_proc_count, " +
+	"aiops_gpu_util_percent, aiops_gpu_temp_c, aiops_gpu_mem_percent, aiops_gpus_count, " +
+	"aiops_api_avail_percent, aiops_task_fail_count。\n" +
 	"标签：instance=主机名（图例用），host=主机ID（仅过滤，禁止进图例），可选 category、path、gpu。\n" +
 	"正确示例：aiops_cpu_percent{instance=~\"$instance\"}；avg(aiops_mem_percent)；" +
 	"aiops_net_sent_rate{instance=~\"$instance\"}（不要写 rate(node_network_transmit_bytes_total[5m])）。\n" +
-	"错误示例（禁止）：100-avg(rate(node_cpu_seconds_total{mode=\"idle\"}[5m]))*100、node_memory_MemAvailable_bytes、node_filesystem_*、node_disk_*、node_network_*。"
+	"错误示例（禁止）：{__name__=~\"aiops_.*\"}（会扫 docker overlay / k8s PVC 导致超时）、" +
+	"100-avg(rate(node_cpu_seconds_total{mode=\"idle\"}[5m]))*100、node_memory_MemAvailable_bytes、node_filesystem_*、node_disk_*、node_network_*。"
+
+// aiDashQueryContractHint 与实时看板面板同一套查询契约，注入「AI 制作 / AI 优化」。
+const aiDashQueryContractHint = "【查询契约·与实时面板一致】\n" +
+	"· 指标面板：PromQL，默认 datasource 留空=内置 VictoriaMetrics。时间窗由看板选择器注入 $__range / $__interval，不要写死 [1h]。禁止 {__name__=~\"aiops_.*\"}。\n" +
+	"· 日志面板：type=logs，expr 为 LogQL（如 {job=\"nginx\"} |= \"error\"），必须设 datasource 为【已启用 Loki】给出的 id；" +
+	"$__range 同样随选择器变化。没有 Loki 时不要硬造 logs 面板。\n" +
+	"· Agent「日志」页 ≠ 看板 logs 面板；不要把 search_logs 结果写成 PromQL，也不要用 heal/node_* 公式改写 LogQL。"
 
 // extractJSONObject 从 AI 回复里抽出最可能的看板 JSON：优先含 "panels" 的 ```json 块，
 // 再找含 panels 的括号平衡对象（避免散文里的 {示例} 干扰 first{…last}）。
@@ -731,6 +742,7 @@ func sanitizeAIDash(spec aiDashSpec, name, source string) (Dashboard, []string) 
 			ID: id, Title: strings.TrimSpace(p.Title), Type: typ,
 			Unit: healAIDashUnit(p.Unit), Text: p.Text,
 			Min: p.Min, Max: p.Max, Options: p.Options,
+			DataSource: coerceDashDataSourceRef(p.DataSource),
 		}
 		if p.Decimals != nil {
 			panel.Decimals = *p.Decimals
@@ -764,13 +776,19 @@ func sanitizeAIDash(spec aiDashSpec, name, source string) (Dashboard, []string) 
 			h = p.GridPos.H
 		}
 		panel.Grid = DashGrid{W: aiPanelWidth(typ, w), H: aiPanelHeight(typ, h)}
+		isLogs := typ == "logs"
 		for _, t := range p.Targets {
 			expr := t.targetExpr()
 			if expr == "" {
 				continue
 			}
 			expr = rewriteDashVarRefs(expr, varRename)
-			expr = healAIDashExprWithTitle(panel.Title, expr)
+			if !isLogs {
+				if rewriteUnboundedAIOpsNameSelector(expr) != expr {
+					warns = append(warns, "面板「"+panel.Title+"」已去掉无界 {__name__=~\"aiops_.*\"}")
+				}
+				expr = healAIDashExprWithTitle(panel.Title, expr)
+			}
 			if strings.Contains(expr, "$instance") || strings.Contains(expr, "${instance}") {
 				needInstance = true
 			}
@@ -780,6 +798,9 @@ func sanitizeAIDash(spec aiDashSpec, name, source string) (Dashboard, []string) 
 			}
 			legend = healAIDashLegendFor(typ, legend)
 			panel.Targets = append(panel.Targets, DashTarget{Expr: expr, Legend: legend})
+		}
+		if isLogs && strings.TrimSpace(panel.DataSource) == "" {
+			warns = append(warns, "日志面板「"+panel.Title+"」未指定 Loki 数据源")
 		}
 		if !dashNoTargetTypes[typ] && !dashComingSoonTypes[typ] && len(panel.Targets) == 0 {
 			warns = append(warns, "面板「"+panel.Title+"」无有效查询，已跳过")
@@ -882,6 +903,55 @@ func rewriteDashVarRefs(expr string, rename map[string]string) string {
 	return out
 }
 
+// coerceDashDataSourceRef accepts a string id/name or Grafana {uid,id,type,name} object.
+func coerceDashDataSourceRef(raw json.RawMessage) string {
+	s := strings.TrimSpace(string(raw))
+	if s == "" || s == "null" {
+		return ""
+	}
+	if strings.HasPrefix(s, `"`) {
+		var name string
+		if json.Unmarshal(raw, &name) == nil {
+			return strings.TrimSpace(name)
+		}
+		return ""
+	}
+	var obj struct {
+		UID  string `json:"uid"`
+		ID   string `json:"id"`
+		Type string `json:"type"`
+		Name string `json:"name"`
+	}
+	if json.Unmarshal(raw, &obj) != nil {
+		return ""
+	}
+	if id := strings.TrimSpace(obj.UID); id != "" {
+		return id
+	}
+	if id := strings.TrimSpace(obj.ID); id != "" {
+		return id
+	}
+	if n := strings.TrimSpace(obj.Name); n != "" {
+		return n
+	}
+	return strings.TrimSpace(obj.Type)
+}
+
+var (
+	unboundedAIOpsNameExact = regexp.MustCompile(`\{__name__\s*=~\s*["']aiops_\.\*["']\s*\}`)
+	unboundedAIOpsNameLead  = regexp.MustCompile(`\{__name__\s*=~\s*["']aiops_\.\*["']\s*,\s*`)
+)
+
+// rewriteUnboundedAIOpsNameSelector replaces {__name__=~"aiops_.*"} which times out
+// on docker overlay / k8s PVC cardinality. Same contract as host-history allowlist.
+func rewriteUnboundedAIOpsNameSelector(expr string) string {
+	if expr == "" || !strings.Contains(expr, "aiops_.*") {
+		return expr
+	}
+	out := unboundedAIOpsNameExact.ReplaceAllString(expr, "aiops_cpu_percent")
+	return unboundedAIOpsNameLead.ReplaceAllString(out, "aiops_cpu_percent{")
+}
+
 // healAIDashExpr 纠正常见「优化后无数据」写法：臆造的 node_* / Grafana 公式、
 // 对水位指标误套 rate()、下钻过滤写成 instance="$instance"（「全部」时 =".*" 匹配不到，需 =~）。
 func healAIDashExpr(expr string) string {
@@ -894,6 +964,7 @@ func healAIDashExprWithTitle(title, expr string) string {
 		return expr
 	}
 	out := strings.TrimSpace(expr)
+	out = rewriteUnboundedAIOpsNameSelector(out)
 	orig := out
 
 	// 1) 先把 rate(node_network_*/node_disk_*_bytes) 就地改成平台已算好的速率指标（保留 {} 选择器）。
@@ -1051,7 +1122,7 @@ func healAIDashLegendFor(typ, legend string) string {
 	leg := strings.TrimSpace(legend)
 	if leg == "" {
 		switch typ {
-		case "stat", "gauge", "bargauge", "piechart", "clock":
+		case "stat", "gauge", "bargauge", "piechart", "clock", "logs":
 			return ""
 		default:
 			return "{{instance}}"
@@ -1568,9 +1639,12 @@ func (s *Server) generateDashboardViaAI(userNeed, seedCtx, source, preferredName
 	}
 	metricsCtx := s.metricContextFor(userNeed + " " + seedCtx)
 	sys := "你是资深可观测性架构师、专业 BI 产品经理与看板设计师，为运维平台生成可落地的监控仪表盘。" +
-		"平台指标存于 VictoriaMetrics（Prometheus 兼容），面板用 PromQL。" +
+		"平台指标存于 VictoriaMetrics（Prometheus 兼容），面板用 PromQL；日志面板用 LogQL + Loki。" +
 		"思考从简；最终回复【只】输出一个合法看板 JSON（放在 ```json 代码块），禁止解释性长文、禁止尾逗号与注释。\n" +
-		aiDashSchemaHint + "\n" + aiopsBuiltinMetricsHint
+		aiDashSchemaHint + "\n" + aiopsBuiltinMetricsHint + "\n" + aiDashQueryContractHint
+	if hint := s.lokiSourcesHint(); hint != "" {
+		sys += "\n" + hint
+	}
 	if metricsCtx != "" {
 		sys += "\n\n【可用指标（节选）】\n" + metricsCtx
 	}
@@ -1630,6 +1704,7 @@ func (s *Server) generateDashboardViaAI(userNeed, seedCtx, source, preferredName
 	}
 	d, sw := sanitizeAIDash(spec, preferredName, source)
 	warns = append(warns, sw...)
+	s.resolveAIDashPanelSources(&d, &warns)
 	if len(d.Panels) == 0 {
 		return Dashboard{}, warns, fmt.Errorf("AI 未生成任何有效面板")
 	}
@@ -1757,9 +1832,10 @@ func (s *Server) metricContextFor(need string) string {
 	if !ok || len(all) == 0 {
 		return ""
 	}
+	prefix := "指标来自 VictoriaMetrics。禁止 {__name__=~\"aiops_.*\"}。节选：\n"
 	const cap = 200
 	if len(all) <= cap {
-		return strings.Join(all, ", ")
+		return prefix + strings.Join(all, ", ")
 	}
 	// 词重合打分：需求里的词作为子串命中指标名者优先
 	toks := tokenize(need)
@@ -1784,7 +1860,52 @@ func (s *Server) metricContextFor(need string) string {
 		out = append(out, arr[i].name)
 	}
 	sort.Strings(out)
-	return strings.Join(out, ", ")
+	return prefix + strings.Join(out, ", ")
+}
+
+func (s *Server) lokiSourcesHint() string {
+	if s == nil || s.cfg == nil {
+		return "【已启用 Loki】无。不要生成 type=logs 面板。"
+	}
+	var parts []string
+	for _, ds := range s.cfg.ListDataSources() {
+		if !ds.Enabled || strings.ToLower(ds.Type) != "loki" {
+			continue
+		}
+		label := ds.ID
+		if n := strings.TrimSpace(ds.Name); n != "" && n != ds.ID {
+			label += "（" + n + "）"
+		}
+		parts = append(parts, label)
+	}
+	if len(parts) == 0 {
+		return "【已启用 Loki】无。不要生成 type=logs 面板。"
+	}
+	return "【已启用 Loki】日志面板 datasource 必须用这些 id：" + strings.Join(parts, "、")
+}
+
+func (s *Server) resolveAIDashPanelSources(d *Dashboard, warns *[]string) {
+	if s == nil || s.cfg == nil || d == nil {
+		return
+	}
+	for i := range d.Panels {
+		p := &d.Panels[i]
+		ref := strings.TrimSpace(p.DataSource)
+		if ref == "" {
+			continue
+		}
+		ds, ok := s.cfg.ResolveDataSource(ref)
+		if !ok {
+			if p.Type == "logs" && warns != nil {
+				*warns = append(*warns, "日志面板「"+p.Title+"」数据源 "+ref+" 无法解析为已启用 Loki")
+			}
+			continue
+		}
+		p.DataSource = ds.ID
+		if p.Type == "logs" && strings.ToLower(ds.Type) != "loki" && warns != nil {
+			*warns = append(*warns, "日志面板「"+p.Title+"」数据源不是 Loki（"+ds.Type+"）")
+		}
+	}
 }
 
 func tokenize(s string) []string {
@@ -1812,20 +1933,54 @@ func (s *Server) buildDashboardDigest(d Dashboard) string {
 	b.WriteString("看板：" + d.Name + "\n")
 	vars := dashVarMap(d.Vars)
 	n := 0
+	now := time.Now().Unix()
+	evalAt, stepSec, rangeSec := instantQueryWindow(now-3600, now)
 	for _, p := range d.Panels {
 		if n >= 40 { // 面板数量上限，防上下文膨胀
 			break
 		}
-		if p.Type == "text" || p.Type == "logs" || len(p.Targets) == 0 {
+		if p.Type == "text" || p.Type == "alertlist" || p.Type == "unsupported" {
 			continue
 		}
 		dsID := p.DataSource
 		if dsID == "" {
 			dsID = d.DataSource
 		}
-		expr := substituteVars(p.Targets[0].Expr, vars, 60, 3600)
-		vec, ok := s.dashVector(dsID, expr)
 		title := p.Title
+		if title == "" && len(p.Targets) > 0 {
+			title = p.Targets[0].Expr
+		}
+		if p.Type == "logs" {
+			if len(p.Targets) == 0 {
+				continue
+			}
+			if s.cfg == nil {
+				b.WriteString("- " + title + "：日志数据源不可用\n")
+				n++
+				continue
+			}
+			ds, ok := s.cfg.ResolveDataSource(dsID)
+			if !ok || strings.ToLower(ds.Type) != "loki" || !ds.Enabled {
+				b.WriteString("- " + title + "：日志数据源不可用\n")
+				n++
+				continue
+			}
+			from, to := now-3600, now
+			logql := dashLogQL(p.Targets[0].Expr, vars, from, to)
+			lines, qok := dsLokiRange(ds, logql, unixSecToNs(from), unixSecToNs(to), 20)
+			if !qok {
+				b.WriteString("- " + title + "：日志查询失败\n")
+			} else {
+				b.WriteString(fmt.Sprintf("- %s：最近 1h Loki 命中 %d 条（摘要不含正文）\n", title, len(lines)))
+			}
+			n++
+			continue
+		}
+		if len(p.Targets) == 0 {
+			continue
+		}
+		expr := substituteVars(p.Targets[0].Expr, vars, stepSec, rangeSec)
+		vec, ok := s.dashVectorAt(dsID, expr, evalAt)
 		if title == "" {
 			title = p.Targets[0].Expr
 		}
@@ -1899,7 +2054,7 @@ func fmtDigestVal(v float64, unit string) string {
 // 放到 goroutine，完成/失败后经消息中心（顶栏 🔔）推送弹窗反馈，避免前端长时间卡顿。
 type dashboardAIJob struct {
 	ID          string   `json:"id"`
-	Owner       string   `json:"-"` // 创建者用户名；GET 仅本人或 admin 可见
+	Owner       string   `json:"-"`      // 创建者用户名；GET 仅本人或 admin 可见
 	Status      string   `json:"status"` // queued|running|done|failed
 	Stage       string   `json:"stage"`
 	Progress    int      `json:"progress"`
@@ -2064,12 +2219,13 @@ func (s *Server) handleApplyDashOptimize(w http.ResponseWriter, r *http.Request)
 	spec, ok := decodeAIDashSpec(req.JSON)
 	if !ok {
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok": false,
+			"ok":    false,
 			"error": "未在 AI 回复中找到可解析的看板 JSON。请点「重新生成」，确保先输出完整 ```json（含 panels 数组，勿截断/尾逗号/注释）",
 		})
 		return
 	}
 	d, warns := sanitizeAIDash(spec, cur.Name, cur.Source)
+	s.resolveAIDashPanelSources(&d, &warns)
 	if len(d.Panels) == 0 {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "AI 未给出有效面板，未应用。请重新生成（确保 ```json 内 panels 非空且查询为真实 aiops_* 指标）"})
 		return
@@ -2087,11 +2243,11 @@ func (s *Server) handleApplyDashOptimize(w http.ResponseWriter, r *http.Request)
 	vars := dashVarMap(d.Vars)
 	var emptyTitles []string
 	metricN := 0
+	evalAt, stepSec, rangeSec := instantQueryWindow(0, 0)
 	for _, p := range d.Panels {
-		if p.Type == "text" || p.Type == "logs" || p.Type == "alertlist" || p.Type == "unsupported" || len(p.Targets) == 0 {
+		if p.Type == "text" || p.Type == "alertlist" || p.Type == "unsupported" || len(p.Targets) == 0 {
 			continue
 		}
-		metricN++
 		dsID := p.DataSource
 		if dsID == "" {
 			dsID = d.DataSource
@@ -2099,8 +2255,20 @@ func (s *Server) handleApplyDashOptimize(w http.ResponseWriter, r *http.Request)
 		if dsID == "" {
 			dsID = cur.DataSource
 		}
-		expr := substituteVars(p.Targets[0].Expr, vars, 60, 3600)
-		vec, ok := s.dashVector(dsID, expr)
+		if p.Type == "logs" {
+			if s.cfg == nil {
+				warns = append(warns, "日志面板「"+p.Title+"」缺少可用 Loki 数据源")
+				continue
+			}
+			ds, ok := s.cfg.ResolveDataSource(dsID)
+			if !ok || strings.ToLower(ds.Type) != "loki" || !ds.Enabled {
+				warns = append(warns, "日志面板「"+p.Title+"」缺少可用 Loki 数据源")
+			}
+			continue
+		}
+		metricN++
+		expr := substituteVars(p.Targets[0].Expr, vars, stepSec, rangeSec)
+		vec, ok := s.dashVectorAt(dsID, expr, evalAt)
 		if !ok || len(vec) == 0 {
 			title := p.Title
 			if title == "" {

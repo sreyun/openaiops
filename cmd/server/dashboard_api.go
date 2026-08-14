@@ -129,6 +129,21 @@ func instantQueryWindow(from, to int64) (evalAt, stepSec, rangeSec int64) {
 	return evalAt, stepSec, rangeSec
 }
 
+func unixSecToNs(sec int64) int64 {
+	if sec <= 0 {
+		return 0
+	}
+	return sec * int64(time.Second)
+}
+
+// dashLogQL expands $__range / $__interval from the dashboard time picker, same
+// contract as instant metric panels. Loki start/end already use [from,to]; this
+// keeps unwrap/avg_over_time([$__range]) in sync with the selected window.
+func dashLogQL(expr string, vars map[string]string, from, to int64) string {
+	_, stepSec, rangeSec := instantQueryWindow(from, to)
+	return substituteVars(expr, vars, stepSec, rangeSec)
+}
+
 func validatePanelQueryReq(req *panelQueryReq, withRange, logs bool) error {
 	if req == nil {
 		return fmt.Errorf("查询请求不能为空")
@@ -203,6 +218,7 @@ func healPanelQueryExpr(dsID, expr string) string {
 	if strings.TrimSpace(dsID) != "" {
 		return expr
 	}
+	expr = rewriteUnboundedAIOpsNameSelector(expr)
 	if !dashExprHasNodeMetric(expr) {
 		return expr
 	}
@@ -350,22 +366,13 @@ func (s *Server) handleDashboardQueryLogs(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	ds, ok := s.cfg.GetDataSource(req.DataSource)
+	ds, ok := s.cfg.ResolveDataSource(req.DataSource)
 	if !ok || ds.Type != "loki" || !ds.Enabled {
 		writeJSON(w, http.StatusOK, map[string]any{"lines": []any{}, "available": false})
 		return
 	}
-	now := time.Now()
-	endNs := now.UnixNano()
-	if req.To > 0 {
-		endNs = req.To * 1e9
-	}
-	startNs := now.Add(-time.Hour).UnixNano()
-	if req.From > 0 {
-		startNs = req.From * 1e9
-	}
-	logql := substituteVars(req.Expr, req.Vars, 60, 3600)
-	lines, qok := dsLokiRange(ds, logql, startNs, endNs, req.Limit)
+	logql := dashLogQL(req.Expr, req.Vars, req.From, req.To)
+	lines, qok := dsLokiRange(ds, logql, unixSecToNs(req.From), unixSecToNs(req.To), req.Limit)
 	if !qok {
 		writeJSON(w, http.StatusOK, map[string]any{"lines": []any{}, "available": true, "error": "日志查询失败（LogQL 或 Loki）"})
 		return

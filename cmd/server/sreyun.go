@@ -877,13 +877,7 @@ func (h *SreyunCore) execListRecentChanges(args map[string]any) (string, error) 
 	}
 	now := time.Now().Unix()
 	from := now - int64(hours)*3600
-	var samples []shared.Sample
-	if h.s.vm != nil && h.s.vm.enabled() {
-		samples, _ = h.s.vm.queryHistory(hostID, from, now)
-	}
-	if len(samples) == 0 {
-		samples, _ = h.s.store.GetHistory(hostID, from, now)
-	}
+	samples := h.loadHostSamples(hostID, from, now, "cpu", "memory", "disk", "load")
 	if len(samples) < 2 {
 		return fmt.Sprintf("主机 %s 最近 %d 小时历史数据不足（仅 %d 个样本），无法计算趋势", name, hours, len(samples)), nil
 	}

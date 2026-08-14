@@ -1466,7 +1466,8 @@ async function loadAndRenderCharts() {
         signal: load.signal,
         isCurrent: () => load.isCurrent(),
         method: fcMethod,
-        forecastScope: "host-detail"
+        forecastScope: "host-detail",
+        hostId: DETAIL_HOST_ID
       });
       if (!load.isCurrent() || (en && en.stale)) return;
       DETAIL_SHARED_FC = en;

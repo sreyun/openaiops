@@ -142,7 +142,7 @@ func (h *SreyunCore) execQueryDashboardPanel(args map[string]any) (string, error
 		})}, actions...)
 		return capabilityJSON(capabilityResult{
 			OK: true, Summary: fmt.Sprintf("已渲染面板「%s」趋势（%s）", p.Title, rangeLabel),
-			Data: map[string]any{"dashboard_id": d.ID, "panel_id": p.ID, "type": p.Type, "range": rangeLabel},
+			Data:      map[string]any{"dashboard_id": d.ID, "panel_id": p.ID, "type": p.Type, "range": rangeLabel},
 			UIActions: actions,
 		}), nil
 	case "stat", "gauge", "bargauge":
@@ -157,7 +157,7 @@ func (h *SreyunCore) execQueryDashboardPanel(args map[string]any) (string, error
 		actions = append([]map[string]any{showStatAction(sid, "查看指标", p.Title, val, unit, spark, nil)}, actions...)
 		return capabilityJSON(capabilityResult{
 			OK: true, Summary: fmt.Sprintf("面板「%s」当前值 %.3g %s", p.Title, val, unit),
-			Data: map[string]any{"dashboard_id": d.ID, "panel_id": p.ID, "value": val, "unit": unit},
+			Data:      map[string]any{"dashboard_id": d.ID, "panel_id": p.ID, "value": val, "unit": unit},
 			UIActions: actions,
 		}), nil
 	case "table":
@@ -169,7 +169,7 @@ func (h *SreyunCore) execQueryDashboardPanel(args map[string]any) (string, error
 		actions = append([]map[string]any{showTableAction(tid, "查看表格", p.Title, cols, rows)}, actions...)
 		return capabilityJSON(capabilityResult{
 			OK: true, Summary: fmt.Sprintf("面板「%s」表格 %d 列 / %d 行", p.Title, len(cols), len(rows)),
-			Data: map[string]any{"dashboard_id": d.ID, "panel_id": p.ID, "columns": cols, "row_count": len(rows)},
+			Data:      map[string]any{"dashboard_id": d.ID, "panel_id": p.ID, "columns": cols, "row_count": len(rows)},
 			UIActions: actions,
 		}), nil
 	case "logs":
@@ -181,19 +181,19 @@ func (h *SreyunCore) execQueryDashboardPanel(args map[string]any) (string, error
 		actions = append([]map[string]any{showLogsAction(lid, "查看日志", p.Title, lines)}, actions...)
 		return capabilityJSON(capabilityResult{
 			OK: true, Summary: fmt.Sprintf("面板「%s」日志 %d 行", p.Title, len(lines)),
-			Data: map[string]any{"dashboard_id": d.ID, "panel_id": p.ID, "line_count": len(lines)},
+			Data:      map[string]any{"dashboard_id": d.ID, "panel_id": p.ID, "line_count": len(lines)},
 			UIActions: actions,
 		}), nil
 	case "text":
 		return capabilityJSON(capabilityResult{
 			OK: true, Summary: "文本面板内容如下", Answer: strings.TrimSpace(p.Text),
-			Data: map[string]any{"dashboard_id": d.ID, "panel_id": p.ID, "type": "text"},
+			Data:      map[string]any{"dashboard_id": d.ID, "panel_id": p.ID, "type": "text"},
 			UIActions: actions,
 		}), nil
 	default:
 		return capabilityJSON(capabilityResult{
-			OK: false,
-			Error: fmt.Sprintf("面板类型 %q 暂不支持内嵌渲染（raw=%s），可打开看板查看", p.Type, p.RawType),
+			OK:        false,
+			Error:     fmt.Sprintf("面板类型 %q 暂不支持内嵌渲染（raw=%s），可打开看板查看", p.Type, p.RawType),
 			UIActions: actions,
 		}), nil
 	}
@@ -316,12 +316,12 @@ func (h *SreyunCore) queryPanelLogs(dsID string, p DashPanel, from, to int64) ([
 	if len(p.Targets) == 0 || strings.TrimSpace(p.Targets[0].Expr) == "" {
 		return nil, "面板无查询表达式"
 	}
-	ds, ok := h.s.cfg.GetDataSource(dsID)
+	ds, ok := h.s.cfg.ResolveDataSource(dsID)
 	if !ok || ds.Type != "loki" || !ds.Enabled {
 		return nil, "需要已启用的 Loki 数据源"
 	}
-	logql := substituteVars(p.Targets[0].Expr, nil, 60, to-from)
-	lines, qok := dsLokiRange(ds, logql, from*1e9, to*1e9, 80)
+	logql := dashLogQL(p.Targets[0].Expr, nil, from, to)
+	lines, qok := dsLokiRange(ds, logql, unixSecToNs(from), unixSecToNs(to), 80)
 	if !qok {
 		return nil, "日志查询失败"
 	}

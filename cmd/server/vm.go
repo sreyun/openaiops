@@ -1134,11 +1134,15 @@ func adaptiveHistoryStep(from, to int64) int64 {
 // Prefer stepped query_range (consistent density); fall back to raw export for
 // short windows when MetricsQL selector is unavailable.
 func (v *vmWriter) queryHistory(hostID string, from, to int64) ([]shared.Sample, bool) {
+	return v.queryHistoryFilter(hostID, from, to, nil)
+}
+
+func (v *vmWriter) queryHistoryFilter(hostID string, from, to int64, names []string) ([]shared.Sample, bool) {
 	if !v.enabled() || strings.TrimSpace(hostID) == "" {
 		return nil, false
 	}
 	step := adaptiveHistoryStep(from, to)
-	if out, ok := v.queryHistoryRange(hostID, from, to, step); ok && len(out) > 0 {
+	if out, ok := v.queryHistoryRangeNames(hostID, from, to, step, names); ok && len(out) > 0 {
 		return out, true
 	}
 	// query_range used to be `{__name__=~"aiops_.*"}` which exploded on
@@ -1147,18 +1151,22 @@ func (v *vmWriter) queryHistory(hostID string, from, to int64) ([]shared.Sample,
 	// (~50 names + ephemeral path filter) is the default; /export still
 	// covers ≤24h when the selector is missing.
 	if queryHistoryAllowsExportFallback(to - from) {
-		return v.queryHistoryExport(hostID, from, to)
+		return v.queryHistoryExportNames(hostID, from, to, names)
 	}
 	return nil, false
 }
 
 func (v *vmWriter) queryHistoryExport(hostID string, from, to int64) ([]shared.Sample, bool) {
+	return v.queryHistoryExportNames(hostID, from, to, nil)
+}
+
+func (v *vmWriter) queryHistoryExportNames(hostID string, from, to int64, names []string) ([]shared.Sample, bool) {
 	c := v.cfg.VMConfig()
 	if !c.Enabled || c.URL == "" {
 		return nil, false
 	}
 	q := url.Values{
-		"match[]": {fmt.Sprintf(`{host=%q,__name__=~"%s",path!~"%s"}`, hostID, hostHistoryNameRE(), ephemeralDiskPathRE)},
+		"match[]": {fmt.Sprintf(`{host=%q,__name__=~"%s",path!~"%s"}`, hostID, hostHistoryNameREOf(names), ephemeralDiskPathRE)},
 		"start":   {strconv.FormatInt(from, 10)},
 		"end":     {strconv.FormatInt(to, 10)},
 	}
@@ -1184,7 +1192,11 @@ func (v *vmWriter) queryHistoryExport(hostID string, from, to int64) ([]shared.S
 // queryHistoryRange uses MetricsQL series selector + query_range so long windows
 // stay bounded. Reassembles the same Sample shape as parseVMExport.
 func (v *vmWriter) queryHistoryRange(hostID string, from, to, step int64) ([]shared.Sample, bool) {
-	expr := hostHistoryRangeExpr(hostID)
+	return v.queryHistoryRangeNames(hostID, from, to, step, nil)
+}
+
+func (v *vmWriter) queryHistoryRangeNames(hostID string, from, to, step int64, names []string) ([]shared.Sample, bool) {
+	expr := hostHistoryRangeExprNames(hostID, names)
 	series, ok := v.vmQueryRangeSeries(expr, from, to, step)
 	if !ok || len(series) == 0 {
 		return nil, false

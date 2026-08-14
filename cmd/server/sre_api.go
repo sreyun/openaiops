@@ -107,15 +107,7 @@ func (s *Server) wireSRE() {
 	// SLO evaluation needs metric + check history and can raise incidents.
 	s.slos.incidents = s.incidents
 	s.slos.metricSamples = func(hostID string, fromTs int64) []shared.Sample {
-		now := time.Now().Unix()
-		// Long SLO windows exceed the in-memory tiers, so read from VM (the
-		// authoritative time-series store) when it's enabled.
-		if s.vm.enabled() {
-			if samples, ok := s.vm.queryHistory(hostID, fromTs, now); ok {
-				return samples
-			}
-		}
-		samples, _ := s.store.GetHistory(hostID, fromTs, now)
+		samples, _ := s.loadDurableHostHistory(hostID, fromTs, time.Now().Unix(), nil)
 		return samples
 	}
 	s.slos.checkPoints = s.checks.HistoryOf
@@ -2236,12 +2228,13 @@ func buildAssistSystemPrompt(task, ctxText string) string {
 	case "dashboard_prompt_optimize":
 		return "你是专业 BI 产品经理。把用户需求改写成可直接生成看板的说明书（180~360 字，纯中文正文）。\n" +
 			"思考从简，直接给正文，禁止 JSON/代码块/过程解释。须覆盖：\n" +
-			"① 主题与受众一句；② 8~12 个真实指标名（优先上下文里的可用指标与 aiops_*，严禁臆造 node_*），并逐个标注组件类型（stat/gauge/timeseries/barchart/table/alertlist 等）；\n" +
+			"① 主题与受众一句；② 8~12 个真实指标名（优先上下文里的可用指标与 aiops_*，严禁臆造 node_*，严禁 {__name__=~\"aiops_.*\"}），并逐个标注组件类型（stat/gauge/timeseries/barchart/table/logs/alertlist 等）；\n" +
 			"③ 布局节奏：顶部 KPI → 中部趋势 → 对比/排行 → 明细/告警；④ 下钻统一 instance=~\"$instance\"，概览/排行用 avg()/topk() 且勿强制实例过滤；\n" +
-			"⑤ 单位与阈值提示（percent 水位、Bps 吞吐等）。写完即止。" + ctxBlock
+			"⑤ 单位与阈值提示（percent 水位、Bps 吞吐等）；⑥ 指标走 VictoriaMetrics + PromQL，时间窗用 $__range/$__interval；日志面板用 LogQL 且必须带已启用 Loki 的 datasource id。写完即止。" + ctxBlock
 	case "dashboard_analysis":
 		return "你是资深 SRE。根据看板实时摘要做健康研判（简洁分点，勿长篇）：" +
-			"①总结论；②异常面板与数值；③可能根因；④处置建议；⑤是否建单。只依据给定数据。" + ctxBlock
+			"①总结论；②异常面板与数值；③可能根因；④处置建议；⑤是否建单。只依据给定数据。" +
+			"指标来自 VictoriaMetrics；日志面板摘要只有 Loki 命中条数、不含正文，不要编造日志内容。" + ctxBlock
 	case "dashboard_optimize":
 		return "你是可观测性架构师 + BI 设计师。目标：产出可一键应用的完整合法看板 JSON。\n" +
 			"【输出顺序·硬性】① 先输出唯一完整 ```json 代码块（含 name/vars/panels，至少 8 个面板，勿截断）；" +
@@ -2251,7 +2244,9 @@ func buildAssistSystemPrompt(task, ctxText string) string {
 			"布局紧凑 KPI(stat h=3~4)→水位(gauge h=5)→趋势(timeseries h=6~8)→对比/明细；24 栏铺满；≥5 种 type。\n" +
 			"【图表升级】在 JSON 落地：水位数字 stat→gauge；Top-N→barchart/bargauge；流量路径→sankey；密度→heatmap；要点里点名「X 改为 Y」。\n" +
 			"【精细配置】默认不要写 options.thresholds（阈值带关闭）；需要文案映射写 mappings；时序写 chart_style/smooth/palette/legend。\n" +
-			"【禁忌】概览/排行勿改成 instance=\"$instance\"；下钻用 instance=~\"$instance\"；聚合 legend 勿落成 value；勿臆造 node_*。\n" +
+			"【禁忌】概览/排行勿改成 instance=\"$instance\"；下钻用 instance=~\"$instance\"；聚合 legend 勿落成 value；勿臆造 node_*；" +
+			"勿写 {__name__=~\"aiops_.*\"}；不要把 LogQL 改写成 PromQL。\n" +
+			aiDashQueryContractHint + "\n" +
 			aiDashSchemaHint + "\n" + aiopsBuiltinMetricsHint + ctxBlock
 	case "audit_diagnosis":
 		return "你是安全审计与运维合规专家。以下是平台审计日志片段。请：① 识别异常/高风险操作（越权、异常登录、批量删除、配置篡改、异地/异常时间访问等）；" +

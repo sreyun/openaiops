@@ -122,19 +122,10 @@ func (s *Server) handleHostHistory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	const hostHistoryAPIMaxPts = 600
-	mem, memOK := s.store.GetHistory(id, from, to)
-	if !memOK {
+	out, ok := s.loadDurableHostHistory(id, from, to, nil)
+	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "common.host_not_found")})
 		return
-	}
-
-	// VictoriaMetrics is the durable store for every sample. RAM rings are only
-	// a hot overlay (complete nested disks/gpus for the last few minutes).
-	out := mem
-	if s.vm.enabled() {
-		if vm, ok := s.vm.queryHistory(id, from, to); ok && len(vm) > 0 {
-			out = spliceHistory(vm, recentHistoryTail(mem, memHistoryOverlaySec))
-		}
 	}
 
 	writeJSON(w, http.StatusOK, downsampleSamples(out, hostHistoryAPIMaxPts))

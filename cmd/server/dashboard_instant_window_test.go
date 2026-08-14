@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -72,5 +73,21 @@ func TestSubstituteVarsUsesSelectedRange(t *testing.T) {
 	got := substituteVars(expr, nil, step, rangeSec)
 	if want := "24h"; got != "topk(5, avg_over_time(aiops_cpu_percent["+want+"]))" {
 		t.Errorf("substituted expr = %q, want $__range → %s", got, want)
+	}
+}
+
+func TestDashLogQLUsesSelectedRange(t *testing.T) {
+	now := time.Now().Unix()
+	expr := `{job="nginx"} | unwrap bytes | avg_over_time([$__range])`
+	got := dashLogQL(expr, nil, now-6*3600, now)
+	if !strings.Contains(got, "[6h]") {
+		t.Fatalf("log $__range should follow 6h picker, got %q", got)
+	}
+	got1h := dashLogQL(expr, nil, now-3600, now)
+	if !strings.Contains(got1h, "[1h]") {
+		t.Fatalf("log $__range should follow 1h picker, got %q", got1h)
+	}
+	if unixSecToNs(1700000000) != 1700000000*int64(time.Second) {
+		t.Fatal("unixSecToNs must not go through float64")
 	}
 }

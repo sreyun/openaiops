@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"aiops-monitor/shared"
 )
 
 const metricsForecastMaxSeries = 32
@@ -20,11 +22,12 @@ type metricsForecastReq struct {
 	Step       int64               `json:"step"`        // 0 = auto from median delta
 	NowTS      int64               `json:"now_ts"`      // optional client "now"; padded when series end earlier
 	Method     string              `json:"method"`      // auto | damped-holt | drift | holt-winters | flat | …
+	HostID     string              `json:"host_id"`     // optional: prepend VM lookback for a better fit
 }
 
 type metricsForecastIn struct {
-	Name   string              `json:"name"`
-	Points []metricsFCPointIn  `json:"points"` // [[tsSec, val], ...] or {t|ts|timestamp, v|value}
+	Name   string             `json:"name"`
+	Points []metricsFCPointIn `json:"points"` // [[tsSec, val], ...] or {t|ts|timestamp, v|value}
 }
 
 // metricsFCPointIn accepts both classic [[ts,val]] arrays and object forms
@@ -159,6 +162,18 @@ func (s *Server) handleMetricsForecast(w http.ResponseWriter, r *http.Request) {
 		prep[i].pts = holdForwardTo(prep[i].pts, globalEnd)
 	}
 
+	var lookbackSamples []shared.Sample
+	if hid := strings.TrimSpace(req.HostID); hid != "" && maxSpan > 0 {
+		if u, ok := s.currentUser(r); ok && s.userCanAccessHost(u, hid) {
+			fitFrom := globalEnd - maxSpan - forecastFitLookback(maxSpan)
+			keys := make([]string, 0, len(prep))
+			for _, p := range prep {
+				keys = append(keys, p.name)
+			}
+			lookbackSamples, _ = s.loadDurableHostHistory(hid, fitFrom, globalEnd, vmNamesForMetricKeys(keys))
+		}
+	}
+
 	horizon := req.HorizonSec
 	if horizon <= 0 {
 		horizon = maxSpan
@@ -209,7 +224,8 @@ func (s *Server) handleMetricsForecast(w http.ResponseWriter, r *http.Request) {
 			hz = step * 8
 		}
 		learnKey := "" // UI metrics path: deterministic; no learn-key bias so model switches stay visible
-		fc, mape, r2, method, errMsg := robustForecastWithKey(pts, fromTS, hz, step, learnKey, reqMethod)
+		fitPts := prependHistoryPoints(pts, lookbackSamples, p.name)
+		fc, mape, r2, method, errMsg := robustForecastWithKey(fitPts, fromTS, hz, step, learnKey, reqMethod)
 		if errMsg != "" || len(fc) == 0 {
 			continue
 		}

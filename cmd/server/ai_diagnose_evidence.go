@@ -33,6 +33,15 @@ func (s *Server) gatherLiveDiagnoseEvidence(inc Incident) (extra string, cites [
 				cites = append(cites, RAGCitation{Kind: "metric", Source: "host:" + hid, Title: "host.metrics", Summary: ml})
 				n++
 			}
+			now := time.Now().Unix()
+			if samples, ok := s.loadDurableHostHistory(hid, now-6*3600, now, vmNamesForMetricKeys([]string{"cpu", "memory", "disk", "load"})); ok {
+				if tl := formatHostTrendLine(samples, 6); tl != "" {
+					line := "- " + tl + "（VictoriaMetrics）"
+					b.WriteString(line + "\n")
+					cites = append(cites, RAGCitation{Kind: "metric", Source: "host:" + hid, Title: "host.trend.6h", Summary: line})
+					n++
+				}
+			}
 		}
 	}
 	if s.notifier != nil {

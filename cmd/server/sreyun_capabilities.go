@@ -366,7 +366,13 @@ func (h *SreyunCore) dashboardContextText(id string) (Dashboard, string, error) 
 	if len(b) > 80<<10 {
 		b = b[:80<<10]
 	}
-	return d, string(b), nil
+	ctx := "看板 JSON：\n" + string(b)
+	if h.s != nil {
+		if digest := strings.TrimSpace(h.s.buildDashboardDigest(d)); digest != "" {
+			ctx += "\n\n当前数据（VictoriaMetrics / Loki / 配置数据源，与实时面板同一套查询）：\n" + digest
+		}
+	}
+	return d, ctx, nil
 }
 
 func (h *SreyunCore) execAnalyzeDashboard(args map[string]any) (string, error) {
@@ -439,6 +445,7 @@ func (h *SreyunCore) execApplyDashboardOptimize(args map[string]any) (string, er
 		return capabilityJSON(capabilityResult{OK: false, Error: "未找到可解析的看板 JSON"}), nil
 	}
 	d, warns := sanitizeAIDash(spec, cur.Name, cur.Source)
+	h.s.resolveAIDashPanelSources(&d, &warns)
 	if len(d.Panels) == 0 {
 		return capabilityJSON(capabilityResult{OK: false, Error: "AI 未给出有效面板"}), nil
 	}
@@ -453,7 +460,7 @@ func (h *SreyunCore) execApplyDashboardOptimize(args map[string]any) (string, er
 	if preview {
 		return capabilityJSON(capabilityResult{
 			OK: true, Summary: fmt.Sprintf("预览通过：将写入 %d 个面板", len(d.Panels)),
-			Data: map[string]any{"panels": len(d.Panels), "warnings": warns, "preview_only": true},
+			Data:      map[string]any{"panels": len(d.Panels), "warnings": warns, "preview_only": true},
 			UIActions: []map[string]any{openDashboardAction(cur.ID, cur.Name)},
 		}), nil
 	}

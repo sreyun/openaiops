@@ -3066,9 +3066,10 @@ async function panelDigest(p) {
           return base;
         }).join("\n") + "\n";
       } else {
+        const range = dashRange();
         const r = await fetch(`${API}/dashboards/query-instant`, {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ expr: target.expr, datasource: resolveDS(p), vars: panelVars() })
+          body: JSON.stringify({ expr: target.expr, datasource: resolveDS(p), vars: panelVars(), from: range.from, to: range.to })
         }).then(r => r.json());
         if (r && r.available === false) return s + "（数据源不可用）";
         const vec = (r && r.series) || [];
@@ -3139,7 +3140,7 @@ function dashStructureClient() {
   let s = "看板结构：" + CUR_DASH.name + "\n";
   if ((CUR_DASH.vars || []).length) s += "模板变量：" + CUR_DASH.vars.map(v => v.name + "(" + v.type + ")").join(", ") + "\n";
   (CUR_DASH.panels || []).forEach(p => {
-    s += `- [${p.type}] ${p.title || ""}` + (p.unit ? " 单位=" + p.unit : "") + "\n";
+    s += `- [${p.type}] ${p.title || ""}` + (p.unit ? " 单位=" + p.unit : "") + (p.datasource ? " ds=" + p.datasource : "") + "\n";
     (p.targets || []).forEach(t => { s += "    " + t.expr + "\n"; });
   });
   return s;
@@ -3504,7 +3505,7 @@ async function panelDataSheet(p) {
       } else {
         const r = await fetch(`${API}/dashboards/query-instant`, {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ expr: target.expr, datasource: resolveDS(p), vars: panelVars() })
+          body: JSON.stringify({ expr: target.expr, datasource: resolveDS(p), vars: panelVars(), from: range.from, to: range.to })
         }).then(r => r.json());
         if (r && r.available === false) {
           return { title, columns: ["提示"], rows: [["数据源不可用：" + dsLabel(resolveDS(p))]] };

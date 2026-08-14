@@ -524,3 +524,131 @@ func TestDiffDashboardsForHumanReview(t *testing.T) {
 		t.Fatalf("调整错误: %+v", got.Changed)
 	}
 }
+
+func TestSanitizeAIDashKeepsLogsExprAndDatasource(t *testing.T) {
+	raw := `{
+      "name": "logs",
+      "panels": [
+        {"title":"Nginx 错误","type":"logs","datasource":{"type":"loki","uid":"loki-1"},
+         "targets":[{"expr":"{job=\"nginx\"} |= \"error\""}]},
+        {"title":"CPU","type":"stat","targets":[{"expr":"{__name__=~\"aiops_.*\"}"}]}
+      ]
+    }`
+	var spec aiDashSpec
+	if err := json.Unmarshal([]byte(raw), &spec); err != nil {
+		t.Fatal(err)
+	}
+	d, warns := sanitizeAIDash(spec, "", "ai")
+	if len(d.Panels) != 2 {
+		t.Fatalf("panels=%d warns=%v", len(d.Panels), warns)
+	}
+	by := map[string]DashPanel{}
+	for _, p := range d.Panels {
+		by[p.Title] = p
+	}
+	logs := by["Nginx 错误"]
+	if logs.Type != "logs" {
+		t.Fatalf("type=%q", logs.Type)
+	}
+	if logs.DataSource != "loki-1" {
+		t.Fatalf("logs datasource=%q, want loki-1", logs.DataSource)
+	}
+	if got := logs.Targets[0].Expr; got != `{job="nginx"} |= "error"` {
+		t.Fatalf("LogQL 被改写了: %q", got)
+	}
+	if got := by["CPU"].Targets[0].Expr; got != "aiops_cpu_percent" {
+		t.Fatalf("无界选择器应收成 aiops_cpu_percent: %q", got)
+	}
+	joined := strings.Join(warns, "\n")
+	if !strings.Contains(joined, `aiops_.*`) {
+		t.Fatalf("应提示去掉无界选择器, warns=%v", warns)
+	}
+}
+
+func TestHealImportedDashboardSkipsLogQL(t *testing.T) {
+	logql := `{job="nginx"} |= "error" | json | unwrap bytes | avg_over_time([$__range])`
+	d := Dashboard{
+		Source: "ai",
+		Panels: []DashPanel{
+			{ID: 1, Title: "错误日志", Type: "logs", Targets: []DashTarget{{Expr: logql}}},
+			{ID: 2, Title: "CPU", Type: "stat", Targets: []DashTarget{{Expr: `100 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100`}}},
+		},
+	}
+	if !healImportedDashboard(&d) {
+		t.Fatal("CPU 面板应被纠偏")
+	}
+	var logExpr, cpuExpr string
+	for _, p := range d.Panels {
+		if p.Type == "logs" && len(p.Targets) > 0 {
+			logExpr = p.Targets[0].Expr
+		}
+		if p.Title == "CPU" && len(p.Targets) > 0 {
+			cpuExpr = p.Targets[0].Expr
+		}
+	}
+	if logExpr != logql {
+		t.Fatalf("LogQL 不应被 heal: %q", logExpr)
+	}
+	if cpuExpr != "aiops_cpu_percent" {
+		t.Fatalf("CPU: %q", cpuExpr)
+	}
+}
+
+func TestRewriteUnboundedAIOpsNameSelector(t *testing.T) {
+	cases := map[string]string{
+		`{__name__=~"aiops_.*"}`:                       "aiops_cpu_percent",
+		`{__name__=~"aiops_.*",instance=~"$instance"}`: `aiops_cpu_percent{instance=~"$instance"}`,
+		`sum({__name__=~'aiops_.*'})`:                  "sum(aiops_cpu_percent)",
+		`aiops_cpu_percent{instance=~"$instance"}`:     `aiops_cpu_percent{instance=~"$instance"}`,
+	}
+	for in, want := range cases {
+		if got := rewriteUnboundedAIOpsNameSelector(in); got != want {
+			t.Fatalf("%q → %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestCoerceDashDataSourceRef(t *testing.T) {
+	if got := coerceDashDataSourceRef(json.RawMessage(`"loki-1"`)); got != "loki-1" {
+		t.Fatalf("string: %q", got)
+	}
+	if got := coerceDashDataSourceRef(json.RawMessage(`{"type":"loki","uid":"abc"}`)); got != "abc" {
+		t.Fatalf("grafana object: %q", got)
+	}
+	if got := coerceDashDataSourceRef(json.RawMessage(`{"name":"Loki"}`)); got != "Loki" {
+		t.Fatalf("name: %q", got)
+	}
+	if got := coerceDashDataSourceRef(nil); got != "" {
+		t.Fatalf("nil: %q", got)
+	}
+}
+
+func TestResolveDataSourceByNameAndType(t *testing.T) {
+	cs := &ConfigStore{cfg: ServerConfig{DataSources: []DataSource{
+		{ID: "loki-1", Name: "Loki", Type: "loki", Enabled: true},
+		{ID: "prom-1", Name: "Prom", Type: "prometheus", Enabled: true},
+	}}}
+	if ds, ok := cs.ResolveDataSource("loki-1"); !ok || ds.ID != "loki-1" {
+		t.Fatalf("by id: %+v ok=%v", ds, ok)
+	}
+	if ds, ok := cs.ResolveDataSource("Loki"); !ok || ds.ID != "loki-1" {
+		t.Fatalf("by name: %+v ok=%v", ds, ok)
+	}
+	if ds, ok := cs.ResolveDataSource("loki"); !ok || ds.ID != "loki-1" {
+		t.Fatalf("by type: %+v ok=%v", ds, ok)
+	}
+	if _, ok := cs.ResolveDataSource("vm"); ok {
+		t.Fatal("builtin vm must not resolve to an external DS")
+	}
+}
+
+func TestHealPanelQueryExprStripsUnboundedSelector(t *testing.T) {
+	in := `{__name__=~"aiops_.*",instance=~"$instance"}`
+	got := healPanelQueryExpr("", in)
+	if got != `aiops_cpu_percent{instance=~"$instance"}` {
+		t.Fatalf("got %q", got)
+	}
+	if healPanelQueryExpr("prom-1", in) != in {
+		t.Fatal("external DS must not rewrite")
+	}
+}

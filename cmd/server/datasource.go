@@ -15,16 +15,16 @@ import (
 // DataSource is an external backend operators configure for AI / dashboards /
 // exploration. Observability types use HTTP; SQL types use TCP via lib/pq or MySQL.
 type DataSource struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Type      string `json:"type"` // prometheus | vm | loki | postgres | mysql
-	URL       string `json:"url"`  // HTTP base URL, or SQL host[/db]
-	AuthUser  string `json:"auth_user,omitempty"`
-	AuthPass  string `json:"auth_pass,omitempty"` // masked when read via the API
-	Database  string `json:"database,omitempty"`  // SQL default database/schema
-	Port      int    `json:"port,omitempty"`      // SQL port (5432 / 3306)
-	TLS       string `json:"tls,omitempty"`       // SQL TLS / sslmode hint
-	Params    string `json:"params,omitempty"`    // extra DSN query params
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Type     string `json:"type"` // prometheus | vm | loki | postgres | mysql
+	URL      string `json:"url"`  // HTTP base URL, or SQL host[/db]
+	AuthUser string `json:"auth_user,omitempty"`
+	AuthPass string `json:"auth_pass,omitempty"` // masked when read via the API
+	Database string `json:"database,omitempty"`  // SQL default database/schema
+	Port     int    `json:"port,omitempty"`      // SQL port (5432 / 3306)
+	TLS      string `json:"tls,omitempty"`       // SQL TLS / sslmode hint
+	Params   string `json:"params,omitempty"`    // extra DSN query params
 	// SQLConnectionID optionally reuses credentials from the SQL toolkit connection.
 	SQLConnectionID string `json:"sql_connection_id,omitempty"`
 	Enabled         bool   `json:"enabled"`
@@ -57,6 +57,38 @@ func (cs *ConfigStore) GetDataSource(id string) (DataSource, bool) {
 		if d.ID == id {
 			return d, true
 		}
+	}
+	return DataSource{}, false
+}
+
+func (cs *ConfigStore) ResolveDataSource(ref string) (DataSource, bool) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" || strings.EqualFold(ref, "vm") {
+		return DataSource{}, false
+	}
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	var byName, byType []DataSource
+	lowType := strings.ToLower(ref)
+	for _, d := range cs.cfg.DataSources {
+		if d.ID == ref {
+			return d, true
+		}
+		if !d.Enabled {
+			continue
+		}
+		if strings.EqualFold(d.Name, ref) {
+			byName = append(byName, d)
+		}
+		if strings.ToLower(d.Type) == lowType {
+			byType = append(byType, d)
+		}
+	}
+	if len(byName) == 1 {
+		return byName[0], true
+	}
+	if len(byType) == 1 {
+		return byType[0], true
 	}
 	return DataSource{}, false
 }
