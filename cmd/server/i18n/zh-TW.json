@@ -3,6 +3,7 @@
   "auth.totp_error": "動態驗證碼錯誤，請輸入 Authenticator 目前顯示的新口令",
   "auth.totp_replay": "該動態口令已使用，請等待 Authenticator 重新整理後再輸入新口令",
   "auth.too_many_attempts": "登入嘗試過於頻繁，請 5 分鐘後再試",
+  "api.rate_limited": "請求過於頻繁，請稍後再試",
   "auth.mfa_required_first": "請先完成兩步驗證綁定",
   "auth.insufficient_permission": "權限不足，該操作需要更高權限",
   "auth.invalid_username_format": "使用者名稱僅限字母/數字/-_.，長度 2–32 位",

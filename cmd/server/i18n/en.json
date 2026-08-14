@@ -3,6 +3,7 @@
   "auth.totp_error": "Invalid verification code — enter the current code from your authenticator",
   "auth.totp_replay": "This code was already used — wait for the authenticator to refresh, then enter the new code",
   "auth.too_many_attempts": "Too many login attempts, please try again in 5 minutes",
+  "api.rate_limited": "Too many requests, please try again shortly",
   "auth.mfa_required_first": "Please complete two-factor authentication first",
   "auth.insufficient_permission": "Insufficient permissions, this operation requires a higher privilege",
   "auth.invalid_username_format": "Username may only contain letters/digits/-_. (2-32 chars)",

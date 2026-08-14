@@ -28,7 +28,7 @@ type deskInputMeta struct {
 // deskActionRequest is the JSON body of frame type 'A'.
 type deskActionRequest struct {
 	Action  string `json:"action"`          // cad | chord | type_text | wake | unlock | paste
-	Chord   string `json:"chord,omitempty"` // win_l | ctrl_shift_esc | esc | ctrl_alt_bksp | enter | tab
+	Chord   string `json:"chord,omitempty"` // win_l | ctrl_c | alt_tab | … (see chordVKSequence)
 	Text    string `json:"text,omitempty"`  // for type_text / unlock password / paste
 	User    string `json:"user,omitempty"`  // unlock username (optional)
 	Enter   bool   `json:"enter,omitempty"` // append Enter after type_text / unlock
@@ -316,28 +316,8 @@ func deskDoPaste(inp deskInput, text string) error {
 }
 
 func deskPlayChord(inp deskInput, name string) error {
-	name = strings.ToLower(strings.TrimSpace(name))
-	var keys []int
-	switch name {
-	case "win_l", "lock":
-		keys = []int{0x5B, 0x4C} // LWin + L
-	case "ctrl_shift_esc", "taskmgr":
-		keys = []int{0x11, 0x10, 0x1B} // Ctrl+Shift+Esc
-	case "esc", "escape":
-		keys = []int{0x1B}
-	case "ctrl_alt_bksp":
-		keys = []int{0x11, 0x12, 0x08}
-	case "enter":
-		keys = []int{0x0D}
-	case "tab":
-		keys = []int{0x09}
-	case "win":
-		keys = []int{0x5B}
-	case "ctrl_v", "paste":
-		keys = []int{0x11, 0x56} // Ctrl+V
-	case "ctrl_a", "select_all":
-		keys = []int{0x11, 0x41} // Ctrl+A
-	default:
+	keys := chordVKSequence(name)
+	if len(keys) == 0 {
 		return fmt.Errorf("unknown chord %q", name)
 	}
 	return deskTapKeys(inp, keys)
@@ -412,10 +392,36 @@ func chordVKSequence(name string) []int {
 		return []int{0x09}
 	case "win":
 		return []int{0x5B}
-	case "ctrl_v", "paste":
-		return []int{0x11, 0x56}
 	case "ctrl_a", "select_all":
 		return []int{0x11, 0x41}
+	case "ctrl_c", "copy":
+		return []int{0x11, 0x43}
+	case "ctrl_v", "paste":
+		return []int{0x11, 0x56}
+	case "ctrl_x", "cut":
+		return []int{0x11, 0x58}
+	case "ctrl_z", "undo":
+		return []int{0x11, 0x5A}
+	case "ctrl_y", "redo":
+		return []int{0x11, 0x59}
+	case "ctrl_s", "save":
+		return []int{0x11, 0x53}
+	case "ctrl_f", "find":
+		return []int{0x11, 0x46}
+	case "ctrl_w", "close":
+		return []int{0x11, 0x57}
+	case "alt_tab":
+		return []int{0x12, 0x09}
+	case "alt_f4":
+		return []int{0x12, 0x73}
+	case "alt_enter":
+		return []int{0x12, 0x0D}
+	case "win_e", "explorer":
+		return []int{0x5B, 0x45}
+	case "win_r", "run":
+		return []int{0x5B, 0x52}
+	case "win_d", "show_desktop":
+		return []int{0x5B, 0x44}
 	default:
 		return nil
 	}

@@ -29,6 +29,11 @@ func TestChordVKSequence(t *testing.T) {
 		"tab":            {0x09},
 		"ctrl_v":         {0x11, 0x56},
 		"ctrl_a":         {0x11, 0x41},
+		"ctrl_c":         {0x11, 0x43},
+		"ctrl_x":         {0x11, 0x58},
+		"alt_tab":        {0x12, 0x09},
+		"alt_f4":         {0x12, 0x73},
+		"win_e":          {0x5B, 0x45},
 		"unknown-chord":  nil,
 	}
 	for name, want := range cases {

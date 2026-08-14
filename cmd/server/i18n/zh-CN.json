@@ -3,6 +3,7 @@
   "auth.totp_error": "动态验证码错误，请输入 Authenticator 当前显示的新口令",
   "auth.totp_replay": "该动态口令已使用，请等待 Authenticator 刷新后再输入新口令",
   "auth.too_many_attempts": "登录尝试过于频繁，请 5 分钟后再试",
+  "api.rate_limited": "请求过于频繁，请稍后再试",
   "auth.mfa_required_first": "请先完成两步验证绑定",
   "auth.insufficient_permission": "权限不足，该操作需要更高权限",
   "auth.invalid_username_format": "用户名仅限字母/数字/-_.，长度 2–32 位",
