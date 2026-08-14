@@ -142,7 +142,7 @@ function resolveAnchoredRange(key, rangeH, custom) {
   const spanSec = Math.max(3600, (rangeH > 0 ? rangeH : 1) * 3600);
   let step = Math.floor(spanSec / 480);
   if (step < 5) step = 5;
-  if (step > 300) step = 300;
+  if (step > 3600) step = 3600;
   const prev = window.__rangeAnchors[key];
   if (prev && prev.rangeH === rangeH && prev.from < prev.to) {
     return { from: prev.from, to: prev.to };

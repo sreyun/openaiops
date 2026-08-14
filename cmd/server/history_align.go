@@ -1,11 +1,78 @@
 package main
 
 import (
+	"encoding/json"
 	"sort"
+	"strconv"
 	"strings"
 
 	"aiops-monitor/shared"
 )
+
+// promTsSeconds normalizes a Prometheus/VM timestamp to unix seconds.
+// query_range usually emits seconds; some builds (and /export) emit ms.
+// Non-float JSON (string / json.Number) used to type-assert to 0 and collapse
+// every point onto 1970 — long-range charts then look like scribble.
+func promTsSeconds(v any) (int64, bool) {
+	var f float64
+	switch t := v.(type) {
+	case float64:
+		f = t
+	case int64:
+		f = float64(t)
+	case int:
+		f = float64(t)
+	case json.Number:
+		n, err := t.Float64()
+		if err != nil {
+			return 0, false
+		}
+		f = n
+	case string:
+		n, err := strconv.ParseFloat(t, 64)
+		if err != nil {
+			return 0, false
+		}
+		f = n
+	default:
+		return 0, false
+	}
+	if f <= 0 || f != f { // NaN
+		return 0, false
+	}
+	if f > 1e12 {
+		f /= 1000
+	}
+	return int64(f), true
+}
+
+// historyCoversWindow reports whether samples span the requested [from,to]
+// closely enough to prefer in-memory snapshots over a VM multi-series join.
+func historyCoversWindow(samples []shared.Sample, from, to int64) bool {
+	if len(samples) < 12 || from >= to {
+		return false
+	}
+	first, last := samples[0].Timestamp, samples[len(samples)-1].Timestamp
+	if last < first {
+		first, last = last, first
+	}
+	span := to - from
+	lead := span / 5
+	if lead < 120 {
+		lead = 120
+	}
+	tail := span / 10
+	if tail < 120 {
+		tail = 120
+	}
+	if first > from+lead {
+		return false
+	}
+	if last < to-tail {
+		return false
+	}
+	return true
+}
 
 // histJoinCell is one timestamp while reassembling VM multi-series export /
 // query_range into Sample rows. "set" tracks which scalar fields were explicitly
@@ -118,6 +185,7 @@ func finalizeHistJoin(byTs map[int64]*histJoinCell) []shared.Sample {
 		lastGPUs                             []shared.GPUInfo
 		lastDisks                            []shared.DiskInfo
 		lastConns                            []shared.ConnStat
+		diskMiss                             map[string]int
 	)
 
 	out := make([]shared.Sample, 0, len(cells))
@@ -186,9 +254,17 @@ func finalizeHistJoin(byTs map[int64]*histJoinCell) []shared.Sample {
 		}
 		if len(c.diskFields) > 0 {
 			c.s.Disks = mergeDiskHoldForward(lastDisks, c.s.Disks, c.diskFields)
+			c.s.Disks = pruneUnseenDisks(c.s.Disks, c.diskFields, &diskMiss)
 			lastDisks = cloneDiskInfos(c.s.Disks)
 		} else if len(lastDisks) > 0 {
-			c.s.Disks = cloneDiskInfos(lastDisks)
+			// Other gauges arrived this tick but no disk series — age ephemeral
+			// overlay/PVC paths out instead of unioning them for the whole window.
+			if c.marked("cpu_percent") || c.marked("mem_percent") || c.marked("disk_percent") {
+				c.s.Disks = pruneUnseenDisks(cloneDiskInfos(lastDisks), nil, &diskMiss)
+			} else {
+				c.s.Disks = cloneDiskInfos(lastDisks)
+			}
+			lastDisks = cloneDiskInfos(c.s.Disks)
 		}
 		if c.connSet {
 			c.s.Conns = mergeConnHoldForward(lastConns, c.s.Conns)
@@ -234,6 +310,11 @@ func alignSamplesToStep(samples []shared.Sample, from, to, step int64) []shared.
 		if last == nil {
 			continue
 		}
+		// Do not LOCF across holes larger than 3 steps — that painted a long
+		// flat tail (or plateau) then a scribble when real data resumed.
+		if t-last.Timestamp > 3*step {
+			continue
+		}
 		row := *last
 		row.Timestamp = t
 		out = append(out, row)
@@ -242,6 +323,45 @@ func alignSamplesToStep(samples []shared.Sample, from, to, step int64) []shared.
 		return samples
 	}
 	return out
+}
+
+// histDiskHoldMiss is how many consecutive join cells a mount may miss before
+// we drop it. Covers staggered Prom series (1–2 empty steps) without keeping
+// docker overlay / k8s PVC paths that appeared once in a 6h–14d window.
+const histDiskHoldMiss = 4
+
+func pruneUnseenDisks(disks []shared.DiskInfo, seen map[string]map[string]bool, miss *map[string]int) []shared.DiskInfo {
+	if len(disks) == 0 {
+		return disks
+	}
+	if *miss == nil {
+		*miss = map[string]int{}
+	}
+	kept := make([]shared.DiskInfo, 0, len(disks))
+	present := make(map[string]bool, len(disks))
+	for _, d := range disks {
+		if d.Path == "" {
+			continue
+		}
+		if seen[d.Path] != nil {
+			(*miss)[d.Path] = 0
+			kept = append(kept, d)
+			present[d.Path] = true
+			continue
+		}
+		n := (*miss)[d.Path] + 1
+		(*miss)[d.Path] = n
+		if n <= histDiskHoldMiss {
+			kept = append(kept, d)
+			present[d.Path] = true
+		}
+	}
+	for p, n := range *miss {
+		if !present[p] && n > histDiskHoldMiss {
+			delete(*miss, p)
+		}
+	}
+	return kept
 }
 
 func cloneGPUInfos(in []shared.GPUInfo) []shared.GPUInfo {

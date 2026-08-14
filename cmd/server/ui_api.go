@@ -121,23 +121,22 @@ func (s *Server) handleHostHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Short windows (≤3h): prefer in-memory tiers when they already have enough
-	// complete agent snapshots. Those rows never suffer Prom multi-series join
-	// gaps — the classic "1h/3h 曲线闪烁" case. Longer ranges stay on VM.
-	span := to - from
-	if span > 0 && span <= 3*3600 {
-		if mem, ok := s.store.GetHistory(id, from, to); ok && len(mem) >= 12 {
-			writeJSON(w, http.StatusOK, mem)
-			return
-		}
+	// Prefer in-memory complete snapshots whenever they actually cover the
+	// requested window. hist1m holds 48h and hist5m holds 30d of full agent
+	// rows — they never suffer Prom multi-series join gaps (ephemeral docker
+	// overlay paths, staggered load1/5/15, LOCF flats). The old ≤3h cap sent
+	// 6h/12h/24h/7d to VM even when memory already had clean data, which is
+	// why those chips painted a scribble while 1h/3h looked fine.
+	const hostHistoryAPIMaxPts = 600
+	if mem, ok := s.store.GetHistory(id, from, to); ok && historyCoversWindow(mem, from, to) {
+		writeJSON(w, http.StatusOK, downsampleSamples(mem, hostHistoryAPIMaxPts))
+		return
 	}
 
-	// In VM mode VictoriaMetrics is the authoritative time-series store — read the
-	// trend history from it. Fall back to the in-memory tiers if VM is disabled or
-	// returns nothing (e.g. very recent window not yet queryable).
+	// VM fallback when memory is too short (agent recently restarted) or empty.
 	if s.vm.enabled() {
 		if samples, ok := s.vm.queryHistory(id, from, to); ok {
-			writeJSON(w, http.StatusOK, samples)
+			writeJSON(w, http.StatusOK, downsampleSamples(samples, hostHistoryAPIMaxPts))
 			return
 		}
 	}
@@ -147,7 +146,7 @@ func (s *Server) handleHostHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, samples)
+	writeJSON(w, http.StatusOK, downsampleSamples(samples, hostHistoryAPIMaxPts))
 }
 
 // handleSetCategory sets (or clears, when empty) a manual category override.

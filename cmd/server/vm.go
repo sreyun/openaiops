@@ -704,13 +704,16 @@ func (v *vmWriter) vmQueryRangeSeries(promql string, startTs, endTs, stepSec int
 			if len(pair) < 2 {
 				continue
 			}
-			tsF, _ := pair[0].(float64)
+			tsSec, ok := promTsSeconds(pair[0])
+			if !ok {
+				continue
+			}
 			sv, _ := pair[1].(string)
 			f, err := strconv.ParseFloat(sv, 64)
 			if err != nil {
 				continue // 跳过 NaN/Inf
 			}
-			pts = append(pts, [2]float64{tsF, f})
+			pts = append(pts, [2]float64{float64(tsSec), f})
 		}
 		series = append(series, promMatrix{Labels: r.Metric, Points: pts})
 	}
@@ -1066,8 +1069,10 @@ func adaptiveHistoryStep(from, to int64) int64 {
 	switch {
 	case step < 5:
 		return 5
-	case step > 300:
-		return 300
+	case step > 3600:
+		// Very long custom ranges: 1h buckets. Do not cap at 300s — that
+		// turned 7d/14d into 2000–4000 points and exploded nested disk arrays.
+		return 3600
 	default:
 		return step
 	}
@@ -1141,7 +1146,10 @@ func (v *vmWriter) queryHistoryRange(hostID string, from, to, step int64) ([]sha
 		connProto := ser.Labels["proto"]
 		connState := ser.Labels["state"]
 		for _, pt := range ser.Points {
-			ts := int64(pt[0])
+			ts, ok := promTsSeconds(pt[0])
+			if !ok {
+				continue
+			}
 			applyHistJoinMetric(byTs, ts, name, gpuName, diskPath, connProto, connState, pt[1])
 		}
 	}

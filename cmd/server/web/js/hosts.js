@@ -1160,6 +1160,10 @@ function alignHistoryGaugeSamples(samples) {
   for (const sm of samples || []) {
     if (!sm) continue;
     const row = Object.assign({}, sm);
+    let ts = +row.timestamp;
+    if (!Number.isFinite(ts) || ts <= 0) continue;
+    if (ts > 1e12) ts = Math.floor(ts / 1000); // VM ms → unix sec
+    row.timestamp = ts;
     for (const k of keys) {
       const v = row[k];
       if (v == null || (typeof v === "number" && !isFinite(v))) {
@@ -1169,6 +1173,68 @@ function alignHistoryGaugeSamples(samples) {
       }
     }
     out.push(row);
+  }
+  out.sort((a, b) => a.timestamp - b.timestamp);
+  return out;
+}
+
+/** Keep durable mounts (latest snapshot), not the union of every docker overlay
+ *  that existed anywhere in the window — that union is what made 6h+ disk charts
+ *  look like a rainbow scribble. */
+function stableDiskPaths(samples, cap) {
+  cap = cap || 12;
+  const list = samples || [];
+  if (!list.length) return [];
+  const latest = list[list.length - 1];
+  const fromLatest = (latest.disks || []).filter(d => d && d.path);
+  if (fromLatest.length) {
+    if (fromLatest.length <= cap) return fromLatest.map(d => d.path).sort();
+    return fromLatest
+      .slice()
+      .sort((a, b) => (b.total || 0) - (a.total || 0))
+      .slice(0, cap)
+      .map(d => d.path)
+      .sort();
+  }
+  const counts = Object.create(null);
+  list.forEach(s => (s.disks || []).forEach(d => {
+    if (d && d.path) counts[d.path] = (counts[d.path] || 0) + 1;
+  }));
+  const min = Math.max(3, Math.floor(list.length * 0.25));
+  return Object.keys(counts)
+    .filter(p => counts[p] >= min)
+    .sort((a, b) => counts[b] - counts[a])
+    .slice(0, cap)
+    .sort();
+}
+
+function chartStepForSpan(spanSec) {
+  let step = Math.floor(Math.max(1, spanSec) / 480);
+  if (step < 5) step = 5;
+  if (step > 3600) step = 3600;
+  return step;
+}
+
+function formatChartXLabel(d, spanSec, t0, t1) {
+  const pad = n => String(n).padStart(2, "0");
+  const hhmm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  if (spanSec > 172800) return `${d.getMonth() + 1}/${d.getDate()}`;
+  const crossesDay = Math.floor(t0 / 86400) !== Math.floor(t1 / 86400);
+  if (spanSec > 6 * 3600 || crossesDay) {
+    return `${d.getMonth() + 1}/${d.getDate()} ${hhmm}`;
+  }
+  return hhmm;
+}
+
+function downsampleChartSamples(samples, maxPts) {
+  const n = (samples || []).length;
+  if (!n || n <= maxPts) return samples;
+  const out = new Array(maxPts);
+  const step = (n - 1) / (maxPts - 1);
+  for (let i = 0; i < maxPts; i++) {
+    let idx = Math.round(i * step);
+    if (idx >= n) idx = n - 1;
+    out[i] = samples[idx];
   }
   return out;
 }
@@ -1181,10 +1247,7 @@ function resolveDetailWindow() {
   }
   const rangeH = DETAIL_TIME_RANGE;
   const spanSec = Math.max(3600, rangeH * 3600);
-  // Match backend adaptiveHistoryStep density (~480 pts).
-  let step = Math.floor(spanSec / 480);
-  if (step < 5) step = 5;
-  if (step > 300) step = 300;
+  const step = chartStepForSpan(spanSec);
   if (
     DETAIL_ANCHOR &&
     DETAIL_ANCHOR.hostId === DETAIL_HOST_ID &&
@@ -1275,9 +1338,7 @@ async function loadAndRenderCharts() {
       { key: 'load15', label: I18N.t("section.load_15m_label"), color: '#f2545b', fmt: v => v.toFixed(1) },
     ], null, null, I18N.t("section.load_avg"));
 
-    const diskPathSet = new Set();
-    samples.forEach(s => (s.disks || []).forEach(d => { if (d && d.path) diskPathSet.add(d.path); }));
-    const diskKeys = [...diskPathSet].sort();
+    const diskKeys = stableDiskPaths(samples, 12);
     const latestDisk = {};
     for (let i = samples.length - 1; i >= 0 && Object.keys(latestDisk).length < diskKeys.length; i--) {
       (samples[i].disks || []).forEach(d => { if (d && d.path && !(d.path in latestDisk)) latestDisk[d.path] = d; });
@@ -1302,11 +1363,18 @@ async function loadAndRenderCharts() {
       0, 100, I18N.t("section.disk_usage"));
 
     if (hasGPU) {
+      const latestGpus = ((samples[samples.length - 1] || {}).gpus) || [];
       const gpuNameSet = new Set();
-      samples.forEach(s => (s.gpus || []).forEach(g => {
+      latestGpus.forEach(g => {
         const nm = (g && g.name) ? String(g.name) : "";
         if (nm) gpuNameSet.add(nm);
-      }));
+      });
+      if (!gpuNameSet.size) {
+        samples.forEach(s => (s.gpus || []).forEach(g => {
+          const nm = (g && g.name) ? String(g.name) : "";
+          if (nm) gpuNameSet.add(nm);
+        }));
+      }
       const gpuNames = [...gpuNameSet].sort();
       const gpalette = ['#8b5cf6', '#43b6f0', '#2fd07a', '#f7b23b', '#f2545b', '#e06c9a'];
       const gcolor = idx => gpalette[idx % gpalette.length];
@@ -1723,6 +1791,7 @@ function createChart(canvasId, allSamples, series, yMin = null, yMax = null, opt
     drawChartEmpty(canvas.getContext("2d"), dim.W, dim.H, I18N.t("empty.no_trend_data") || "暂无趋势数据");
     return null;
   }
+  allSamples = downsampleChartSamples(allSamples, 720);
   // Fixed-axis charts with zero finite points → empty state (avoid misleading 50–100% blank axes).
   if (yMin !== null && yMax !== null) {
     let any = false;
@@ -1821,8 +1890,11 @@ function drawChart(state) {
     const lab = series[0] && series[0].fmt ? series[0].fmt(val) : val.toFixed(1);
     maxLabelW = Math.max(maxLabelW, ctx.measureText(lab).width);
   }
+  const tFirst = vis.length ? +(vis[0].timestamp || 0) : 0;
+  const tLast = vis.length ? +(vis[vis.length - 1].timestamp || 0) : 0;
+  const timeSpan = Math.max(0, tLast - tFirst);
   pad.right = 14;
-  pad.bottom = 26;
+  pad.bottom = timeSpan > 6 * 3600 ? 28 : 26;
   pad.left = Math.max(48, Math.ceil(maxLabelW) + 12);
 
   // —— Layout: title + legend reserved ABOVE the plot (never overlay series) ——
@@ -1924,8 +1996,9 @@ function drawChart(state) {
   }
   state._axisT0 = axisT0; state._axisT1 = axisT1;
   const xAt = i => {
-    if (state.nowTs && axisT1 > axisT0) {
-      return pad.left + ((vis[i].timestamp - axisT0) / (axisT1 - axisT0)) * cw;
+    if (axisT1 > axisT0 && vis[i]) {
+      const ts = +(vis[i].timestamp || 0);
+      return pad.left + ((ts - axisT0) / (axisT1 - axisT0)) * cw;
     }
     return pad.left + (n <= 1 ? 0 : (i / (n - 1)) * cw);
   };
@@ -1998,9 +2071,7 @@ function drawChart(state) {
     for (let i = 0; i <= 4; i++) {
       const x = pad.left + (cw / 4) * i;
       const d = new Date((firstTs + (span / 4) * i) * 1000);
-      const lab = span > 172800
-        ? `${d.getMonth() + 1}/${d.getDate()}`
-        : `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+      const lab = formatChartXLabel(d, span, firstTs, axisT1);
       ctx.textAlign = i === 0 ? "left" : (i === 4 ? "right" : "center");
       ctx.fillText(lab, x, h - 6);
     }
@@ -2134,7 +2205,7 @@ function attachChartEvents(canvas) {
   const localIdx = (st, x) => {
     const n = st._n; if (n <= 1) return 0;
     // 预测居中模式下按时间轴命中最近点
-    if (st.nowTs && st._axisT1 > st._axisT0 && st._cw > 0) {
+    if (st._axisT1 > st._axisT0 && st._cw > 0) {
       const ts = st._axisT0 + ((x - st.pad.left) / st._cw) * (st._axisT1 - st._axisT0);
       const vis = st.all.slice(st.i0, st.i1 + 1);
       let best = 0, bestD = Infinity;
@@ -2342,9 +2413,7 @@ function resolveZoomWindow() {
   if (ZOOM_CTX.custom) return { from: ZOOM_CTX.custom.from, to: ZOOM_CTX.custom.to };
   const rangeH = ZOOM_CTX.rangeH || 6;
   const spanSec = Math.max(3600, rangeH * 3600);
-  let step = Math.floor(spanSec / 480);
-  if (step < 5) step = 5;
-  if (step > 300) step = 300;
+  const step = chartStepForSpan(spanSec);
   const now = Math.floor(Date.now() / 1000);
   const to = typeof alignUnixFloor === "function" ? alignUnixFloor(now, step) : now;
   return { from: to - spanSec, to };

@@ -88,6 +88,101 @@ func TestAlignSamplesToStep(t *testing.T) {
 	}
 }
 
+func TestAlignSamplesToStepSkipsLargeGaps(t *testing.T) {
+	in := []shared.Sample{
+		{Timestamp: 100, Metrics: shared.Metrics{Load1: 1}},
+		{Timestamp: 1000, Metrics: shared.Metrics{Load1: 9}},
+	}
+	out := alignSamplesToStep(in, 100, 1000, 5)
+	if len(out) > 20 {
+		t.Fatalf("large hole should not LOCF-fill the grid, got %d points", len(out))
+	}
+	var sawLate bool
+	for _, s := range out {
+		if s.Timestamp >= 990 && s.Load1 == 9 {
+			sawLate = true
+		}
+		if s.Timestamp > 120 && s.Timestamp < 980 && s.Load1 == 1 {
+			t.Fatalf("LOCF across hole at t=%d", s.Timestamp)
+		}
+	}
+	if !sawLate {
+		t.Fatal("expected samples to resume after the hole")
+	}
+}
+
+func TestHistoryCoversWindow(t *testing.T) {
+	mk := func(first, last int64, n int) []shared.Sample {
+		if n < 2 {
+			n = 2
+		}
+		out := make([]shared.Sample, n)
+		span := last - first
+		for i := 0; i < n; i++ {
+			ts := first
+			if n > 1 {
+				ts = first + span*int64(i)/int64(n-1)
+			}
+			out[i] = shared.Sample{Timestamp: ts}
+		}
+		return out
+	}
+	from, to := int64(1_700_000_000), int64(1_700_000_000+6*3600)
+	if !historyCoversWindow(mk(from, to, 360), from, to) {
+		t.Fatal("full 6h window should cover")
+	}
+	if historyCoversWindow(mk(from+4*3600, to, 40), from, to) {
+		t.Fatal("starting 4h late must not count as covering 6h")
+	}
+	if historyCoversWindow(mk(from, to, 5), from, to) {
+		t.Fatal("too few points")
+	}
+}
+
+func TestPromTsSeconds(t *testing.T) {
+	sec, ok := promTsSeconds(float64(1_700_000_000))
+	if !ok || sec != 1_700_000_000 {
+		t.Fatalf("seconds: %d ok=%v", sec, ok)
+	}
+	sec, ok = promTsSeconds(float64(1_700_000_000_000))
+	if !ok || sec != 1_700_000_000 {
+		t.Fatalf("ms: %d ok=%v", sec, ok)
+	}
+	if _, ok := promTsSeconds(0.0); ok {
+		t.Fatal("zero ts must be rejected")
+	}
+	sec, ok = promTsSeconds("1700000000")
+	if !ok || sec != 1_700_000_000 {
+		t.Fatalf("string: %d ok=%v", sec, ok)
+	}
+}
+
+// Ephemeral overlay paths that appear once must not ride hold-forward across a
+// long window (that is what painted a rainbow disk chart on 6h+).
+func TestFinalizeHistJoinPrunesEphemeralDisks(t *testing.T) {
+	byTs := map[int64]*histJoinCell{}
+	base := int64(1_700_000_000)
+	for i := 0; i < 12; i++ {
+		ts := base + int64(i)*60
+		applyHistJoinMetric(byTs, ts, "aiops_cpu_percent", "", "", "", "", 10)
+		applyHistJoinMetric(byTs, ts, "aiops_disk_vol_percent", "", "C:", "", "", 40)
+		if i == 0 {
+			applyHistJoinMetric(byTs, ts, "aiops_disk_vol_percent", "", "/var/lib/docker/overlay2/abc", "", "", 1)
+		}
+	}
+	out := finalizeHistJoin(byTs)
+	if len(out) != 12 {
+		t.Fatalf("samples=%d", len(out))
+	}
+	if len(out[0].Disks) != 2 {
+		t.Fatalf("first sample should have C: + overlay, got %+v", out[0].Disks)
+	}
+	last := out[len(out)-1]
+	if len(last.Disks) != 1 || last.Disks[0].Path != "C:" {
+		t.Fatalf("overlay must be pruned by the end, got %+v", last.Disks)
+	}
+}
+
 // GPU 利用率在 VM 里是带 gpu 标签的独立系列（每块显卡一条），parseVMExport 必须按名
 // 重建每个时间点的 GPUs 数组——否则历史读回缺 gpus，前端画不出「GPU 近期趋势图」（曾漏）。
 func TestVMExportParseGPU(t *testing.T) {

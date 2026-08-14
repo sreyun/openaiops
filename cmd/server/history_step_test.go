@@ -16,7 +16,8 @@ func TestAdaptiveHistoryStep(t *testing.T) {
 		{1, 5, 15},
 		{6, 40, 50},
 		{24, 170, 190},
-		{168, 290, 300},
+		{168, 1200, 1320},
+		{336, 2400, 2700},
 	}
 	for _, c := range cases {
 		step := adaptiveHistoryStep(now-c.hours*3600, now)
