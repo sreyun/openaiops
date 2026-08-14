@@ -87,3 +87,41 @@ func TestQueryHistoryExportFallbackWindow(t *testing.T) {
 		t.Fatal("14d export is unbounded; rely on bounded query_range")
 	}
 }
+
+func TestEphemeralDiskPathKeepsDataRoots(t *testing.T) {
+	// Dedicated docker/containerd data disks are the volumes operators chart.
+	// A bare "/docker/" or "containerd" matcher wrongly dropped them from VM
+	// history once queryHistory became the durable path (v0.19.78).
+	keep := []string{
+		"/",
+		"/var",
+		"/var/lib/docker",
+		"/data/docker",
+		"/var/lib/containerd",
+		"/mnt/containerd-backup",
+		"/var/lib/kubelet",
+		"C:",
+	}
+	for _, p := range keep {
+		if ephemeralDiskPath(p) {
+			t.Fatalf("data-root mount %q must stay in host history", p)
+		}
+	}
+	drop := []string{
+		"/var/lib/docker/overlay2/abc",
+		"/var/lib/docker/overlay/abc",
+		"/var/lib/kubelet/pods/uid/volumes/kubernetes.io~csi/pvc",
+		"/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/1/fs",
+	}
+	for _, p := range drop {
+		if !ephemeralDiskPath(p) {
+			t.Fatalf("ephemeral path %q must be filtered from host history", p)
+		}
+	}
+	if ephemeralDiskPath("") {
+		t.Fatal("empty path (scalar series) must not be treated as ephemeral")
+	}
+	if !strings.Contains(hostHistoryRangeExpr("h1"), ephemeralDiskPathRE) {
+		t.Fatal("range expr must embed the narrowed path filter")
+	}
+}

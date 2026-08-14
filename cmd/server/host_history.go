@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"aiops-monitor/shared"
@@ -32,8 +33,19 @@ var hostHistoryMetricNames = []string{
 }
 
 // ephemeralDiskPathRE drops overlay/kubelet PVC churn from disk_vol series.
+//
+// Keep this narrow. The first cut used `/docker/` and bare `containerd`, which
+// also matched the host's dedicated data-root mounts (`/var/lib/docker`,
+// `/var/lib/containerd`, `/data/docker`, …) — exactly the volumes operators
+// chart. After v0.19.78 made VictoriaMetrics the durable history source, those
+// mounts vanished from every window longer than the ~15m RAM overlay.
+//
 // Series without a path label (scalars) still match a negative path regex.
-const ephemeralDiskPathRE = `.*(overlay2|/docker/|/kubelet/pods|containerd).*`
+const ephemeralDiskPathRE = `.*(overlay2|/docker/overlay|/kubelet/pods|/containerd/io\.containerd).*`
+
+// PromQL label matchers are fully anchored; keep the Go helper on the same
+// pattern so tests exercise what query_range /export actually filter.
+var ephemeralDiskPathMatcher = regexp.MustCompile("^(?:" + ephemeralDiskPathRE + ")$")
 
 func hostHistoryNameRE() string {
 	return strings.Join(hostHistoryMetricNames, "|")
@@ -41,6 +53,12 @@ func hostHistoryNameRE() string {
 
 func hostHistoryRangeExpr(hostID string) string {
 	return fmt.Sprintf(`{__name__=~"%s",host=%q,path!~"%s"}`, hostHistoryNameRE(), hostID, ephemeralDiskPathRE)
+}
+
+// ephemeralDiskPath reports whether a disk_vol path is container/kubelet churn
+// that must stay out of host-history joins.
+func ephemeralDiskPath(path string) bool {
+	return path != "" && ephemeralDiskPathMatcher.MatchString(path)
 }
 
 func queryHistoryAllowsExportFallback(span int64) bool {
