@@ -1101,6 +1101,17 @@ func short(s string) string {
 //  3. **一次一批、留有间隔**。每 20 秒最多 60 条：服务端刚重启完最不需要的就是全网
 //     Agent 同时灌历史。满缓冲（约 2600 条）大致 15 分钟补完，期间实时数据始终正常。
 func (a *Agent) runBackfillDrainerFor(ctx context.Context, t *serverTarget) {
+	// 相位错开：服务端重启后，全网 Agent 的断路器几乎在同一秒闭合，drainer 又是固定周期，
+	// 于是几百台机器会在同一个 20 秒窗里齐刷刷发补传——正好砸在服务端刚起来、最脆弱的
+	// 时刻。用 host_id 派生一个稳定偏移把它们摊开；确定性的（不是随机数），所以同一台机器
+	// 每次启动的相位一致，便于复现问题。
+	if d := backfillDrainPhase(a.identity.HostID + "|" + t.server); d > 0 {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(d):
+		}
+	}
 	ticker := time.NewTicker(agentBackfillDrainPeriod)
 	defer ticker.Stop()
 	for {
@@ -1128,6 +1139,20 @@ func (a *Agent) runBackfillDrainerFor(ctx context.Context, t *serverTarget) {
 		slog.Info("已补传中断期间的采样", "server", t.server, "samples", len(batch),
 			"oldest_ts", batch[0].Ts, "remaining", t.backfillPending())
 	}
+}
+
+// backfillDrainPhase 用 FNV-1a 把一个稳定字符串映射到 [0, drainPeriod) 的偏移。
+func backfillDrainPhase(seed string) time.Duration {
+	var h uint32 = 2166136261
+	for i := 0; i < len(seed); i++ {
+		h ^= uint32(seed[i])
+		h *= 16777619
+	}
+	period := int64(agentBackfillDrainPeriod / time.Millisecond)
+	if period <= 0 {
+		return 0
+	}
+	return time.Duration(int64(h)%period) * time.Millisecond
 }
 
 // postBackfill 把一批补传采样送到服务端（指纹鉴权，与 hardware/netflow 同构）。

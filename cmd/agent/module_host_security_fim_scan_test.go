@@ -116,6 +116,15 @@ func TestCollectFIMChangesContentDiffOnlyForWhitelist(t *testing.T) {
 
 	writeFile(t, audited, "listen 8080\n")
 	writeFile(t, plain, "bbbb\n")
+	// 非白名单文件走「仅元数据」检查（size/mtime/mode），而 "aaaa\n" 与 "bbbb\n"
+	// **尺寸相同**，于是能否发现改动完全取决于 mtime 是否变了。文件系统的 mtime 粒度
+	// 可以粗到 1~2 秒（overlayfs、部分 CI 卷），两次写落在同一个刻度里就得到完全相同的
+	// 元数据 —— 这条用例因此会随机失败，而产品行为是对的：同尺寸同 mtime 的改动本来就
+	// 不可能被仅看元数据的检查发现。显式把 mtime 推开，让断言只考察它真正想考察的东西。
+	bumped := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(plain, bumped, bumped); err != nil {
+		t.Fatal(err)
+	}
 	changes, _ := collectFIMChanges(opts)
 	byPath := changeByPath(changes)
 

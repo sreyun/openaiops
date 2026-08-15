@@ -197,8 +197,12 @@ func (s *Server) handleAgentBackfill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer body.Close()
+	// 解压后再限一次长度。全局 bodyLimit（100 MiB）管的是**压缩后**的字节数，而 gzip
+	// 对同构指标 JSON 能压到 1/50 以上——一个几 MB 的请求体足以解出几百 MB，而这一切
+	// 发生在下面的指纹校验之前。Agent 侧一批最多 60 条（约 200 KB 未压缩），8 MiB 给了
+	// 40 倍余量，仍能把放大攻击挡在内存分配之前。
 	var rep shared.BackfillReport
-	if err := json.NewDecoder(body).Decode(&rep); err != nil {
+	if err := json.NewDecoder(io.LimitReader(body, agentBackfillMaxBodyBytes)).Decode(&rep); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 		return
 	}
@@ -222,6 +226,8 @@ const (
 	// agentBackfillMaxPerReport 是单次补传允许接收的条数上限。Agent 侧本来就分批
 	// （agentBackfillPerBatch=60），这里是对「异常/被篡改的 Agent 一次灌几万条」的防线。
 	agentBackfillMaxPerReport = 240
+	// agentBackfillMaxBodyBytes 是**解压后**允许读取的最大字节数，见 handleAgentBackfill。
+	agentBackfillMaxBodyBytes = 8 << 20
 	// agentBackfillMaxAgeSec 是补传样本的最大回溯窗口，与 Agent 侧的缓冲上限
 	// （agentBackfillMaxAge = 7 天）对齐。两边必须一致：服务端收窄会让 Agent 辛苦攒下
 	// 的老数据在入口被静默丢掉，放宽则等于允许一台时钟错乱的主机往任意历史位置写点。

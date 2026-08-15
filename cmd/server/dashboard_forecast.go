@@ -934,13 +934,17 @@ func resampleForecastSeries(rawTs, rawVals []float64, step int64) (vals, ts []fl
 	n = len(rawTs)
 
 	span := rawTs[n-1] - rawTs[0]
-	steps := int(span/fstep) + 1
-	if steps < 4 {
+	// 先在 float64 上夹住再转 int：90 天窗配上 step=1 会算出 7.7e9，超过 32 位 int 的
+	// 表示范围（linux/386、linux/arm 上 int 是 32 位），直接 int() 会得到负数或环绕值，
+	// 后面 make([]float64, steps) 要么 panic 要么分配出天文数字。
+	gridF := span/fstep + 1
+	if !(gridF >= 4) { // 同时挡住 NaN
 		return rawVals, rawTs, "" // 跨度不足几个栅格，重采样反而丢信息
 	}
-	if steps > forecastMaxFitPoints {
-		steps = forecastMaxFitPoints
+	if gridF > forecastMaxFitPoints {
+		gridF = forecastMaxFitPoints
 	}
+	steps := int(gridF)
 
 	// 栅格锚在**最后一个真实采样点**上向前铺：末点必须精确，
 	// 因为 band 的起点、blendForecastAnchor 的锚点都取 vals[n-1]。

@@ -2811,15 +2811,25 @@ async function openTicketModal(t){
   ["tkLinkHost","tkLinkSLO","tkLinkChange","tkLinkSQL"].forEach(id=>{ const el=$(id); if(el) el.value=""; });
   const attachField=$("tkAttachField");
   if (attachField) attachField.style.display = t ? "none" : "";
-  // Show linked incident info if present
+  // Show linked incident info if present.
+  // CSP 禁内联 onclick（script-src 'self'，无 unsafe-inline）：这里原本把
+  // onclick="openIncidentDetail(...)" 写进 innerHTML，浏览器会直接拒绝执行，
+  // 于是「关联事件 #123」这个链接点了没反应——渲染后再用 data 属性绑定。
   const incInfo=$("tkIncidentInfo");
+  const bindIncLink=()=>{
+    const a=incInfo.querySelector("a[data-inc-id]");
+    if(!a) return;
+    a.addEventListener("click",e=>{ e.preventDefault(); openIncidentDetail(Number(a.dataset.incId)); });
+  };
   if(t && t.incident){
     const inc=t.incident;
-    incInfo.innerHTML=`<div class="hint" style="margin-bottom:8px">🔗 ${I18N.t("sre.linked_incident","关联事件")}：<a href="#" onclick="openIncidentDetail(${inc.id});return false" style="font-weight:600">#${inc.id} ${esc(inc.title)}</a> · <span class="badge ${_sevCls(inc.severity)}">${esc(inc.severity)}</span> · ${esc(inc.hostname||"")} · ${fmtDateTime(inc.created_at)}</div>`;
+    incInfo.innerHTML=`<div class="hint" style="margin-bottom:8px">🔗 ${I18N.t("sre.linked_incident","关联事件")}：<a href="#" data-inc-id="${inc.id}" style="font-weight:600">#${inc.id} ${esc(inc.title)}</a> · <span class="badge ${_sevCls(inc.severity)}">${esc(inc.severity)}</span> · ${esc(inc.hostname||"")} · ${fmtDateTime(inc.created_at)}</div>`;
     incInfo.style.display="";
+    bindIncLink();
   } else if(t && t.incident_id){
-    incInfo.innerHTML=`<div class="hint" style="margin-bottom:8px">🔗 ${I18N.t("sre.linked_incident","关联事件")}：<a href="#" onclick="openIncidentDetail(${t.incident_id});return false" style="font-weight:600">#${t.incident_id}</a></div>`;
+    incInfo.innerHTML=`<div class="hint" style="margin-bottom:8px">🔗 ${I18N.t("sre.linked_incident","关联事件")}：<a href="#" data-inc-id="${t.incident_id}" style="font-weight:600">#${t.incident_id}</a></div>`;
     incInfo.style.display="";
+    bindIncLink();
   } else { incInfo.style.display="none"; }
   const cm=$("tkComments"),cf=$("tkCommentField");
   if(t){

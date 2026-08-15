@@ -109,6 +109,30 @@ func TestAlignOverlayToStepMatchesVMGrid(t *testing.T) {
 	}
 }
 
+// 7d/14d: step (1260s) is longer than the whole overlay window (900s), so the
+// grid holds no point at all. Returning the tail untouched would leave 90 raw
+// 10s points glued onto ~480 sparse ones — the exact density cliff this function
+// exists to remove.
+func TestAlignOverlayToStepCollapsesTailShorterThanOneStep(t *testing.T) {
+	const to = int64(1_800_000_000)
+	const from = to - 7*24*3600
+	step := adaptiveHistoryStep(from, to)
+	if step <= memHistoryOverlaySec {
+		t.Fatalf("precondition: 7d step = %d must exceed the %ds overlay window", step, memHistoryOverlaySec)
+	}
+	var tail []shared.Sample
+	for ts := to - memHistoryOverlaySec; ts <= to; ts += 10 {
+		tail = append(tail, shared.Sample{Timestamp: ts, Metrics: shared.Metrics{CPUPercent: float64(ts % 7)}})
+	}
+	out := alignOverlayToStep(tail, from, to)
+	if len(out) != 1 {
+		t.Fatalf("tail shorter than one step must collapse to the freshest sample, got %d points", len(out))
+	}
+	if out[0].Timestamp != tail[len(tail)-1].Timestamp {
+		t.Fatalf("must keep the NEWEST sample (it carries the nested disk/GPU inventory), got ts=%d", out[0].Timestamp)
+	}
+}
+
 func TestAlignOverlayToStepKeepsShortWindowsDense(t *testing.T) {
 	const to = int64(1_800_000_000)
 	const from = to - 3600 // 1h → step floors at 5-7s, close to the RAM interval

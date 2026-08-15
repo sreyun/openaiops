@@ -167,16 +167,43 @@ func (v *vmWriter) run() {
 	cbuf := make([]vmCheckSample, 0, 256)
 	abuf := make([]vmAPISample, 0, 256)
 	rbuf := make([]string, 0, 256)
+	// rbytes 按**字节**记账，因为 rbuf 的条目大小相差好几个数量级：pushRawLine 送来的是
+	// 单行，writeLabeled 送来的是一整份 exporter 抓取（几千行、几 MB）。只按条数封顶的话，
+	// 4096 条抓取正文就是几个 GB —— 监控服务端会先于 VM 自己死掉。
+	rbytes := 0
+	addRaw := func(line string) {
+		rbuf = append(rbuf, line)
+		rbytes += len(line)
+	}
+	clearRaw := func() { rbuf, rbytes = rbuf[:0], 0 }
+	trimRaw := func() {
+		if rbytes <= vmRawRetryMaxBytes && len(rbuf) <= vmRetryBufMax {
+			return
+		}
+		i, freed := 0, 0
+		for i < len(rbuf)-1 && (rbytes-freed > vmRawRetryMaxBytes || len(rbuf)-i > vmRetryBufMax) {
+			freed += len(rbuf[i])
+			i++
+		}
+		if i > 0 {
+			slog.Warn("VictoriaMetrics 硬件/网络指标重试队列超限，丢弃最旧批次",
+				"dropped", i, "freed_bytes", freed, "kept", len(rbuf)-i)
+			rbuf = append([]string(nil), rbuf[i:]...)
+			rbytes -= freed
+		}
+	}
 	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
 	flush := func() {
 		if v.cfg == nil {
-			buf, cbuf, abuf, rbuf = buf[:0], cbuf[:0], abuf[:0], rbuf[:0]
+			buf, cbuf, abuf = buf[:0], cbuf[:0], abuf[:0]
+			clearRaw()
 			return
 		}
 		c := v.cfg.VMConfig()
 		if !c.Enabled || c.URL == "" {
-			buf, cbuf, abuf, rbuf = buf[:0], cbuf[:0], abuf[:0], rbuf[:0]
+			buf, cbuf, abuf = buf[:0], cbuf[:0], abuf[:0]
+			clearRaw()
 			return
 		}
 		if len(buf) > 0 && v.push(c.URL, buf) {
@@ -196,10 +223,9 @@ func (v *vmWriter) run() {
 			abuf = append([]vmAPISample(nil), abuf[len(abuf)-vmRetryBufMax:]...)
 		}
 		if len(rbuf) > 0 && v.pushRaw(c.URL, rbuf) {
-			rbuf = rbuf[:0]
-		} else if len(rbuf) > vmRetryBufMax {
-			slog.Warn("VictoriaMetrics 硬件/网络指标重试队列过长，丢弃最旧一批", "kept", vmRetryBufMax, "dropped", len(rbuf)-vmRetryBufMax)
-			rbuf = append([]string(nil), rbuf[len(rbuf)-vmRetryBufMax:]...)
+			clearRaw()
+		} else {
+			trimRaw()
 		}
 	}
 	drain := func() {
@@ -212,7 +238,7 @@ func (v *vmWriter) run() {
 			case as := <-v.apiCh:
 				abuf = append(abuf, as)
 			case raw := <-v.rawCh:
-				rbuf = append(rbuf, raw)
+				addRaw(raw)
 			default:
 				return
 			}
@@ -240,8 +266,8 @@ func (v *vmWriter) run() {
 				flush()
 			}
 		case raw := <-v.rawCh:
-			rbuf = append(rbuf, raw)
-			if len(rbuf) >= 256 {
+			addRaw(raw)
+			if len(rbuf) >= 256 || rbytes >= vmRawFlushBytes {
 				flush()
 			}
 		case <-t.C:
@@ -251,6 +277,13 @@ func (v *vmWriter) run() {
 }
 
 const vmRetryBufMax = 4096
+
+const (
+	// vmRawRetryMaxBytes 封顶硬件/SNMP/NetFlow/抓取指标的重试积压（按字节，理由见 rbytes）。
+	vmRawRetryMaxBytes = 32 << 20
+	// vmRawFlushBytes 让一份大抓取不必等满 256 条就发出去。
+	vmRawFlushBytes = 4 << 20
+)
 
 // vmImportDone reports whether a batch is FINISHED WITH — i.e. the caller may
 // clear it. It is deliberately not the same as "succeeded".

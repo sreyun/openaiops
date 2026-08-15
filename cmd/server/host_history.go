@@ -204,6 +204,18 @@ func alignOverlayToStep(tail []shared.Sample, from, to int64) []shared.Sample {
 	if step <= 1 {
 		return tail
 	}
+	// 尾巴比一个 step 还短时，栅格上一个点都落不下——7d/14d 窗就是这样（step 已经
+	// 1260s，而实时尾巴只有 memHistoryOverlaySec=900s）。alignSamplesToStep 遇到这种
+	// 情况会**原样返回**，于是 480 个稀疏点后面挂着 90 个 10 秒间隔的密点，正是要消除的
+	// 密度断层。此时只保留最新的一个样本：它照样带着嵌套的磁盘/GPU 清单（上游把 overlay
+	// 窗口收窄就是为了拿到 histRaw 这份清单），又不会在图的右端糊成一团。
+	start := tail[0].Timestamp
+	if rem := start % step; rem != 0 {
+		start += step - rem
+	}
+	if start > to {
+		return tail[len(tail)-1:]
+	}
 	return alignSamplesToStep(tail, tail[0].Timestamp, to, step)
 }
 

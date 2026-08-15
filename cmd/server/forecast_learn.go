@@ -48,12 +48,13 @@ type forecastCalibration struct {
 }
 
 type forecastLearnStore struct {
-	mu     sync.Mutex
-	path   string
-	Ledgers []forecastLedger                `json:"ledgers"`
-	Calibs  map[string]*forecastCalibration `json:"calibs"`
-	dirty  bool
-	lastAI int64
+	mu       sync.Mutex
+	path     string
+	Ledgers  []forecastLedger                `json:"ledgers"`
+	Calibs   map[string]*forecastCalibration `json:"calibs"`
+	dirty    bool
+	lastAI   int64
+	lastSave time.Time
 }
 
 var fcLearn = &forecastLearnStore{Calibs: map[string]*forecastCalibration{}}
@@ -113,14 +114,33 @@ func (st *forecastLearnStore) load() {
 	}
 }
 
+// saveLockedThrottled 用于**高频、可丢**的写入路径（记台账）。调用方必须持有 st.mu。
+//
+// 台账在每一次 AI 预测调用时都会追加一条，而 saveLocked 会把整份 Ledgers+Calibs
+// 重新序列化落盘（400 条台账 × 24 个采样点，约 1 MB），还是在锁里同步做的。接线之前
+// 这条路径根本没被调用过，所以代价看不出来；现在它活了，就变成了 AI 请求路径上的一次
+// 兆字节级同步写。台账只是学习用的账本，掉几十秒不影响正确性，节流到 15 秒即可。
+// 校准结果（evaluateForecastLedgers）仍走无节流的 saveLocked，那才是真正要落住的东西。
+func (st *forecastLearnStore) saveLockedThrottled(minGap time.Duration) {
+	if !st.dirty {
+		return
+	}
+	if !st.lastSave.IsZero() && time.Since(st.lastSave) < minGap {
+		return
+	}
+	st.saveLocked()
+}
+
 func (st *forecastLearnStore) saveLocked() {
 	if st.path == "" || !st.dirty {
 		return
 	}
-	raw, err := json.MarshalIndent(map[string]any{
+	// Marshal 而不是 MarshalIndent：这是机器读写的账本，不是给人看的配置，
+	// 缩进白白多出约 40% 的体积与序列化时间。
+	raw, err := json.Marshal(map[string]any{
 		"ledgers": st.Ledgers,
 		"calibs":  st.Calibs,
-	}, "", "  ")
+	})
 	if err != nil {
 		return
 	}
@@ -130,6 +150,7 @@ func (st *forecastLearnStore) saveLocked() {
 	}
 	_ = os.Rename(tmp, st.path)
 	st.dirty = false
+	st.lastSave = time.Now()
 }
 
 func (st *forecastLearnStore) getCalib(key string) *forecastCalibration {
@@ -243,7 +264,7 @@ func (s *Server) noteForecastLedger(key, method, expr string, band []forecastPoi
 		fcLearn.Ledgers = fcLearn.Ledgers[len(fcLearn.Ledgers)-forecastLedgerMax:]
 	}
 	fcLearn.dirty = true
-	fcLearn.saveLocked()
+	fcLearn.saveLockedThrottled(15 * time.Second)
 }
 
 func (s *Server) finalizeForecastWithLearning(key, method, expr string, band []forecastPoint, nowTS, horizon, step int64, anchor float64) ([]forecastPoint, string, int) {
