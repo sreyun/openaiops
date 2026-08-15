@@ -1,0 +1,109 @@
+name: Security · 代码安全门 (SAST + 依赖漏洞 + 密钥扫描 + SBOM)
+
+# 每次 push / PR / 每周定时，跑一遍代码安全门。
+# 目标：面向企业交付，做到"每次提交都过安全扫描"，并产出 SBOM 供客户审计。
+#
+# 门禁策略（分级，避免一上来全红）：
+#   硬门槛（失败即挡）：go vet、race 测试、govulncheck 依赖漏洞、gitleaks 密钥泄露
+#   报告级（SARIF 上传 Security 页，先看后收）：gosec、staticcheck
+# 随着存量问题清零，可把 gosec/staticcheck 逐步提升为硬门槛。
+
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+  schedule:
+    - cron: '0 2 * * 1'   # 每周一 02:00 UTC 复扫，捕获新披露的 CVE
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write   # 允许上传 SARIF 到 Security 页
+
+env:
+  GO_VERSION: '1.26'   # CI 用官方补丁版 Go（修复 GO-2026-5856 等 stdlib CVE）
+
+jobs:
+  vet-test:
+    name: go vet + 单测（硬门槛）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - run: go vet ./...
+      - run: go test ./...
+
+  race:
+    name: race 竞态检测（报告级；清零后可转硬门槛）
+    runs-on: ubuntu-latest
+    continue-on-error: true   # Linux runner 有 cgo；存量竞态清零前先不挡
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - run: go test -race ./...
+
+  govulncheck:
+    name: 依赖 + stdlib 漏洞扫描（硬门槛）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run govulncheck
+        uses: golang/govulncheck-action@v1
+        with:
+          go-version-input: ${{ env.GO_VERSION }}
+
+  gitleaks:
+    name: 密钥泄露扫描（硬门槛）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 全历史扫描，防历史提交里遗留密钥
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  gosec:
+    name: gosec SAST（报告级 → Security 页）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run gosec
+        uses: securego/gosec@master
+        with:
+          args: '-no-fail -fmt sarif -out gosec.sarif -exclude-dir=vendor ./...'
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: gosec.sarif
+          category: gosec
+
+  staticcheck:
+    name: staticcheck 静态分析（报告级）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - uses: dominikh/staticcheck-action@v1
+        with:
+          version: latest
+          install-go: false
+
+  sbom:
+    name: 生成 SBOM（CycloneDX，供企业交付/审计）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          format: cyclonedx-json
+          output-file: sbom.cyclonedx.json
+          artifact-name: sbom.cyclonedx.json

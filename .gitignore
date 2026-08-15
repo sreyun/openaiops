@@ -92,6 +92,8 @@ frontend/
 .github/workflows/*
 !.github/workflows/release.yml
 !.github/workflows/ci.yml
+!.github/workflows/codeql.yml
+!.github/workflows/security.yml
 Makefile
 
 # 运行时数据目录（不提交）

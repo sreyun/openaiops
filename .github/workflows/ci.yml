@@ -2,14 +2,8 @@ name: CI · Go tests
 
 on:
   push:
-    branches: [main, master]
-    paths:
-      - "cmd/server/**"
-      - "cmd/agent/**"
-      - "shared/**"
-      - "go.mod"
-      - "go.sum"
-      - ".github/workflows/ci.yml"
+    tags:
+      - 'v*'
   pull_request:
     paths:
       - "cmd/server/**"

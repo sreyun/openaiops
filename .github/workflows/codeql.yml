@@ -1,0 +1,38 @@
+name: CodeQL · 深度 SAST (Go)
+
+# GitHub 官方语义化 SAST，比 gosec 更深（数据流/污点分析），结果进 Security 页。
+# 面向企业交付的"我们做静态安全分析"背书。
+
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+  schedule:
+    - cron: '0 3 * * 1'   # 每周一 03:00 UTC
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  analyze:
+    name: CodeQL 分析 (Go)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'   # 用官方补丁版 Go 构建，避免 stdlib CVE
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: go
+          queries: security-and-quality
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:go"
