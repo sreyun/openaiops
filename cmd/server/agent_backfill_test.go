@@ -3,6 +3,9 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
+
+	"aiops-monitor/shared"
 )
 
 func TestBackfillClockSkewIgnoresAbsurdOffsets(t *testing.T) {
@@ -53,6 +56,75 @@ func TestBackfillRetentionWindowIsSevenDays(t *testing.T) {
 	if agentBackfillMaxAgeSec != 7*24*3600 {
 		t.Fatalf("server backfill window = %ds, agent buffers 7 days", agentBackfillMaxAgeSec)
 	}
+}
+
+// When VictoriaMetrics is down/disabled, ingest must report unavailable so the
+// HTTP handler can 503. A 200 with accepted:0 made Agents discard their offline
+// buffer during the exact recovery window backfill exists to cover.
+func TestIngestAgentBackfillUnavailableWhenVMDisabled(t *testing.T) {
+	cs, err := NewConfigStore(t.TempDir()+"/config.json", nil)
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	// Default config has VM disabled — ingest must refuse so Agents keep their buffer.
+	s := &Server{vm: newVMWriter(cs)}
+	accepted, dropped, ok := s.ingestAgentBackfill(shared.BackfillReport{
+		HostID:  "h1",
+		Samples: []shared.BackfillSample{{Ts: time.Now().Unix(), Metrics: shared.Metrics{CPUPercent: 1}}},
+	})
+	if ok {
+		t.Fatal("disabled VM must be unavailable")
+	}
+	if accepted != 0 || dropped != 0 {
+		t.Fatalf("unavailable ingest must not claim progress: accepted=%d dropped=%d", accepted, dropped)
+	}
+	if accepted, dropped, ok = (&Server{}).ingestAgentBackfill(shared.BackfillReport{
+		HostID:  "h1",
+		Samples: []shared.BackfillSample{{Ts: time.Now().Unix()}},
+	}); ok || accepted != 0 || dropped != 0 {
+		t.Fatal("nil vmWriter must also be unavailable")
+	}
+}
+
+func TestIngestAgentBackfillStopsWhenQueueFull(t *testing.T) {
+	cs, err := NewConfigStore(t.TempDir()+"/config.json", nil)
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	cs.mu.Lock()
+	cs.cfg.VM = VMConfig{Enabled: true, URL: "http://vm.invalid:8428"}
+	cs.mu.Unlock()
+
+	// Tiny channel so the second sample overflows.
+	v := &vmWriter{cfg: cs, ch: make(chan vmSample, 1)}
+	s := &Server{vm: v, store: NewStore(), cfg: cs}
+	now := time.Now().Unix()
+	rep := shared.BackfillReport{
+		HostID:     "h1",
+		ReportedAt: now,
+		Samples: []shared.BackfillSample{
+			{Ts: now - 20, Metrics: shared.Metrics{CPUPercent: 1}},
+			{Ts: now - 10, Metrics: shared.Metrics{CPUPercent: 2}},
+			{Ts: now - 5, Metrics: shared.Metrics{CPUPercent: 3}},
+		},
+	}
+	// Seed host identity; ingest itself does not require fingerprint.
+	s.store.UpsertAuthenticated(shared.Report{
+		HostID: "h1", Hostname: "host1", Fingerprint: "fp",
+		Metrics: shared.Metrics{CPUPercent: 0},
+	}, "fp")
+
+	accepted, dropped, ok := s.ingestAgentBackfill(rep)
+	if !ok {
+		t.Fatal("enabled VM must be available")
+	}
+	if accepted != 1 {
+		t.Fatalf("only the first sample fits the 1-slot queue, accepted=%d", accepted)
+	}
+	if dropped != 0 {
+		t.Fatalf("overflow must not be counted as permanent dropped, dropped=%d", dropped)
+	}
+	// Agent acks accepted+dropped=1 and retries the remaining two.
 }
 
 // The rescue bootstrap must NOT put the Scheduled Task first.

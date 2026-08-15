@@ -139,22 +139,26 @@ func (v *vmWriter) enqueueCheck(cs vmCheckSample) {
 }
 
 // enqueue queues one sample for VM (no-op + non-blocking when VM is disabled or
-// the buffer is full — VM must never slow down ingest).
-func (v *vmWriter) enqueue(hostID, hostname, category string, ts int64, m shared.Metrics) {
+// the buffer is full — VM must never slow down ingest). Returns whether the
+// sample was accepted into the write queue. Callers that can retry (Agent
+// backfill) MUST check the return value; fire-and-forget live ingest may ignore it.
+func (v *vmWriter) enqueue(hostID, hostname, category string, ts int64, m shared.Metrics) bool {
 	if v == nil {
-		return
+		return false
 	}
 	c := v.cfg.VMConfig()
 	if !c.Enabled || c.URL == "" {
-		return
+		return false
 	}
 	select {
 	case v.ch <- vmSample{hostID, hostname, category, ts, m}:
+		return true
 	default: // drop on overflow rather than block ingest
 		n := v.dropped.Add(1)
 		if n == 1 || n%200 == 0 {
 			slog.Warn("VictoriaMetrics 写入队列已满，样本被丢弃（历史以 VM 为准，丢点会在曲线上形成空洞）", "dropped", n, "host", hostID)
 		}
+		return false
 	}
 }
 

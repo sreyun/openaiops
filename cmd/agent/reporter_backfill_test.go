@@ -123,3 +123,23 @@ func TestBackfillDropsProcessNames(t *testing.T) {
 		t.Fatal("process names must be stripped before buffering")
 	}
 }
+
+func TestParseBackfillAckKeepsUnackedTail(t *testing.T) {
+	done, err := parseBackfillAck([]byte(`{"status":"ok","accepted":2,"dropped":1}`), 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done != 3 {
+		t.Fatalf("done=%d want 3 (accepted+dropped); tail must stay buffered", done)
+	}
+	if _, err := parseBackfillAck([]byte(`not-json`), 5); err == nil {
+		t.Fatal("unparseable 2xx body must error so the Agent retries instead of wiping the buffer")
+	}
+	done, err = parseBackfillAck([]byte(`{"accepted":9,"dropped":0}`), 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done != 5 {
+		t.Fatalf("done must clamp to batch length, got %d", done)
+	}
+}

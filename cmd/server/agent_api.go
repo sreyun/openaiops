@@ -214,7 +214,14 @@ func (s *Server) handleAgentBackfill(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "fingerprint mismatch"})
 		return
 	}
-	accepted, dropped := s.ingestAgentBackfill(rep)
+	accepted, dropped, ok := s.ingestAgentBackfill(rep)
+	if !ok {
+		// VictoriaMetrics is the only sink for backfill. 200+accepted:0 used to
+		// make Agents discard their whole offline buffer during VM bring-up —
+		// the exact window backfill exists to cover. 503 keeps the batch on the Agent.
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "timeseries store unavailable"})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "accepted": accepted, "dropped": dropped})
 }
 
@@ -248,9 +255,17 @@ const (
 //
 //  3. **对时间戳做硬校验**。未来时间、超过一天的陈旧点、荒谬的偏移一律丢弃：VM 的
 //     保留期是 100 年，一条写歪的点会永久留在那里，且没有任何界面能发现它。
-func (s *Server) ingestAgentBackfill(rep shared.BackfillReport) (accepted, dropped int) {
-	if s == nil || s.vm == nil || len(rep.Samples) == 0 || !s.vm.enabled() {
-		return 0, 0
+//
+// ok=false means the timeseries sink is unavailable — the handler must NOT
+// acknowledge the batch (Agent keeps it). accepted only counts samples that
+// actually entered the VM write queue; a full queue stops the loop so the
+// Agent can retry the remainder (accepted+dropped prefix is durable progress).
+func (s *Server) ingestAgentBackfill(rep shared.BackfillReport) (accepted, dropped int, ok bool) {
+	if s == nil || s.vm == nil || !s.vm.enabled() {
+		return 0, 0, false
+	}
+	if len(rep.Samples) == 0 {
+		return 0, 0, true
 	}
 	now := time.Now().Unix()
 	skew := backfillClockSkew(rep.ReportedAt, now)
@@ -259,24 +274,29 @@ func (s *Server) ingestAgentBackfill(rep shared.BackfillReport) (accepted, dropp
 	if h := s.hostByID(rep.HostID); h != nil && h.Hostname != "" {
 		hostname = h.Hostname
 	}
-	for i, b := range rep.Samples {
+	for _, b := range rep.Samples {
 		if accepted >= agentBackfillMaxPerReport {
-			dropped += len(rep.Samples) - i
+			// Over the per-request cap: stop. Do NOT count the rest as dropped —
+			// the Agent will resend them on the next drain tick.
 			break
 		}
-		ts, ok := backfillTimestamp(b.Ts, skew, now)
-		if !ok {
+		ts, tsOK := backfillTimestamp(b.Ts, skew, now)
+		if !tsOK {
 			dropped++
 			continue
 		}
-		s.vm.enqueue(rep.HostID, hostname, cat, ts, b.Metrics)
+		if !s.vm.enqueue(rep.HostID, hostname, cat, ts, b.Metrics) {
+			// Queue full / sink raced to disabled: progress so far is real;
+			// remaining samples stay with the Agent via accepted+dropped prefix.
+			break
+		}
 		accepted++
 	}
 	if accepted > 0 || dropped > 0 {
 		slog.Info("已接收 Agent 补传采样", "host", shortID(rep.HostID),
 			"accepted", accepted, "dropped", dropped, "skew_sec", skew)
 	}
-	return accepted, dropped
+	return accepted, dropped, true
 }
 
 // backfillClockSkew 返回把 Agent 本地时间换算到服务端时间轴的偏移量。

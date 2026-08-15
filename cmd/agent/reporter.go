@@ -1120,18 +1120,27 @@ func (a *Agent) runBackfillDrainerFor(ctx context.Context, t *serverTarget) {
 		if len(batch) == 0 {
 			continue
 		}
-		if err := a.postBackfill(t, batch); err != nil {
+		done, err := a.postBackfill(t, batch)
+		if err != nil {
 			t.returnBackfill(batch)
 			slog.Warn("补传失败，样本已放回缓冲等待下一轮", "server", t.server, "samples", len(batch), "err", err)
 			continue
 		}
-		slog.Info("已补传中断期间的采样", "server", t.server, "samples", len(batch),
-			"oldest_ts", batch[0].Ts, "remaining", t.backfillPending())
+		if done < len(batch) {
+			// Prefix was accepted or permanently rejected; keep the unacked tail.
+			t.returnBackfill(batch[done:])
+		}
+		if done > 0 {
+			slog.Info("已补传中断期间的采样", "server", t.server, "samples", done,
+				"oldest_ts", batch[0].Ts, "remaining", t.backfillPending())
+		}
 	}
 }
 
 // postBackfill 把一批补传采样送到服务端（指纹鉴权，与 hardware/netflow 同构）。
-func (a *Agent) postBackfill(t *serverTarget, batch []shared.BackfillSample) error {
+// 返回值 done 是本批可以永久从缓冲里拿掉的条数（accepted + dropped，从队首计）；
+// 小于 len(batch) 时调用方必须把尾部放回缓冲——否则队列满/半成功时会丢历史。
+func (a *Agent) postBackfill(t *serverTarget, batch []shared.BackfillSample) (done int, err error) {
 	rep := shared.BackfillReport{
 		HostID:     t.hostIDOr(a.identity.HostID),
 		Hostname:   a.identity.Hostname,
@@ -1140,7 +1149,7 @@ func (a *Agent) postBackfill(t *serverTarget, batch []shared.BackfillSample) err
 	}
 	body, err := json.Marshal(rep)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	// 补传包比实时包大一到两个数量级，压缩收益明显（同构指标 JSON 通常能压到 1/10）。
 	buf := getBytesBuf()
@@ -1156,7 +1165,7 @@ func (a *Agent) postBackfill(t *serverTarget, batch []shared.BackfillSample) err
 	}
 	req, err := http.NewRequest("POST", t.server+"/api/v1/agent/backfill", reader)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if enc != "" {
@@ -1167,18 +1176,46 @@ func (a *Agent) postBackfill(t *serverTarget, batch []shared.BackfillSample) err
 	}
 	resp, err := t.httpc.Do(req)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 	if resp.StatusCode == http.StatusNotFound {
 		// 老服务端没有这个端点：补传对它没有意义，丢掉这批而不是无限重试。
-		return nil
+		return len(batch), nil
 	}
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("服务端返回状态码 %d", resp.StatusCode)
+		return 0, fmt.Errorf("服务端返回状态码 %d", resp.StatusCode)
 	}
-	return nil
+	return parseBackfillAck(respBody, len(batch))
+}
+
+// parseBackfillAck reads accepted+dropped from a 2xx backfill response.
+// Only the prefix of that length may leave the Agent buffer; anything beyond
+// was not queued (full VM channel / per-request cap) and must be retried.
+func parseBackfillAck(body []byte, batchLen int) (int, error) {
+	if batchLen <= 0 {
+		return 0, nil
+	}
+	var out struct {
+		Accepted int `json:"accepted"`
+		Dropped  int `json:"dropped"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		// Unparseable 2xx must not wipe the buffer — retry instead of silent loss.
+		return 0, fmt.Errorf("backfill ack: %w", err)
+	}
+	if out.Accepted < 0 {
+		out.Accepted = 0
+	}
+	if out.Dropped < 0 {
+		out.Dropped = 0
+	}
+	done := out.Accepted + out.Dropped
+	if done > batchLen {
+		done = batchLen
+	}
+	return done, nil
 }
 
 // postHardwareReport sends a Redfish hardware snapshot to all server targets.
