@@ -122,10 +122,18 @@ func (s *Server) handleHostHistory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	const hostHistoryAPIMaxPts = 600
-	out, ok := s.loadDurableHostHistory(id, from, to, nil)
+	out, source, ok := s.loadDurableHostHistorySource(id, from, to, nil)
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "common.host_not_found")})
 		return
+	}
+	// The body stays a bare array (the classic console does Array.isArray on it),
+	// so provenance rides on a header. A degraded read is the difference between
+	// "this host has no data" and "VictoriaMetrics did not answer" — which used to
+	// be indistinguishable from the outside.
+	w.Header().Set("X-AIOps-History-Source", source)
+	if source == historySourceFallback {
+		s.warnHistoryFallback(id, from, to)
 	}
 
 	writeJSON(w, http.StatusOK, downsampleSamples(out, hostHistoryAPIMaxPts))

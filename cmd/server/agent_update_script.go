@@ -713,7 +713,19 @@ try {
       Write-Log 'rolling back to .bak'
       Copy-Item -Force -LiteralPath $Bak -Destination $Exe
     }
-    [void](Restart-Agent)
+    # Only restart what we actually disturbed. Most failures here happen BEFORE
+    # the service is touched -- an unreachable server, an untrusted certificate,
+    # a checksum mismatch, a staging binary that will not run -- and in those the
+    # agent is still up and healthy. Restarting anyway means every failed attempt
+    # tears down a working service and reinstalls it, which turns a harmless
+    # "could not download" into an outage whenever --install-service then fails
+    # (no admin rights, locked SCM). Restart only when the swap happened or the
+    # agent is genuinely not running.
+    if($swapped -or -not (Test-Running)){
+      [void](Restart-Agent)
+    } else {
+      Write-Log 'agent still running and nothing was swapped; leaving it alone'
+    }
   } catch {}
   exit 1
 }

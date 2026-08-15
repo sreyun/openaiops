@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf16"
 )
 
@@ -523,5 +524,52 @@ func TestLegacyUnixAgentUpdateScriptParses(t *testing.T) {
 				t.Fatalf("generated script is not valid POSIX sh: %v\n%s", err, out)
 			}
 		})
+	}
+}
+
+// A failed update must not take down a healthy agent.
+//
+// Most failures in the helper happen BEFORE the service is touched: unreachable
+// server, untrusted certificate, checksum mismatch, staging binary that will not
+// run. The agent is still up in all of them. Restarting unconditionally means
+// every failed attempt stops a working service and reinstalls it — and when that
+// reinstall fails (no admin rights, locked SCM) a harmless "could not download"
+// becomes an outage. Restart only when the swap happened or the agent is down.
+func TestWindowsUpdateHelperLeavesHealthyAgentAloneOnPreSwapFailure(t *testing.T) {
+	ps := windowsUpdateHelperScript()
+	const guard = "if($swapped -or -not (Test-Running)){"
+	guardAt := strings.Index(ps, guard)
+	if guardAt < 0 {
+		t.Fatal("failure path must gate the restart on 'we swapped' or 'agent is down'")
+	}
+	// ...and there must be no unconditional Restart-Agent left in the catch block.
+	catchAt := strings.Index(ps, "} catch {\n  Write-Log (\"update failed: \"")
+	if catchAt < 0 {
+		t.Fatal("could not locate the helper's failure handler")
+	}
+	if guardAt < catchAt {
+		t.Fatal("the guard must live in the failure handler, not before it")
+	}
+	// The restart call must sit *directly* under the guard. Checking the line in
+	// isolation cannot tell guarded from unguarded — it is the same text either way.
+	if !strings.Contains(ps, guard+"\n      [void](Restart-Agent)\n") {
+		t.Fatal("the restart call is not the guarded branch's body")
+	}
+	if strings.Count(ps[catchAt:], "[void](Restart-Agent)") != 1 {
+		t.Fatal("an unguarded Restart-Agent remains on the failure path")
+	}
+}
+
+// The job may not be declared done while a host is still walking the verify
+// ladder — the UI stops polling at "done", so a late success/failed lands in a
+// job nobody is watching and the operator is left with "finished, but this host
+// never upgraded".
+func TestAgentUpdateJobFinalizeWindowCoversTheVerifyLadder(t *testing.T) {
+	ladder := agentUpdateVerifyWindow + // module helper verify
+		agentUpdateTimeoutSec*time.Second + // legacy rescue exec
+		agentUpdateVerifyWindow // rescue verify
+	if agentUpdateJobFinalizeWindow <= ladder {
+		t.Fatalf("finalize window %v does not cover the %v verify ladder: a job would be marked done "+
+			"while hosts are still pending_verify", agentUpdateJobFinalizeWindow, ladder)
 	}
 }

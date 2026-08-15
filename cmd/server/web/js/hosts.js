@@ -1092,6 +1092,17 @@ let DETAIL_SHARED_FC = null; // shared enrich result for current load
 // 统一的时间跨度控件渲染函数（主机图表和监控图表共用）
 // 快捷时间跨度（小时）：1/3/6/12 小时 + 1/3/7/14 天（+ 自定义，由各视图单独渲染）
 const CHART_SPANS = [1, 3, 6, 12, 24, 72, 168, 336];
+function historySourceHintText(src) {
+  switch (String(src || "").toLowerCase()) {
+    case "ram": return I18N.t("section.history_ram_only", "仅内存缓存，重启后变短");
+    case "ram-fallback":
+    case "vm_miss": return I18N.t("section.history_vm_miss", "时序库暂无数据，仅内存缓存");
+    case "vm+ram":
+    case "vm":
+    case "mixed": return I18N.t("section.history_vm", "持久化时序");
+    default: return "";
+  }
+}
 function chartSpanLabel(h) {
   return h < 24 ? h + I18N.t("time.hour") : (h / 24) + I18N.t("time.day");
 }
@@ -1305,7 +1316,10 @@ async function loadAndRenderCharts() {
     const samples = alignHistoryGaugeSamples(Array.isArray(rawSamples) ? rawSamples : []);
     if (!samples.length) {
       DETAIL_SAMPLES = [];
-      body.innerHTML = `${renderDetailToolbar(from, to)}<div class="empty-line">${I18N.t("empty.no_history")}</div>`;
+      const src = (r.headers && r.headers.get) ? (r.headers.get("X-AIOps-History-Source") || "") : "";
+      const emptyHint = historySourceHintText(src);
+      const emptyExtra = emptyHint ? `<div class="hint">${emptyHint}</div>` : "";
+      body.innerHTML = `${renderDetailToolbar(from, to)}<div class="empty-line">${I18N.t("empty.no_history")}</div>${emptyExtra}`;
       return;
     }
     DETAIL_SAMPLES = samples;
@@ -1315,6 +1329,9 @@ async function loadAndRenderCharts() {
     const gran = spanH <= 2 ? I18N.t("time.raw") : spanH <= 48 ? I18N.t("time.1m_agg") : I18N.t("time.5m_agg");
     const dataSpan = samples.length > 1 ? (samples[samples.length - 1].timestamp - samples[0].timestamp) : 0;
     const reqSpan = Math.max(0, to - from);
+    const src = (r.headers && r.headers.get) ? (r.headers.get("X-AIOps-History-Source") || "") : "";
+    const srcText = historySourceHintText(src);
+    const srcHint = srcText ? ` · ${srcText}` : "";
     const coverHint = (reqSpan > 3600 && dataSpan > 0 && dataSpan < reqSpan * 0.5)
       ? ` · ${I18N.t("section.partial_history", "仅覆盖")} ${fmtHistoryCoverage(dataSpan)} / ${fmtHistoryCoverage(reqSpan)}`
       : "";
@@ -1328,7 +1345,7 @@ async function loadAndRenderCharts() {
       <div class="chart-container">
         ${wrap('chartCombo')}${wrap('chartCPU')}${wrap('chartMem')}${wrap('chartLoad')}${wrap('chartDisk')}${hasGPU ? wrap('chartGPU') + wrap('chartGPUTemp') + wrap('chartGPUMemPct') + wrap('chartGPUMem') : ''}${wrap('chartNet')}${hasConns ? wrap('chartConns') + wrap('chartConnStates') : ''}${wrap('chartDiskIO')}${wrap('chartIOPS')}${wrap('chartProc')}
       </div>
-      <div class="hint">${I18N.t("section.sample_points")}: ${samples.length} · ${I18N.t("section.granularity")}: ${gran}${coverHint}</div>
+      <div class="hint">${I18N.t("section.sample_points")}: ${samples.length} · ${I18N.t("section.granularity")}: ${gran}${coverHint}${srcHint}</div>
     `;
 
     // 先只登记「如何画」；进入视口后再 createChart，避免一次同步创建十多张 Canvas 卡顿。

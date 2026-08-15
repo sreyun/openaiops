@@ -71,14 +71,27 @@ type vmWriter struct {
 	checkCh chan vmCheckSample
 	apiCh   chan vmAPISample
 	httpc   *http.Client
-	breaker *vmCircuitBreaker
-	dropped atomic.Uint64
+	// breaker guards INGEST (/api/v1/import/prometheus) only; readBreaker guards
+	// every query path. They must stay separate — see newVMWriter.
+	breaker      *vmCircuitBreaker
+	readBreaker  *vmCircuitBreaker
+	historyCache *vmHistoryCache
+	dropped      atomic.Uint64
 }
 
 func newVMWriter(cfg *ConfigStore) *vmWriter {
+	// 读写各自一个熔断器。共用一个是「主机曲线一会有一会没有」的直接原因：
+	// 写入路径每台主机每个采集周期都在跑，一旦 VM 对写入返回 4xx/5xx（一条标签不合法、
+	// 短暂过载、磁盘满），连续 5 次就把熔断器打开 30 秒；而这 30 秒里**所有查询**都被
+	// 直接拒绝，loadDurableHostHistory 静默退回内存环——内存只有 raw 1200 / 1m 2880 /
+	// 5m 8640 个点，24h/7d 窗口一下就缩水，前端于是显示「仅覆盖 x/y」甚至空图。
+	// 写入出问题不该让读图瞎掉，反过来也一样。
 	return &vmWriter{
 		cfg: cfg, ch: make(chan vmSample, 8192), checkCh: make(chan vmCheckSample, 4096), apiCh: make(chan vmAPISample, 4096),
-		httpc: &http.Client{Timeout: vmQueryTimeout()}, breaker: newVMCircuitBreaker(),
+		httpc:        &http.Client{Timeout: vmQueryTimeout()},
+		breaker:      newVMCircuitBreaker(),
+		readBreaker:  newVMCircuitBreaker(),
+		historyCache: newVMHistoryCache(),
 	}
 }
 
@@ -293,7 +306,7 @@ func (v *vmWriter) queryCheckHistory(checkID string, from, to int64) []CheckPoin
 	if err != nil {
 		return nil
 	}
-	resp, err := v.doVMRequest(req)
+	resp, err := v.doVMQuery(req)
 	if err != nil {
 		return nil
 	}
@@ -432,7 +445,7 @@ func (v *vmWriter) queryAPIHistory(apiID string, from, to int64) []APIHistPoint 
 	if err != nil {
 		return nil
 	}
-	resp, err := v.doVMRequest(req)
+	resp, err := v.doVMQuery(req)
 	if err != nil {
 		return nil
 	}
@@ -541,7 +554,7 @@ func (v *vmWriter) vmQueryVectorAt(promql string, at int64) ([]promSeries, bool)
 	if err != nil {
 		return nil, false
 	}
-	resp, err := v.doVMRequest(req)
+	resp, err := v.doVMQuery(req)
 	if err != nil {
 		return nil, false
 	}
@@ -616,7 +629,7 @@ func (v *vmWriter) vmQueryRange(promql string, startTs, endTs, stepSec int64) ([
 	if err != nil {
 		return nil, false
 	}
-	resp, err := v.doVMRequest(req)
+	resp, err := v.doVMQuery(req)
 	if err != nil {
 		return nil, false
 	}
@@ -683,7 +696,7 @@ func (v *vmWriter) vmQueryRangeSeries(promql string, startTs, endTs, stepSec int
 	if err != nil {
 		return nil, false
 	}
-	resp, err := v.doVMRequest(req)
+	resp, err := v.doVMQuery(req)
 	if err != nil {
 		return nil, false
 	}
@@ -744,7 +757,7 @@ func (v *vmWriter) vmLabelValues(label, match string) ([]string, bool) {
 	if err != nil {
 		return nil, false
 	}
-	resp, err := v.doVMRequest(req)
+	resp, err := v.doVMQuery(req)
 	if err != nil {
 		return nil, false
 	}
@@ -773,7 +786,7 @@ func (v *vmWriter) vmInstantByAPI(promql string) map[string]float64 {
 	if err != nil {
 		return nil
 	}
-	resp, err := v.doVMRequest(req)
+	resp, err := v.doVMQuery(req)
 	if err != nil {
 		return nil
 	}
@@ -1142,7 +1155,15 @@ func (v *vmWriter) queryHistoryFilter(hostID string, from, to int64, names []str
 		return nil, false
 	}
 	step := adaptiveHistoryStep(from, to)
+	// Cache the VM half only. The caller always overlays the last 15 minutes of
+	// RAM on top, so a cached result can never show a stale tail — see
+	// vm_history_cache.go for why both window ends must be bucketed.
+	key := vmHistoryCacheKey(hostID, from, to, step, names)
+	if out, ok := v.historyCache.get(key); ok {
+		return out, true
+	}
 	if out, ok := v.queryHistoryRangeNames(hostID, from, to, step, names); ok && len(out) > 0 {
+		v.historyCache.put(key, out, vmHistoryCacheTTL(step))
 		return out, true
 	}
 	// query_range used to be `{__name__=~"aiops_.*"}` which exploded on
@@ -1151,7 +1172,11 @@ func (v *vmWriter) queryHistoryFilter(hostID string, from, to int64, names []str
 	// (~50 names + ephemeral path filter) is the default; /export still
 	// covers ≤24h when the selector is missing.
 	if queryHistoryAllowsExportFallback(to - from) {
-		return v.queryHistoryExportNames(hostID, from, to, names)
+		out, ok := v.queryHistoryExportNames(hostID, from, to, names)
+		if ok && len(out) > 0 {
+			v.historyCache.put(key, out, vmHistoryCacheTTL(step))
+		}
+		return out, ok
 	}
 	return nil, false
 }
@@ -1174,7 +1199,7 @@ func (v *vmWriter) queryHistoryExportNames(hostID string, from, to int64, names 
 	if err != nil {
 		return nil, false
 	}
-	resp, err := v.doVMRequest(req)
+	resp, err := v.doVMQuery(req)
 	if err != nil {
 		return nil, false
 	}

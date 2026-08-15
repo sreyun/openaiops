@@ -327,3 +327,37 @@ func TestWindowsHelperBoundsVersionProbe(t *testing.T) {
 		}
 	}
 }
+
+// A failed update must not take down a healthy agent. Nearly every failure in
+// this helper happens before the service is touched (staging missing, staging
+// --version fails), and there the agent is still up. Restarting anyway means a
+// failed attempt stops a working service and reinstalls it — and when that
+// reinstall fails (no admin rights, locked SCM) "download failed" turns into
+// "host offline".
+func TestWindowsHelperLeavesHealthyAgentAloneOnPreSwapFailure(t *testing.T) {
+	script := buildWindowsUpdateHelperScript(`C:\a\aiops-agent.exe`, `C:\a\.new.exe`,
+		`C:\a\config.yaml`, `C:\log`, `C:\a\r`, `C:\r2`)
+	const guard = "if ($swapped -or -not (Test-AgentRunning)) {"
+	guardAt := strings.Index(script, guard)
+	if guardAt < 0 {
+		t.Fatal("failure path must gate the restart on 'we swapped' or 'agent is down'")
+	}
+	catchAt := strings.Index(script, `Write-Log ("update failed: "`)
+	if catchAt < 0 {
+		t.Fatal("could not locate the helper's failure handler")
+	}
+	if guardAt < catchAt {
+		t.Fatal("the guard must live in the failure handler, not before it")
+	}
+	// The restart call must sit *directly* under the guard. Checking the line in
+	// isolation cannot tell guarded from unguarded — it is the same text either way.
+	guarded := guard + "\n      [void](Restart-AgentService -Exe $exe -Cfg $cfg -Dir $dir)\n"
+	if !strings.Contains(script, guarded) {
+		t.Fatal("the restart call is not the guarded branch's body")
+	}
+	if strings.Count(script, "Restart-AgentService -Exe $exe -Cfg $cfg -Dir $dir") !=
+		strings.Count(script, guarded)+1 {
+		// +1 for the success path, which restarts on purpose.
+		t.Fatal("an unguarded Restart-AgentService remains on the failure path")
+	}
+}

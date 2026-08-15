@@ -609,7 +609,15 @@ try {
     } else {
       Write-Log ("skip backup restore (swapped=$swapped exe_exists=$((Test-Path -LiteralPath $exe)))")
     }
-    [void](Restart-AgentService -Exe $exe -Cfg $cfg -Dir $dir)
+    # 只重启我们真正动过的东西。这里绝大多数失败发生在**碰服务之前**——暂存文件不见了、
+    # staging --version 跑不起来——此时 Agent 还好端端地在跑。无条件重启意味着每一次失败
+    # 的升级尝试都会把一个健康的服务停掉再 --install-service 装回去；一旦那一步失败（没有
+    # 管理员权限、SCM 被占），"下载失败"就升级成了"主机离线"。
+    if ($swapped -or -not (Test-AgentRunning)) {
+      [void](Restart-AgentService -Exe $exe -Cfg $cfg -Dir $dir)
+    } else {
+      Write-Log 'agent still running and nothing was swapped; leaving it alone'
+    }
   } catch {}
   exit 1
 } finally {

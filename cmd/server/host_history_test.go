@@ -8,6 +8,12 @@ import (
 	"aiops-monitor/shared"
 )
 
+func TestHistorySourceLabels(t *testing.T) {
+	if historySourceRAM != "ram" || historySourceVM != "vm+ram" || historySourceFallback != "ram-fallback" {
+		t.Fatalf("source labels drifted: ram=%q vm=%q fallback=%q", historySourceRAM, historySourceVM, historySourceFallback)
+	}
+}
+
 func TestHostHistoryRangeExprIsBounded(t *testing.T) {
 	if n := len(hostHistoryMetricNames); n < 50 {
 		t.Fatalf("host history allowlist is %d names, need ≥50", n)
@@ -150,6 +156,10 @@ func TestLoadDurableHostHistoryFallsBackToRAM(t *testing.T) {
 	}
 	if len(samples) == 0 {
 		t.Fatal("expected RAM fallback samples")
+	}
+	_, src, ok := srv.loadDurableHostHistorySource("h1", now-3600, now, vmNamesForMetricKeys([]string{"cpu"}))
+	if !ok || src != historySourceRAM {
+		t.Fatalf("RAM-only host should report source=ram, got %q ok=%v", src, ok)
 	}
 	if _, ok := srv.loadDurableHostHistory("ghost", now-3600, now, nil); ok {
 		t.Fatal("missing host")

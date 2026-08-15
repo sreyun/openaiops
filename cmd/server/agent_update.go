@@ -22,6 +22,24 @@ const (
 	agentUpdateMaxSkips     = 500  // cap of per-host "why not upgraded" records kept for observability
 )
 
+// agentUpdateVerifyWindow is how long one host may sit in pending_verify after a
+// detached helper reported "restart scheduled", before we treat the swap as
+// failed. Windows helpers answer long before the new binary is actually running,
+// so the only real proof is agent_version catching up.
+const agentUpdateVerifyWindow = 5 * time.Minute
+
+// agentUpdateJobFinalizeWindow must cover the WHOLE ladder a single host can walk
+// before it leaves pending_verify:
+//
+//	module helper verify (agentUpdateVerifyWindow)
+//	  → legacy rescue exec  (up to agentUpdateTimeoutSec)
+//	  → rescue verify       (agentUpdateVerifyWindow)
+//
+// 短于这条链路的话，job 会在主机还挂在 pending_verify 时就被标记 done：UI 停止轮询，
+// 后来的 success/failed 写进一个已经收摊的 job，操作台上留下的就是"已完成，但这台没升级"
+// ——恰恰是最需要看清楚的那种情况。原值 6 分钟，只覆盖到第一段。
+const agentUpdateJobFinalizeWindow = 2*agentUpdateVerifyWindow + agentUpdateTimeoutSec*time.Second + 2*time.Minute
+
 // agentUpdateSkipInfo records why a host was not auto-enqueued, so operators
 // can answer "为什么这台没升级" from the UI instead of silent no-ops.
 type agentUpdateSkipInfo struct {
@@ -530,7 +548,7 @@ func (s *Server) finalizeAgentUpdateJobWhenVerified(job *agentUpdateJob) {
 	if job == nil {
 		return
 	}
-	deadline := time.Now().Add(6 * time.Minute)
+	deadline := time.Now().Add(agentUpdateJobFinalizeWindow)
 	for time.Now().Before(deadline) {
 		pending := 0
 		if s.agentUpdates != nil {
@@ -598,7 +616,7 @@ func (s *Server) waitVersionAckOrExpire(job *agentUpdateJob, hostID, target stri
 	// Give the helper a few report cycles to come back with the new version.
 	// The soft-retry window (agentUpdateSoftRetrySec) is deliberately >= this
 	// deadline, so a re-queue can never overlap a swap that is still in flight.
-	deadline := time.Now().Add(5 * time.Minute)
+	deadline := time.Now().Add(agentUpdateVerifyWindow)
 	for time.Now().Before(deadline) {
 		time.Sleep(5 * time.Second)
 		h := s.hostByID(hostID)
@@ -757,7 +775,7 @@ func (s *Server) rescueWindowsAgentUpdate(job *agentUpdateJob, hostID, target st
 	}
 
 	// The legacy helper is detached too, so verify the same way: by version ack.
-	deadline := time.Now().Add(5 * time.Minute)
+	deadline := time.Now().Add(agentUpdateVerifyWindow)
 	for time.Now().Before(deadline) {
 		time.Sleep(5 * time.Second)
 		cur := s.hostByID(hostID)

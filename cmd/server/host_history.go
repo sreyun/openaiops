@@ -2,7 +2,10 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
+	"sync"
+	"time"
 
 	"aiops-monitor/shared"
 )
@@ -263,20 +266,65 @@ func prependHistoryPoints(pts [][2]float64, extra []shared.Sample, key string) [
 // VictoriaMetrics first, last 15 minutes of RAM as a nested-inventory overlay,
 // RAM-only if VM is empty/down. names=nil uses the full ≥50-name allowlist.
 func (s *Server) loadDurableHostHistory(hostID string, from, to int64, names []string) (samples []shared.Sample, hostOK bool) {
+	out, _, ok := s.loadDurableHostHistorySource(hostID, from, to, names)
+	return out, ok
+}
+
+// historySource labels where a host-history response actually came from, so a
+// silent degradation is visible instead of just looking like "the chart shrank".
+const (
+	historySourceRAM      = "ram"          // VM disabled — RAM ring is the only store
+	historySourceVM       = "vm+ram"       // normal: VM history + live RAM tail
+	historySourceFallback = "ram-fallback" // VM enabled but the read failed
+)
+
+// loadDurableHostHistorySource is loadDurableHostHistory plus the provenance of
+// the result.
+//
+// VM 读失败时这里会退回内存环，而内存只有 raw 1200 / 1m 2880 / 5m 8640 个点：24h、7d 这类
+// 窗口会突然只剩很短一段，前端画出来就是「仅覆盖 x/y」甚至空图。以前这一步完全静默——
+// 接口照样 200，运维看到的只有"曲线一会有一会没有"，无从判断是 VM 挂了、熔断了，还是本来
+// 就没数据。返回 source 让调用方能把它放进响应头并打日志。
+func (s *Server) loadDurableHostHistorySource(hostID string, from, to int64, names []string) (samples []shared.Sample, source string, hostOK bool) {
 	if s == nil || s.store == nil || strings.TrimSpace(hostID) == "" {
-		return nil, false
+		return nil, historySourceRAM, false
 	}
 	mem, hostOK := s.store.GetHistory(hostID, from, to)
 	if !hostOK {
-		return nil, false
+		return nil, historySourceRAM, false
 	}
-	out := mem
-	if s.vm.enabled() {
-		if vm, ok := s.vm.queryHistoryFilter(hostID, from, to, names); ok && len(vm) > 0 {
-			out = spliceHistory(vm, recentHistoryTail(mem, memHistoryOverlaySec))
-		}
+	if !s.vm.enabled() {
+		return mem, historySourceRAM, true
 	}
-	return out, true
+	vm, ok := s.vm.queryHistoryFilter(hostID, from, to, names)
+	if ok && len(vm) > 0 {
+		return spliceHistory(vm, recentHistoryTail(mem, memHistoryOverlaySec)), historySourceVM, true
+	}
+	return mem, historySourceFallback, true
+}
+
+// historyFallbackWarnEvery throttles the degraded-read warning. Chart polls are
+// frequent and a VM outage hits every one of them; logging each would bury the
+// signal in its own noise.
+const historyFallbackWarnEvery = 60 * time.Second
+
+var (
+	historyFallbackWarnMu sync.Mutex
+	historyFallbackWarnAt time.Time
+)
+
+func (s *Server) warnHistoryFallback(hostID string, from, to int64) {
+	historyFallbackWarnMu.Lock()
+	now := time.Now()
+	if now.Sub(historyFallbackWarnAt) < historyFallbackWarnEvery {
+		historyFallbackWarnMu.Unlock()
+		return
+	}
+	historyFallbackWarnAt = now
+	historyFallbackWarnMu.Unlock()
+	slog.Warn("主机历史读取回退到内存环：VictoriaMetrics 未返回数据（查询失败/熔断/该窗口无数据）。"+
+		"内存只保留 raw 1200 / 1m 2880 / 5m 8640 点，长窗口会明显缩水",
+		"host", shortID(hostID), "window_sec", to-from)
 }
 
 func formatHostTrendLine(samples []shared.Sample, hours int) string {

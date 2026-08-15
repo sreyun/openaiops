@@ -99,39 +99,44 @@ func windowsUpdateWorkDir() string {
 	return filepath.Join(os.TempDir(), "aiops-agent-update")
 }
 
+// helperProgressMarker reports whether a helper log/result file already proves
+// the helper is running. These are the first things the helper writes.
+func helperProgressMarker(body string) bool {
+	return strings.Contains(body, "helper start") || strings.HasPrefix(body, "running") ||
+		strings.HasPrefix(body, "ok ") || strings.HasPrefix(body, "fail ")
+}
+
+// waitWindowsUpdateHelperAlive polls the helper's own log/result files, which is
+// nearly free, and falls back to a process probe ONCE at the end of the window.
+//
+// 进程探测要拉起一个 powershell.exe 去枚举全机进程（Get-CimInstance Win32_Process）：
+// 在老机器上光是 PowerShell 启动就要几百毫秒到数秒。原来它写在 200ms 的轮询循环里，
+// 于是这个「等 6 秒」实际变成了「连开若干个 PowerShell、每个都全量枚举进程」，而且因为
+// 每次探测都阻塞，文件里已经写出的 "helper start" 反而要等好几秒才被看见——恰好发生在
+// 主机即将被换二进制、最不该浪费时间和内存的时刻。文件轮询已经能覆盖绝大多数情况，
+// 进程探测只作为最后一次兜底。
 func waitWindowsUpdateHelperAlive(logPath, altResult, resultPath string, d time.Duration) bool {
 	deadline := time.Now().Add(d)
+	paths := []string{logPath, resultPath, altResult}
 	for time.Now().Before(deadline) {
-		for _, p := range []string{logPath, resultPath, altResult} {
+		for _, p := range paths {
 			b, err := os.ReadFile(p)
 			if err != nil || len(b) == 0 {
 				continue
 			}
-			s := string(b)
-			if strings.Contains(s, "helper start") || strings.HasPrefix(s, "running") ||
-				strings.HasPrefix(s, "ok ") || strings.HasPrefix(s, "fail ") {
+			if helperProgressMarker(string(b)) {
 				return true
 			}
-		}
-		if windowsUpdateHelperAlive() {
-			return true
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	return false
+	return windowsUpdateHelperProcessAlive()
 }
 
-func windowsUpdateHelperAlive(paths ...string) bool {
-	for _, p := range paths {
-		if st, err := os.Stat(p); err == nil && st.Size() > 0 {
-			b, _ := os.ReadFile(p)
-			s := string(b)
-			if strings.Contains(s, "helper start") || strings.HasPrefix(s, "running") ||
-				strings.HasPrefix(s, "ok ") || strings.HasPrefix(s, "fail ") {
-				return true
-			}
-		}
-	}
+// windowsUpdateHelperProcessAlive asks Windows whether a helper process exists.
+// Expensive (spawns PowerShell, enumerates every process) — call it once, not in
+// a loop.
+func windowsUpdateHelperProcessAlive() bool {
 	out, err := exec.Command(windowsPowerShellPath(), "-NoProfile", "-NonInteractive", "-Command",
 		`Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match 'aiops-agent-update-helper\.ps1' } | Select-Object -First 1 -ExpandProperty ProcessId`).CombinedOutput()
 	return err == nil && strings.TrimSpace(string(out)) != ""
