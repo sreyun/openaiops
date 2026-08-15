@@ -405,7 +405,7 @@ func runShellCommandCtx(ctx context.Context, command string) ([]byte, int) {
 	// UTF-8 on all platforms. On Windows, chcp 65001 handles the console code
 	// page; PYTHONIOENCODING helps Python programs that read the env.
 	cmd.Env = execEnv()
-	out, err := cmd.CombinedOutput()
+	out, err := runCmdEscaped(cmd)
 	exit := 0
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
@@ -1452,12 +1452,16 @@ func newPipeShell() termShell {
 	}
 	cmd.Stdout = pw
 	cmd.Stderr = pw
+	detachFromServiceJob(cmd)
 	if err := cmd.Start(); err != nil {
 		slog.Warn("pipe shell 启动失败", "err", err, "dir", cmd.Dir)
 		_ = stdin.Close()
 		_ = pr.Close()
 		_ = pw.Close()
 		return nil
+	}
+	if cmd.Process != nil {
+		escapeAgentCgroupTree(cmd.Process.Pid)
 	}
 	_ = pw.Close() // parent drops its write end so pr EOFs when the shell exits
 	// Prefer browser local echo on Windows (OSC 666 + platform heuristic) for

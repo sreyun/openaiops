@@ -921,12 +921,16 @@ func (h *SreyunCore) execListRecentChanges(args map[string]any) (string, error) 
 		{"磁盘使用率(%)", diskEarly, diskLate, diskLate - diskEarly, trendArrow(diskLate - diskEarly)},
 		{"负载(Load1)", loadEarly, loadLate, loadLate - loadEarly, trendArrow((loadLate - loadEarly) * 10)},
 	}
-	out, _ := json.Marshal(map[string]any{
+	payload := map[string]any{
 		"host":    name,
 		"hours":   hours,
 		"samples": n,
 		"trends":  trends,
-	})
+	}
+	if note := historyCoverageNote(samples, from, now); note != "" {
+		payload["coverage_warning"] = note
+	}
+	out, _ := json.Marshal(payload)
 	return string(out), nil
 }
 

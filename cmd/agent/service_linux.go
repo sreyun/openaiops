@@ -76,7 +76,11 @@ Environment=SHELL=%s
 Environment=HOME=%s
 Environment=USER=root
 Environment=LOGNAME=root
-KillMode=mixed
+# Only signal the agent PID. mixed/control-group SIGKILLs every child in this
+# cgroup on stop/restart — including Java/xjar started from the remote
+# terminal or a playbook, which is how a routine Agent bounce takes down
+# business processes.
+KillMode=process
 LimitNOFILE=65536
 ProtectHome=false
 ProtectSystem=false
@@ -273,6 +277,7 @@ func (s *linuxDesktopSession) key() string {
 }
 
 func superviseLinuxDesktopWorker(ctx context.Context, exe, cfgPath string) {
+	reapLeftoverDesktopWorkers(exe)
 	var worker *bgProc
 	var curKey string
 	stopWorker := func() {
@@ -341,6 +346,42 @@ func spawnLinuxDesktopWorker(exe, cfgPath string, s *linuxDesktopSession) (*bgPr
 		return nil, err
 	}
 	return newBgProc(cmd), nil
+}
+
+// reapLeftoverDesktopWorkers SIGTERMs host --desktop-worker leftovers from a
+// previous Agent that died before stopWorker ran (KillMode=process leaves them).
+// User GUI apps are not workers and are not touched.
+func reapLeftoverDesktopWorkers(selfExe string) {
+	self := selfExe
+	if resolved, err := filepath.EvalSymlinks(selfExe); err == nil && resolved != "" {
+		self = resolved
+	}
+	selfBase := filepath.Base(self)
+	ents, err := os.ReadDir("/proc")
+	if err != nil {
+		return
+	}
+	myPid := os.Getpid()
+	for _, e := range ents {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil || pid <= 1 || pid == myPid {
+			continue
+		}
+		raw, err := os.ReadFile("/proc/" + e.Name() + "/cmdline")
+		if err != nil || !strings.Contains(string(raw), "--desktop-worker") {
+			continue
+		}
+		exe, err := os.Readlink("/proc/" + e.Name() + "/exe")
+		if err != nil {
+			continue
+		}
+		exe = strings.TrimSuffix(exe, " (deleted)")
+		if exe != self && filepath.Base(exe) != selfBase {
+			continue
+		}
+		slog.Info("回收残留桌面 worker", "pid", pid, "exe", exe)
+		_ = syscall.Kill(pid, syscall.SIGTERM)
+	}
 }
 
 // detectLinuxDesktopSession finds the active local graphical session and lifts

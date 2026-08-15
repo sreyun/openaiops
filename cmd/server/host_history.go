@@ -98,6 +98,115 @@ func recentHistoryTail(samples []shared.Sample, maxAgeSec int64) []shared.Sample
 	return samples[i:]
 }
 
+// historyGapFillMax is the smallest VM hole we bother stitching from RAM.
+// Below this, adjacent query_range buckets are just the chart's own step
+// (filling them with 1-minute RAM would densify a 7d/21-minute grid into chaos).
+func historyGapFillMax(from, to int64) int64 {
+	g := 3 * adaptiveHistoryStep(from, to)
+	if g < 120 {
+		return 120
+	}
+	return g
+}
+
+// fillHistoryGaps inserts RAM samples into holes in a VM series, and prepends /
+// appends RAM outside the VM range. Internal holes smaller than maxGap are left
+// alone so a 7d chart stays on its own step instead of growing a 1-minute beard.
+func fillHistoryGaps(vm, ram []shared.Sample, maxGap int64) []shared.Sample {
+	if len(ram) == 0 {
+		return vm
+	}
+	if len(vm) == 0 {
+		return ram
+	}
+	if maxGap < 1 {
+		maxGap = 1
+	}
+	out := make([]shared.Sample, 0, len(vm)+len(ram)/4)
+	vi, ri := 0, 0
+	for vi < len(vm) || ri < len(ram) {
+		if ri >= len(ram) {
+			out = append(out, vm[vi:]...)
+			break
+		}
+		if vi >= len(vm) {
+			if ram[ri].Timestamp > out[len(out)-1].Timestamp {
+				out = append(out, ram[ri])
+			}
+			ri++
+			continue
+		}
+		vt, rt := vm[vi].Timestamp, ram[ri].Timestamp
+		switch {
+		case rt < vt:
+			take := false
+			if len(out) == 0 {
+				take = true
+			} else {
+				prev := out[len(out)-1].Timestamp
+				if vt-prev > maxGap && rt > prev {
+					take = true
+				}
+			}
+			if take {
+				out = append(out, ram[ri])
+			}
+			ri++
+		case rt == vt:
+			ri++
+		default:
+			if len(out) == 0 || vt > out[len(out)-1].Timestamp {
+				out = append(out, vm[vi])
+			}
+			vi++
+		}
+	}
+	return out
+}
+
+// historyCoverageNote is a caution for AI tools when the series is much shorter
+// than the window the user asked for (typical after a VM restart that lost disk).
+func historyCoverageNote(samples []shared.Sample, from, to int64) string {
+	if historyCoversWindow(samples, from, to) {
+		return ""
+	}
+	if len(samples) == 0 {
+		return ""
+	}
+	got := samples[len(samples)-1].Timestamp - samples[0].Timestamp
+	if got < 0 {
+		got = -got
+	}
+	want := to - from
+	if want < 1 {
+		return ""
+	}
+	return fmt.Sprintf("注意：样本实际跨度 %d 分钟，小于请求窗口 %d 分钟，结论仅代表已覆盖时段", got/60, want/60)
+}
+
+// alignOverlayToStep 把内存实时尾巴重采样到与 VM 那一半**相同的步长栅格**上。
+//
+// fillHistoryGaps 已经解决了「洞」的问题，并且刻意不用 1 分钟的 RAM 去填 7d 图的小空隙
+// （否则曲线长出一层胡子）。但最后叠上去的这段实时尾巴仍然是 Agent 的原始上报间隔
+// （5~10s），于是整条序列依旧是**前疏后密**：24h 窗下 VM 那半是 180s 一个点，最后 15
+// 分钟却有 90 个点，密度差 18 倍。
+//
+// 这不只是画图毛刺。dashboard_forecast.go 里所有模型（drift / damped-holt /
+// holt-winters / seasonal / shape-replay）都是**按数组下标**递推的，默认相邻两点相隔一个
+// step。它们会把这 90 个尾点当成 90×180s＝4.5 小时的历史，末段斜率被放大近 20 倍——
+// 「磁盘几天后写满」「CPU 多久触阈」这类结论以及据此发出的预警全部建立在这个斜率上。
+// 尾巴与 VM 同栅格之后，序列才是均匀的，下标外推才有意义。
+func alignOverlayToStep(tail []shared.Sample, from, to int64) []shared.Sample {
+	if len(tail) == 0 {
+		return tail
+	}
+	step := adaptiveHistoryStep(from, to)
+	if step <= 1 {
+		return tail
+	}
+	return alignSamplesToStep(tail, tail[0].Timestamp, to, step)
+}
+
 // forecastFitLookback is extra history pulled from VictoriaMetrics so a short
 // visible window (1h chart, 3–5 min dashboard panel) still has enough points
 // to fit a forecast. Caps at 7d.
@@ -263,8 +372,9 @@ func prependHistoryPoints(pts [][2]float64, extra []shared.Sample, key string) [
 }
 
 // loadDurableHostHistory is the single host time-series read path:
-// VictoriaMetrics first, last 15 minutes of RAM as a nested-inventory overlay,
-// RAM-only if VM is empty/down. names=nil uses the full ≥50-name allowlist.
+// VictoriaMetrics first, RAM stitches holes left by a VM outage, last 15
+// minutes of histRaw as a nested-inventory overlay, RAM-only if VM is
+// empty/down. names=nil uses the full ≥50-name allowlist.
 func (s *Server) loadDurableHostHistory(hostID string, from, to int64, names []string) (samples []shared.Sample, hostOK bool) {
 	out, _, ok := s.loadDurableHostHistorySource(hostID, from, to, names)
 	return out, ok
@@ -298,7 +408,16 @@ func (s *Server) loadDurableHostHistorySource(hostID string, from, to int64, nam
 	}
 	vm, ok := s.vm.queryHistoryFilter(hostID, from, to, names)
 	if ok && len(vm) > 0 {
-		return spliceHistory(vm, recentHistoryTail(mem, memHistoryOverlaySec)), historySourceVM, true
+		filled := fillHistoryGaps(vm, mem, historyGapFillMax(from, to))
+		// Overlay uses a short window so GetHistory prefers histRaw (nested
+		// disks/GPUs) instead of the coarser 1m/5m tier of the full chart range.
+		overlayFrom := to - memHistoryOverlaySec
+		if overlayFrom < from {
+			overlayFrom = from
+		}
+		overlay, _ := s.store.GetHistory(hostID, overlayFrom, to)
+		tail := alignOverlayToStep(recentHistoryTail(overlay, memHistoryOverlaySec), from, to)
+		return spliceHistory(filled, tail), historySourceVM, true
 	}
 	return mem, historySourceFallback, true
 }
@@ -343,7 +462,7 @@ func formatHostTrendLine(samples []shared.Sample, hours int) string {
 		return sum / float64(len(ss))
 	}
 	early, late := samples[:third], samples[len(samples)-third:]
-	return fmt.Sprintf("近%dh趋势：CPU %.1f→%.1f · Mem %.1f→%.1f · Disk %.1f→%.1f · Load1 %.2f→%.2f（%d点）",
+	line := fmt.Sprintf("近%dh趋势：CPU %.1f→%.1f · Mem %.1f→%.1f · Disk %.1f→%.1f · Load1 %.2f→%.2f（%d点）",
 		hours,
 		avg(early, func(x shared.Sample) float64 { return x.CPUPercent }),
 		avg(late, func(x shared.Sample) float64 { return x.CPUPercent }),
@@ -354,4 +473,10 @@ func formatHostTrendLine(samples []shared.Sample, hours int) string {
 		avg(early, func(x shared.Sample) float64 { return x.Load1 }),
 		avg(late, func(x shared.Sample) float64 { return x.Load1 }),
 		len(samples))
+	last := samples[len(samples)-1].Timestamp
+	from := last - int64(hours)*3600
+	if note := historyCoverageNote(samples, from, last); note != "" {
+		line += "；" + note
+	}
+	return line
 }

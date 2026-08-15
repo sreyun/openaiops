@@ -619,6 +619,7 @@ Environment=LOGNAME=$AIOPS_USER
 ExecStart=$DIR/aiops-agent --config $DIR/config.yaml
 Restart=always
 RestartSec=5
+KillMode=process
 $UNIT_CAPS
 ProtectHome=false
 ProtectSystem=false
@@ -677,6 +678,7 @@ Environment=LOGNAME=root
 ExecStart=$DIR/aiops-agent --config $DIR/config.yaml
 Restart=always
 RestartSec=5
+KillMode=process
 $UNIT_CAPS
 ProtectHome=false
 ProtectSystem=false

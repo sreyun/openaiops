@@ -147,6 +147,7 @@ func runDesktopWorker(agent *Agent) error {
 // ---- supervisor ---------------------------------------------------------
 
 func superviseDarwinDesktopWorker(ctx context.Context, exe, cfgPath string) {
+	reapLeftoverDesktopWorkers(exe)
 	var worker *bgProc
 	curUID := -1
 	stopWorker := func() {
@@ -222,4 +223,28 @@ func consoleUser() (int, string) {
 		return -1, ""
 	}
 	return uid, name
+}
+
+func reapLeftoverDesktopWorkers(selfExe string) {
+	out, err := exec.Command("pgrep", "-f", "--desktop-worker").Output()
+	if err != nil {
+		return
+	}
+	myPid := os.Getpid()
+	selfBase := filepath.Base(selfExe)
+	for _, f := range strings.Fields(string(out)) {
+		pid, err := strconv.Atoi(f)
+		if err != nil || pid <= 1 || pid == myPid {
+			continue
+		}
+		args, err := exec.Command("ps", "-o", "args=", "-p", f).Output()
+		if err != nil || !strings.Contains(string(args), "--desktop-worker") {
+			continue
+		}
+		if !strings.Contains(string(args), selfBase) && !strings.Contains(string(args), selfExe) {
+			continue
+		}
+		slog.Info("回收残留桌面 worker", "pid", pid)
+		_ = syscall.Kill(pid, syscall.SIGTERM)
+	}
 }

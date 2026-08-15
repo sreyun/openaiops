@@ -22,6 +22,7 @@ import (
 // 为什么缓存不会让曲线变旧：loadDurableHostHistory 永远把内存环最近 15 分钟叠在 VM 结果
 // 之上（recentHistoryTail + spliceHistory）。缓存只覆盖 VM 那一半，最新的点始终来自内存，
 // 所以只要 TTL 远小于 memHistoryOverlaySec，用户看到的尾部就一直是实时的。
+// 不完整窗口（覆盖不足）不会进缓存，见 vmHistoryCacheable。
 type vmHistoryCache struct {
 	mu      sync.Mutex
 	entries map[string]vmHistoryCacheEntry
@@ -103,6 +104,15 @@ func (c *vmHistoryCache) get(key string) ([]shared.Sample, bool) {
 	out := make([]shared.Sample, len(e.samples))
 	copy(out, e.samples)
 	return out, true
+}
+
+// vmHistoryCacheable is whether a VM result is complete enough to memoize.
+// After a VM restart the first query_range often returns only the samples
+// ingested since boot; caching that short slice made every chart freeze on
+// "two minutes of data" for up to 120s. Reuse historyCoversWindow so a series
+// that starts hours late is treated the same as an empty one.
+func vmHistoryCacheable(samples []shared.Sample, from, to int64) bool {
+	return historyCoversWindow(samples, from, to)
 }
 
 func (c *vmHistoryCache) put(key string, samples []shared.Sample, ttl time.Duration) {

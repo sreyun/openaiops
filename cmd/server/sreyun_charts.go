@@ -277,6 +277,33 @@ func sampleMetricValue(s shared.Sample, key string) (float64, bool) {
 	}
 }
 
+// hostMetricPromExpr 把主机图表的指标键翻成等价 PromQL，供预测台账事后核对实测值用。
+// 口径必须与 sampleMetricValue 完全一致（含 network/io 的 /1048576 换算），
+// 否则自学习算出来的 bias/scale 是在跟一个单位不同的序列比，越学越偏。
+// 返回 "" 表示该键没有单序列等价表达式，调用方应放弃记台账而不是记一个错的。
+func hostMetricPromExpr(hostID, key string) string {
+	if hostID == "" {
+		return ""
+	}
+	h := lblEsc(hostID)
+	switch key {
+	case "cpu":
+		return fmt.Sprintf(`aiops_cpu_percent{host="%s"}`, h)
+	case "memory":
+		return fmt.Sprintf(`aiops_mem_percent{host="%s"}`, h)
+	case "disk":
+		return fmt.Sprintf(`aiops_disk_percent{host="%s"}`, h)
+	case "load":
+		return fmt.Sprintf(`aiops_load1{host="%s"}`, h)
+	case "network":
+		return fmt.Sprintf(`(aiops_net_recv_rate{host="%s"} + aiops_net_sent_rate{host="%s"}) / 1048576`, h, h)
+	case "io":
+		return fmt.Sprintf(`(aiops_disk_read_rate{host="%s"} + aiops_disk_write_rate{host="%s"}) / 1048576`, h, h)
+	default:
+		return ""
+	}
+}
+
 func (h *SreyunCore) loadHostSamples(hostID string, from, to int64, keys ...string) []shared.Sample {
 	if h.s == nil {
 		return nil
@@ -566,6 +593,9 @@ func (h *SreyunCore) renderHostChart(hostRef, metricsRaw string, from, to int64,
 		}),
 	}
 	sum := fmt.Sprintf("已生成「%s」趋势图（%d 点，指标 %s）", title, len(samples), strings.Join(metrics, ","))
+	if note := historyCoverageNote(samples, from, to); note != "" {
+		sum += "。" + note
+	}
 	return capabilityJSON(capabilityResult{
 		OK:      true,
 		Summary: sum,
@@ -778,7 +808,9 @@ func (h *SreyunCore) execAnalyzeMetricTrend(args map[string]any) (string, error)
 		}),
 	}
 	sum := fmt.Sprintf("已完成 %s 近 %s 趋势分析", hst.Hostname, rangeLabel)
-	if len(notable) > 0 {
+	if note := historyCoverageNote(samples, from, to); note != "" {
+		sum += "。" + note + "，勿把局部波动当成全程趋势"
+	} else if len(notable) > 0 {
 		sum += "；显著变化：" + strings.Join(notable, "，")
 	} else {
 		sum += "；整体波动平稳"
@@ -924,9 +956,6 @@ func (h *SreyunCore) execForecastMetric(args map[string]any) (string, error) {
 			threshold, hasThr = th.DiskWarn, true
 		}
 	}
-	if bias := h.s.forecastBiasHints(title+" "+metricKey, 2); bias != "" {
-		_ = bias
-	}
 	learnKey := "ai:" + metricKey
 	if hostID != "" {
 		learnKey = "ai:" + hostID + ":" + metricKey
@@ -935,6 +964,24 @@ func (h *SreyunCore) execForecastMetric(args map[string]any) (string, error) {
 	if errMsg != "" {
 		return capabilityJSON(capabilityResult{OK: false, Error: errMsg}), nil
 	}
+
+	// 记台账 + 套用已学到的偏差/尺度校准，闭合"预测 → 等实测 → 评估 → 纠偏"这一圈。
+	//
+	// 这一步此前完全没有接线：finalizeForecastWithLearning / noteForecastLedger 在整个
+	// 生产代码里没有任何调用点（只有测试在调），所以 Ledgers 永远是空的，
+	// runForecastLearnLoop 每 10 分钟醒来什么都评估不到，Calibs 的 EvalCount 恒为 0，
+	// 于是 learnAdjustCandidateScore 和 applyForecastCalibration 全都在第一行就 return，
+	// forecastBiasHints 也永远取不到内容——"预测自学习"整条链路是死的。
+	//
+	// evalExpr 必须给得出来才能评估：evaluateOneLedger 用 PromQL 去查当时的真实值，
+	// Expr 为空的台账会被直接跳过。主机指标这里补上等价的 PromQL（与
+	// sampleMetricValue 的口径逐字对应，含 /1048576 的单位换算）。
+	evalExpr := strings.TrimSpace(expr)
+	if evalExpr == "" && hostID != "" {
+		evalExpr = hostMetricPromExpr(hostID, metricKey)
+	}
+	anchor := hist[len(hist)-1][1]
+	band, method, _ = h.s.finalizeForecastWithLearning(learnKey, method, evalExpr, band, to, horizonSec, step, anchor)
 
 	// Build chat chart: history solid + forecast dashed
 	seriesDefs := []map[string]any{
@@ -973,9 +1020,6 @@ func (h *SreyunCore) execForecastMetric(args map[string]any) (string, error) {
 
 	sum := fmt.Sprintf("已完成预测（%s，MAPE≈%.1f%%，R²≈%.2f，方法 %s，展望 %s）",
 		rangeLabel, mape, r2, method, formatHorizon(horizonSec))
-	if bias := h.s.forecastBiasHints(metricKey+" "+title, 2); bias != "" {
-		sum += "；已注入历史偏差修正提示"
-	}
 	lastVal := hist[len(hist)-1][1]
 	data := map[string]any{
 		"mape": mape, "r2": r2, "method": method,
@@ -985,8 +1029,15 @@ func (h *SreyunCore) execForecastMetric(args map[string]any) (string, error) {
 		"forecast_lo":   round3(band[len(band)-1].Lo),
 		"metric":        metricKey,
 	}
+	// 历史偏差记忆真正回到模型手上。原来这里只是「算出来、扔掉、然后在文案里
+	// 声称已注入」——bias 变量赋值后从未被使用，模型看到的上下文里根本没有它。
+	if bias := h.s.forecastBiasHints(metricKey+" "+title, 2); bias != "" {
+		data["bias_hints"] = bias
+		sum += "；已结合历史偏差记忆修正"
+	}
 	if hasThr {
-		if cross, ok := forecastCrossThreshold(hist, threshold, step); ok {
+		// 用画出来的那条曲线判断穿越，保证「图上看到的」和「据以预警的」是同一个预测。
+		if cross, ok := crossThresholdInBand(band, lastVal, threshold); ok {
 			data["cross_threshold_at"] = cross
 			data["cross_threshold_in"] = cross - to
 			data["threshold"] = threshold

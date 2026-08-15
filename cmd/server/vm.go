@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -77,6 +78,15 @@ type vmWriter struct {
 	readBreaker  *vmCircuitBreaker
 	historyCache *vmHistoryCache
 	dropped      atomic.Uint64
+	stopCh       chan struct{}
+	stopped      chan struct{}
+	stopOnce     sync.Once
+	// rawCh carries pre-formatted Prometheus text lines (hardware / SNMP / NetFlow /
+	// Hyper-V / exporter scrape) through the SAME batch+retry pipeline as host
+	// samples. 这些指标此前是「每次调用起一个 goroutine 发一个请求、失败就算了」：
+	// SNMP 一轮几十台设备就是几十个并发请求，VM 一抖就集体失败，而且没有任何重试，
+	// VM 重启期间这些数据永久丢失——比主机曲线还容易断。
+	rawCh chan string
 }
 
 func newVMWriter(cfg *ConfigStore) *vmWriter {
@@ -92,6 +102,9 @@ func newVMWriter(cfg *ConfigStore) *vmWriter {
 		breaker:      newVMCircuitBreaker(),
 		readBreaker:  newVMCircuitBreaker(),
 		historyCache: newVMHistoryCache(),
+		stopCh:       make(chan struct{}),
+		stopped:      make(chan struct{}),
+		rawCh:        make(chan string, 4096),
 	}
 }
 
@@ -146,33 +159,71 @@ func (v *vmWriter) enqueue(hostID, hostname, category string, ts int64, m shared
 }
 
 // run batches queued samples and pushes them to VM every few seconds.
+// Failed pushes keep the batch and retry next tick — dropping them was why a
+// VM restart punched a hole in every chart (RAM had the points, VM never did).
 func (v *vmWriter) run() {
+	defer close(v.stopped)
 	buf := make([]vmSample, 0, 512)
 	cbuf := make([]vmCheckSample, 0, 256)
 	abuf := make([]vmAPISample, 0, 256)
+	rbuf := make([]string, 0, 256)
 	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
 	flush := func() {
-		if len(buf) == 0 && len(cbuf) == 0 && len(abuf) == 0 {
+		if v.cfg == nil {
+			buf, cbuf, abuf, rbuf = buf[:0], cbuf[:0], abuf[:0], rbuf[:0]
 			return
 		}
-		if c := v.cfg.VMConfig(); c.Enabled && c.URL != "" {
-			if len(buf) > 0 {
-				v.push(c.URL, buf)
-			}
-			if len(cbuf) > 0 {
-				v.pushChecks(c.URL, cbuf)
-			}
-			if len(abuf) > 0 {
-				v.pushAPI(c.URL, abuf)
+		c := v.cfg.VMConfig()
+		if !c.Enabled || c.URL == "" {
+			buf, cbuf, abuf, rbuf = buf[:0], cbuf[:0], abuf[:0], rbuf[:0]
+			return
+		}
+		if len(buf) > 0 && v.push(c.URL, buf) {
+			buf = buf[:0]
+		} else if len(buf) > vmRetryBufMax {
+			slog.Warn("VictoriaMetrics 主机样本重试队列过长，丢弃最旧一批", "kept", vmRetryBufMax, "dropped", len(buf)-vmRetryBufMax)
+			buf = append([]vmSample(nil), buf[len(buf)-vmRetryBufMax:]...)
+		}
+		if len(cbuf) > 0 && v.pushChecks(c.URL, cbuf) {
+			cbuf = cbuf[:0]
+		} else if len(cbuf) > vmRetryBufMax {
+			cbuf = append([]vmCheckSample(nil), cbuf[len(cbuf)-vmRetryBufMax:]...)
+		}
+		if len(abuf) > 0 && v.pushAPI(c.URL, abuf) {
+			abuf = abuf[:0]
+		} else if len(abuf) > vmRetryBufMax {
+			abuf = append([]vmAPISample(nil), abuf[len(abuf)-vmRetryBufMax:]...)
+		}
+		if len(rbuf) > 0 && v.pushRaw(c.URL, rbuf) {
+			rbuf = rbuf[:0]
+		} else if len(rbuf) > vmRetryBufMax {
+			slog.Warn("VictoriaMetrics 硬件/网络指标重试队列过长，丢弃最旧一批", "kept", vmRetryBufMax, "dropped", len(rbuf)-vmRetryBufMax)
+			rbuf = append([]string(nil), rbuf[len(rbuf)-vmRetryBufMax:]...)
+		}
+	}
+	drain := func() {
+		for {
+			select {
+			case s := <-v.ch:
+				buf = append(buf, s)
+			case cs := <-v.checkCh:
+				cbuf = append(cbuf, cs)
+			case as := <-v.apiCh:
+				abuf = append(abuf, as)
+			case raw := <-v.rawCh:
+				rbuf = append(rbuf, raw)
+			default:
+				return
 			}
 		}
-		buf = buf[:0]
-		cbuf = cbuf[:0]
-		abuf = abuf[:0]
 	}
 	for {
 		select {
+		case <-v.stopCh:
+			drain()
+			flush()
+			return
 		case s := <-v.ch:
 			buf = append(buf, s)
 			if len(buf) >= 512 {
@@ -188,15 +239,94 @@ func (v *vmWriter) run() {
 			if len(abuf) >= 256 {
 				flush()
 			}
+		case raw := <-v.rawCh:
+			rbuf = append(rbuf, raw)
+			if len(rbuf) >= 256 {
+				flush()
+			}
 		case <-t.C:
 			flush()
 		}
 	}
 }
 
+const vmRetryBufMax = 4096
+
+// vmImportDone reports whether a batch is FINISHED WITH — i.e. the caller may
+// clear it. It is deliberately not the same as "succeeded".
+//
+// 重试必须区分「服务端暂时不行」和「这批数据本身不合法」：
+//
+//   - 网络错误 / 熔断打开 / 5xx / 429 → VM 侧的问题，重试一定要有，否则就是当初那个
+//     「VM 一重启，每台主机曲线上留一个永远补不回来的洞」。
+//   - 其它 4xx → 这批内容有问题（一条非法标签、一个 NaN、超长的标签值）。重试一万次
+//     也不会变成 2xx，却会每 5 秒原样重发一次，把后面所有健康数据一起堵在队列里，
+//     直到被 vmRetryBufMax 挤掉——一条坏样本可以让整台服务器的时序写入长期瘫痪。
+//     这种批次要丢掉并大声报警，而不是无限重试。
+func (v *vmWriter) vmImportDone(resp *http.Response, err error, kind string, n int) bool {
+	if err != nil {
+		slog.Warn("VictoriaMetrics 写入失败（将重试）", "kind", kind, "n", n, "err", err)
+		return false
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+	switch {
+	case resp.StatusCode/100 == 2:
+		return true
+	case resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests:
+		slog.Warn("VictoriaMetrics 暂时不可用（将重试）", "kind", kind, "status", resp.StatusCode, "n", n)
+		return false
+	default:
+		// 5xx 已经在 doVMRequest 里打过熔断器，4xx 没有。
+		if v.breaker != nil {
+			v.breaker.failure()
+		}
+		slog.Warn("VictoriaMetrics 拒绝写入（不可重试，该批已丢弃）",
+			"kind", kind, "status", resp.StatusCode, "n", n)
+		return true
+	}
+}
+
+// vmImport posts one pre-formatted Prometheus text body. Returns whether the
+// batch may be cleared (see vmImportDone).
+func (v *vmWriter) vmImport(url, body, kind string, n int) bool {
+	if strings.TrimSpace(body) == "" {
+		return true
+	}
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(url, "/")+"/api/v1/import/prometheus", strings.NewReader(body))
+	if err != nil {
+		return true // 构造失败是编程错误，重试不会好转
+	}
+	req.Header.Set("Content-Type", "text/plain")
+	resp, err := v.doVMRequest(req)
+	return v.vmImportDone(resp, err, kind, n)
+}
+
+// pushRaw writes the batched hardware / SNMP / NetFlow / Hyper-V / scrape lines.
+func (v *vmWriter) pushRaw(url string, lines []string) bool {
+	if len(lines) == 0 {
+		return true
+	}
+	return v.vmImport(url, strings.Join(lines, "\n")+"\n", "raw", len(lines))
+}
+
+// shutdown flushes in-flight VM writes. Safe to call once; no-op if run() never started
+// (waits up to d then returns).
+func (v *vmWriter) shutdown(d time.Duration) {
+	if v == nil {
+		return
+	}
+	v.stopOnce.Do(func() { close(v.stopCh) })
+	select {
+	case <-v.stopped:
+	case <-time.After(d):
+		slog.Warn("VictoriaMetrics 写入队列关闭超时，未刷完的样本会丢失")
+	}
+}
+
 // pushChecks 把拨测结果批量写入 VM（Prometheus 文本格式）。
 // 指标：aiops_check_up(1/0) / _latency_ms / _status_code / _loss_pct，label 含 check_id/check_type/name。
-func (v *vmWriter) pushChecks(url string, samples []vmCheckSample) {
+func (v *vmWriter) pushChecks(url string, samples []vmCheckSample) bool {
 	var b strings.Builder
 	for _, s := range samples {
 		lbl := fmt.Sprintf(`check_id="%s",check_type="%s",name="%s"`, lblEsc(s.checkID), lblEsc(s.checkType), lblEsc(s.name))
@@ -232,17 +362,7 @@ func (v *vmWriter) pushChecks(url string, samples []vmCheckSample) {
 			fmt.Fprintf(&b, "aiops_check_resp_bytes{%s} %d %d\n", lbl, s.respBytes, ms)
 		}
 	}
-	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(url, "/")+"/api/v1/import/prometheus", strings.NewReader(b.String()))
-	if err != nil {
-		return
-	}
-	req.Header.Set("Content-Type", "text/plain")
-	resp, err := v.doVMRequest(req)
-	if err != nil {
-		slog.Warn("VictoriaMetrics 写入拨测数据失败", "err", err)
-		return
-	}
-	resp.Body.Close()
+	return v.vmImport(url, b.String(), "checks", len(samples))
 }
 
 // writeLabeled 把带标签样本以 Prometheus 文本格式写入 VM（/api/v1/import/prometheus）。
@@ -278,17 +398,9 @@ func (v *vmWriter) writeLabeled(samples []shared.LabeledSample) {
 		}
 		fmt.Fprintf(&b, " %g %d\n", s.Value, s.TsMs)
 	}
-	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(c.URL, "/")+"/api/v1/import/prometheus", strings.NewReader(b.String()))
-	if err != nil {
-		return
-	}
-	req.Header.Set("Content-Type", "text/plain")
-	resp, err := v.doVMRequest(req)
-	if err != nil {
-		slog.Warn("VictoriaMetrics 写入抓取指标失败", "err", err)
-		return
-	}
-	resp.Body.Close()
+	// 与 pushRawLine 同一条管道：批量、失败重试、停机排空。此前这里是「发一次，
+	// 失败就丢」，于是 exporter 抓取来的指标在 VM 重启期间同样是永久缺口。
+	v.pushRawLine(strings.TrimRight(b.String(), "\n"))
 }
 
 // queryCheckHistory 从 VM 读取某拨测在 [from,to] 的结果序列，重组为 []CheckPoint（重启后仍可查历史）。
@@ -384,7 +496,7 @@ func parseVMCheckExport(r io.Reader) []CheckPoint {
 // pushAPI 把 API 性能监控探测结果批量写入 VM（Prometheus 文本格式）。
 // 指标：aiops_api_up(1/0) / _latency_ms / _status_code / _dns_ms / _tcp_ms /
 // _tls_ms / _ttfb_ms / _cert_days / _resp_bytes，label 含 api_id/system/endpoint。
-func (v *vmWriter) pushAPI(url string, samples []vmAPISample) {
+func (v *vmWriter) pushAPI(url string, samples []vmAPISample) bool {
 	var b strings.Builder
 	for _, s := range samples {
 		lbl := fmt.Sprintf(`api_id="%s",system="%s",endpoint="%s"`, lblEsc(s.apiID), lblEsc(s.system), lblEsc(s.endpoint))
@@ -417,17 +529,7 @@ func (v *vmWriter) pushAPI(url string, samples []vmAPISample) {
 			fmt.Fprintf(&b, "aiops_api_resp_bytes{%s} %d %d\n", lbl, s.respBytes, ms)
 		}
 	}
-	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(url, "/")+"/api/v1/import/prometheus", strings.NewReader(b.String()))
-	if err != nil {
-		return
-	}
-	req.Header.Set("Content-Type", "text/plain")
-	resp, err := v.doVMRequest(req)
-	if err != nil {
-		slog.Warn("VictoriaMetrics 写入 API 监控数据失败", "err", err)
-		return
-	}
-	resp.Body.Close()
+	return v.vmImport(url, b.String(), "api", len(samples))
 }
 
 // queryAPIHistory 从 VM 读取某接口在 [from,to] 的探测序列，重组为 []APIHistPoint（历史曲线）。
@@ -859,7 +961,7 @@ func lblEsc(s string) string {
 }
 
 // push formats the samples as Prometheus text and imports them into VM.
-func (v *vmWriter) push(url string, samples []vmSample) {
+func (v *vmWriter) push(url string, samples []vmSample) bool {
 	var b strings.Builder
 	for _, s := range samples {
 		lbl := fmt.Sprintf(`host="%s",instance="%s"`, lblEsc(s.hostID), lblEsc(s.hostname))
@@ -939,24 +1041,7 @@ func (v *vmWriter) push(url string, samples []vmSample) {
 			fmt.Fprintf(&b, "aiops_net_conn_count{%s} %g %d\n", cl, float64(c.Count), ms)
 		}
 	}
-	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(url, "/")+"/api/v1/import/prometheus", strings.NewReader(b.String()))
-	if err != nil {
-		return
-	}
-	req.Header.Set("Content-Type", "text/plain")
-	resp, err := v.doVMRequest(req)
-	if err != nil {
-		slog.Warn("VictoriaMetrics 写入失败", "err", err, "n", len(samples))
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		slog.Warn("VictoriaMetrics 写入被拒绝", "status", resp.StatusCode, "n", len(samples))
-		// 5xx already tripped the breaker in doVMRequest; 4xx did not.
-		if resp.StatusCode < 500 && v.breaker != nil {
-			v.breaker.failure()
-		}
-	}
+	return v.vmImport(url, b.String(), "samples", len(samples))
 }
 
 // enabled reports whether VM is the active time-series store.
@@ -1163,7 +1248,12 @@ func (v *vmWriter) queryHistoryFilter(hostID string, from, to int64, names []str
 		return out, true
 	}
 	if out, ok := v.queryHistoryRangeNames(hostID, from, to, step, names); ok && len(out) > 0 {
-		v.historyCache.put(key, out, vmHistoryCacheTTL(step))
+		// Incomplete windows (VM just came back with two minutes of new data
+		// for a 24h chart) must not be cached — that froze the short slice
+		// for the whole TTL and made every poll look like a broken trend.
+		if vmHistoryCacheable(out, from, to) {
+			v.historyCache.put(key, out, vmHistoryCacheTTL(step))
+		}
 		return out, true
 	}
 	// query_range used to be `{__name__=~"aiops_.*"}` which exploded on
@@ -1173,7 +1263,7 @@ func (v *vmWriter) queryHistoryFilter(hostID string, from, to int64, names []str
 	// covers ≤24h when the selector is missing.
 	if queryHistoryAllowsExportFallback(to - from) {
 		out, ok := v.queryHistoryExportNames(hostID, from, to, names)
-		if ok && len(out) > 0 {
+		if ok && len(out) > 0 && vmHistoryCacheable(out, from, to) {
 			v.historyCache.put(key, out, vmHistoryCacheTTL(step))
 		}
 		return out, ok
@@ -1326,41 +1416,44 @@ func (v *vmWriter) pushHardwareLabeled(hostID, target string, ts int64, metric s
 // pushRawLine writes one Prometheus text line directly to VM (fire-and-forget).
 // Used by hardware/netflow metrics that don't fit the standard sample pipeline.
 func (v *vmWriter) pushRawLine(line string) {
-	if v == nil || !v.enabled() {
+	if v == nil || !v.enabled() || strings.TrimSpace(line) == "" {
 		return
 	}
-	c := v.cfg.VMConfig()
-	go func() {
-		body := line + "\n"
-		req, err := http.NewRequest("POST", c.URL+"/api/v1/import/prometheus", strings.NewReader(body))
-		if err != nil {
-			return
+	select {
+	case v.rawCh <- strings.TrimRight(line, "\n"):
+	default:
+		n := v.dropped.Add(1)
+		if n == 1 || n%200 == 0 {
+			slog.Warn("VictoriaMetrics 写入队列已满，硬件/网络指标样本被丢弃", "dropped", n)
 		}
-		req.Header.Set("Content-Type", "text/plain")
-		resp, err := v.doVMRequest(req)
-		if err != nil {
-			return
-		}
-		resp.Body.Close()
-	}()
+	}
 }
 
 // queryRawRange executes a range query against VM and returns raw results.
 // Step adapts to the window so SNMP/hardware/netflow charts stay dense on 1h
 // and bounded on 7d/14d (fixed step=60 used to under/oversample by range).
 func (v *vmWriter) queryRawRange(promql string, from, to int64) []any {
-	c := v.cfg.VMConfig()
-	if !c.Enabled || c.URL == "" {
+	if v == nil || !v.enabled() {
 		return nil
 	}
+	c := v.cfg.VMConfig()
 	step := adaptiveHistoryStep(from, to)
+	// TrimRight：配置里的 URL 带结尾斜杠时，原写法会拼出 //api/v1/query_range，
+	// VM 直接 404 —— SNMP/硬件/NetFlow 图表整片空白，且没有任何报错线索。
 	u := fmt.Sprintf("%s/api/v1/query_range?query=%s&start=%d&end=%d&step=%d",
-		c.URL, url.QueryEscape(promql), from, to, step)
-	resp, err := v.httpc.Get(u)
+		strings.TrimRight(c.URL, "/"), url.QueryEscape(promql), from, to, step)
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return nil
+	}
+	resp, err := v.doVMQuery(req)
 	if err != nil {
 		return nil
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
 	var result struct {
 		Data struct {
 			Result []any `json:"result"`

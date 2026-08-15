@@ -163,9 +163,11 @@ if command -v systemctl >/dev/null 2>&1 && [ "$(id -u)" -eq 0 ]; then
     f=/etc/systemd/system/${u}.service; [ -f "$f" ] || continue
     sed -i -e "s/^User=.*/User=root/" -e "s/^ProtectHome=.*/ProtectHome=false/" \
       -e "s/^ProtectSystem=.*/ProtectSystem=false/" -e "s/^PrivateTmp=.*/PrivateTmp=false/" \
-      -e "s/^NoNewPrivileges=.*/NoNewPrivileges=false/" -e "/^CapabilityBoundingSet=/d" "$f" 2>/dev/null || true
+      -e "s/^NoNewPrivileges=.*/NoNewPrivileges=false/" -e "s/^KillMode=.*/KillMode=process/" \
+      -e "/^CapabilityBoundingSet=/d" "$f" 2>/dev/null || true
     grep -q "^ProtectSystem=false" "$f" || echo "ProtectSystem=false" >> "$f"
     grep -q "^User=root" "$f" || echo "User=root" >> "$f"
+    grep -q "^KillMode=process" "$f" || echo "KillMode=process" >> "$f"
   done; systemctl daemon-reload' 2>/dev/null || true
   # 没有任何单元时才做完整安装（--install-service 会 stop+删除单元，是破坏性的）。
   if ! unit_file_exists && [ -n "$CFG" ]; then
@@ -812,6 +814,20 @@ func legacyWindowsAgentUpdateScript(server, bin, sha string) string {
 	// 由绝对路径的 Windows PowerShell 执行，不会落到没有 [wmiclass] 的 pwsh 上）。预算见
 	// windowsUpdateBootstrapMaxLen；新增逻辑请优先放进服务端下发的助手正文。
 	//
+	// 拉起助手的顺序是 WMI → 计划任务 → cmd start，**WMI 必须排在计划任务前面**。
+	//
+	// 三者都能把助手送出 Agent 的 Job Object，但计划任务多带一层任务调度器策略，而它的
+	// 默认值会让升级无声失败：DisallowStartIfOnBatteries=True 让电池供电的主机
+	// （Win10/11 笔记本、平板、暴露电池的虚拟机）「注册成功、Start 成功、任务从不运行」；
+	// StopIfGoingOnBatteries=True 会在升级途中掉电时把助手掐死在停服务与重启服务之间。
+	// 显式传 -Settings 能治，但那串参数塞不进 cmd.exe 的命令行预算
+	// （见 windowsUpdateBootstrapMaxLen——那条上限保护的正是这整条兜底链路）。
+	//
+	// Win32_Process.Create 没有这一层策略：进程由 WMI 服务创建，天然不在 Agent 的 Job 里，
+	// 且继承调用方令牌（Agent 服务是 LocalSystem，助手就是 SYSTEM）。把它提到第一位，
+	// 等于**从结构上**绕开电池策略，而不是靠加参数去补，一个字符的预算都不用花。
+	// 计划任务与 cmd start 保留为 WMI 被安全基线禁用时的退路。
+	//
 	// TLS：这段引导只下载助手脚本一个文件，而它的 SHA-256（$H）在服务端生成时就写死在
 	// 本文里，经 Agent 已鉴权、已验证证书的 exec 通道送达。因此严格校验失败时降级重试
 	// 一次是安全的——摘要对不上照样 throw。老 Windows 的根证书库里没有 ISRG Root X1
@@ -833,12 +849,12 @@ $P="$R\WindowsPowerShell\v1.0\powershell.exe"
 $A='-nop -noni -ep Bypass -File "'+$F+'" -Server "'+$S+'" -Bin "'+$B+'" -Sha "'+$D+'"'
 try{[void](& "$R\schtasks.exe" /End /TN $T 2>$null)}catch{}
 $k=$false
-try{
+try{if(([wmiclass]'Win32_Process').Create('"'+$P+'" '+$A).ReturnValue -eq 0){$k=$true}}catch{}
+if(-not $k){try{
  $q=@{TaskName=$T;Action=(New-ScheduledTaskAction -Execute $P -Argument $A);Trigger=(New-ScheduledTaskTrigger -Once -At ((Get-Date).AddYears(10)));Force=$true}
  try{Register-ScheduledTask @q -Principal (New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest)|Out-Null}catch{Register-ScheduledTask @q|Out-Null}
  Start-ScheduledTask -TaskName $T -EA Stop;$k=$true
-}catch{}
-if(-not $k){try{if(([wmiclass]'Win32_Process').Create('"'+$P+'" '+$A).ReturnValue -eq 0){$k=$true}}catch{}}
+}catch{}}
 if(-not $k){Start-Process -FilePath "$R\cmd.exe" -ArgumentList ('/c start "" /b "'+$P+'" '+$A) -WindowStyle Hidden}
 Write-Output "legacy agent update ok helper=$($a.Substring(0,12)) log=$W\$N.log"
 `,

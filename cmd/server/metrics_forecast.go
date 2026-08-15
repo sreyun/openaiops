@@ -26,7 +26,13 @@ type metricsForecastReq struct {
 }
 
 type metricsForecastIn struct {
-	Name   string             `json:"name"`
+	Name string `json:"name"`
+	// Key 是该序列对应的指标键（cpu / mem_percent / disk …）。可选，缺省时回退用
+	// Name。为什么需要它：HostID 拟合回看那一段要把 VM 历史前置到可见窗之前，
+	// 而查 VM 与取值都得靠指标键（vmNamesForMetricKeys / sampleGauge）。Name 是给人看的
+	// 图例（"CPU 使用率"、"系列1"），这两个函数都认不出来，于是回看一直是空的 ——
+	// 短窗预测拿不到额外历史，"3 分钟面板预测出一条离谱直线"就是这么来的。
+	Key    string             `json:"key,omitempty"`
 	Points []metricsFCPointIn `json:"points"` // [[tsSec, val], ...] or {t|ts|timestamp, v|value}
 }
 
@@ -116,6 +122,7 @@ func (s *Server) handleMetricsForecast(w http.ResponseWriter, r *http.Request) {
 	// with denser series like CPU%.
 	type prepared struct {
 		name string
+		key  string // 指标键（用于 VM 回看 + sampleGauge 取值），缺省回退 name
 		pts  [][2]float64
 		step int64
 		span int64
@@ -153,7 +160,11 @@ func (s *Server) handleMetricsForecast(w http.ResponseWriter, r *http.Request) {
 		if span > maxSpan {
 			maxSpan = span
 		}
-		prep = append(prep, prepared{name: name, pts: pts, step: step, span: span})
+		key := strings.TrimSpace(in.Key)
+		if key == "" {
+			key = name
+		}
+		prep = append(prep, prepared{name: name, key: key, pts: pts, step: step, span: span})
 	}
 	if req.NowTS > globalEnd {
 		globalEnd = req.NowTS
@@ -168,7 +179,7 @@ func (s *Server) handleMetricsForecast(w http.ResponseWriter, r *http.Request) {
 			fitFrom := globalEnd - maxSpan - forecastFitLookback(maxSpan)
 			keys := make([]string, 0, len(prep))
 			for _, p := range prep {
-				keys = append(keys, p.name)
+				keys = append(keys, p.key)
 			}
 			lookbackSamples, _ = s.loadDurableHostHistory(hid, fitFrom, globalEnd, vmNamesForMetricKeys(keys))
 		}
@@ -224,7 +235,7 @@ func (s *Server) handleMetricsForecast(w http.ResponseWriter, r *http.Request) {
 			hz = step * 8
 		}
 		learnKey := "" // UI metrics path: deterministic; no learn-key bias so model switches stay visible
-		fitPts := prependHistoryPoints(pts, lookbackSamples, p.name)
+		fitPts := prependHistoryPoints(pts, lookbackSamples, p.key)
 		fc, mape, r2, method, errMsg := robustForecastWithKey(fitPts, fromTS, hz, step, learnKey, reqMethod)
 		if errMsg != "" || len(fc) == 0 {
 			continue

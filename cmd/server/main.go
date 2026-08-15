@@ -450,7 +450,8 @@ func main() {
 	}
 
 	// Graceful shutdown: on SIGINT/SIGTERM, stop accepting new connections,
-	// drain active HTTP requests (up to 30s), flush PostgreSQL state, then exit.
+	// drain active HTTP requests (up to 30s), flush VictoriaMetrics ingest,
+	// flush PostgreSQL state, then exit.
 	// This replaces the old os.Exit(0) approach which bypassed defer cleanup
 	// and forcibly dropped active connections.
 	sigCh := make(chan os.Signal, 1)
@@ -463,6 +464,11 @@ func main() {
 		if err := srv.Shutdown(ctx); err != nil {
 			slog.Warn("HTTP 服务关闭异常", "err", err)
 		}
+		// Drain the VM ingest queue before PG: a SIGTERM used to os.Exit with
+		// the last 5s batch still in memory, which is why a "clean" restart
+		// punched a hole in every chart. HTTP shutdown has already finished
+		// in-flight /agent/report handlers, so this is the last enqueue.
+		server.vm.shutdown(vmQueryTimeout() + 2*time.Second)
 		// Final flush of all relational state to PostgreSQL, then close cleanly.
 		server.pgFlush(pg, true)
 		pg.close()

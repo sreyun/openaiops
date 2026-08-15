@@ -35,7 +35,7 @@ var (
 )
 
 const (
-	cpACP  = 0    // system default ANSI code page (GBK on Chinese Windows)
+	cpACP  = 0 // system default ANSI code page (GBK on Chinese Windows)
 	cpUTF8 = 65001
 )
 
@@ -157,7 +157,9 @@ func newPTY(cols, rows int) termShell {
 	}
 	envBlock := envToUTF16Block(buildShellEnv())
 	var envPtr uintptr
-	creationFlags := uintptr(extendedStartupInfoPresent)
+	// Break away from the SCM job and start a new process group so a service
+	// stop cannot tear down Java/cmd started from the remote terminal.
+	creationFlags := uintptr(extendedStartupInfoPresent | createBreakawayJob | createNewProcessGroup)
 	if len(envBlock) > 0 {
 		envPtr = uintptr(unsafe.Pointer(&envBlock[0]))
 		creationFlags |= createUnicodeEnvironment
@@ -167,11 +169,11 @@ func newPTY(cols, rows int) termShell {
 		0,                                    // application name
 		uintptr(unsafe.Pointer(&cmdline[0])), // command line (mutable buffer)
 		0, 0,                                 // process / thread security
-		0,                                    // bInheritHandles = FALSE (ConPTY passes stdio via the attribute)
-		creationFlags,                        // creation flags
-		envPtr, cwdPtr,                       // environment / current dir
-		uintptr(unsafe.Pointer(&si)),         // lpStartupInfo (STARTUPINFOEX)
-		uintptr(unsafe.Pointer(&pi)),         // lpProcessInformation
+		0,              // bInheritHandles = FALSE (ConPTY passes stdio via the attribute)
+		creationFlags,  // creation flags
+		envPtr, cwdPtr, // environment / current dir
+		uintptr(unsafe.Pointer(&si)), // lpStartupInfo (STARTUPINFOEX)
+		uintptr(unsafe.Pointer(&pi)), // lpProcessInformation
 	)
 	procDeleteProcThreadAttributeList.Call(attrList)
 	if r == 0 {

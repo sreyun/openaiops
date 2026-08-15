@@ -161,7 +161,7 @@ func moduleAgentUpdate(args map[string]string, allowedBases []string) ([]byte, i
 	cfgPath := agentUpdateConfigPath(dir)
 	if err := agentReplaceAndRestart(exe, staging, cfgPath); err != nil {
 		_ = os.Remove(staging)
-		return []byte("agent_update: " + err.Error()), 1
+		return []byte("agent_update: " + err.Error() + takeUpdateDiagnostics()), 1
 	}
 	msg := fmt.Sprintf("agent_update: staged %s sha256=%s from=%s → restart scheduled (was %s",
 		binName, expected[:12], server, agentVersion())
@@ -172,7 +172,61 @@ func moduleAgentUpdate(args map[string]string, allowedBases []string) ([]byte, i
 	if runtime.GOOS == "windows" {
 		msg += " [windows: scheduled-task/breakaway helper]"
 	}
-	return []byte(msg), 0
+	return []byte(msg + takeUpdateDiagnostics()), 0
+}
+
+// updateDiagnostics carries the PREVIOUS run's restart-helper evidence back to
+// the server through this run's module output.
+//
+// 为什么值得专门做：Windows 的换版发生在 Agent 被杀之后的独立进程里，成败只写在主机本地
+// 的 aiops-agent-update.log。一旦助手没跑成，服务端看到的永远只是「restart scheduled」+
+// 版本号不动——没人会去几百台机器上逐台翻那个日志，于是「Windows 升不上去」就成了一个
+// 谁也说不清原因的现象。把上一轮的日志尾巴捎回来，操作台的任务详情里就能直接看到
+// "task did not run"、"Access is denied"、"Move-Item failed" 这类真正的原因。
+var updateDiagnostics struct {
+	mu   sync.Mutex
+	text string
+}
+
+func setUpdateDiagnostics(s string) {
+	updateDiagnostics.mu.Lock()
+	updateDiagnostics.text = s
+	updateDiagnostics.mu.Unlock()
+}
+
+// takeUpdateDiagnostics 取出并清空诊断信息（只捎带一次，避免重复刷屏）。
+func takeUpdateDiagnostics() string {
+	updateDiagnostics.mu.Lock()
+	defer updateDiagnostics.mu.Unlock()
+	s := updateDiagnostics.text
+	updateDiagnostics.text = ""
+	if s == "" {
+		return ""
+	}
+	return "\n--- 上一轮升级助手留下的记录 ---\n" + s
+}
+
+// tailFileForDiagnostics 读取文件末尾至多 max 字节（文件不存在返回空）。
+func tailFileForDiagnostics(path string, max int64) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || st.Size() == 0 {
+		return ""
+	}
+	off := int64(0)
+	n := st.Size()
+	if n > max {
+		off, n = n-max, max
+	}
+	buf := make([]byte, n)
+	if _, err := f.ReadAt(buf, off); err != nil && err != io.EOF {
+		return ""
+	}
+	return strings.TrimSpace(string(buf))
 }
 
 func moduleAgentRollback() ([]byte, int) {

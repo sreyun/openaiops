@@ -367,7 +367,7 @@ func runArgv(argv []string) ([]byte, int) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Env = execEnv()
-	out, err := cmd.CombinedOutput()
+	out, err := runCmdEscaped(cmd)
 	exit := 0
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {

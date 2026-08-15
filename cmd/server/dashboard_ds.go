@@ -34,13 +34,20 @@ func parsePromMatrixBody(body []byte) ([]promMatrix, bool) {
 			if len(pair) < 2 {
 				continue
 			}
-			tsF, _ := pair[0].(float64)
+			// 必须走 promTsSeconds：直接 .(float64) 断言在时间戳被编码成字符串/
+			// json.Number 时会静默得到 0，整条曲线塌到 1970。内置 VM 路径
+			// （vmQueryRangeSeries）早就修过这个坑，外部 Prometheus/VM 数据源这条
+			// 解析路径却一直漏着——同一个仪表盘换个数据源就画出乱码般的曲线。
+			tsSec, ok := promTsSeconds(pair[0])
+			if !ok {
+				continue
+			}
 			sv, _ := pair[1].(string)
 			f, err := strconv.ParseFloat(sv, 64)
 			if err != nil {
-				continue
+				continue // 跳过 NaN/Inf
 			}
-			pts = append(pts, [2]float64{tsF, f})
+			pts = append(pts, [2]float64{float64(tsSec), f})
 		}
 		series = append(series, promMatrix{Labels: r.Metric, Points: pts})
 	}

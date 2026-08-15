@@ -880,8 +880,114 @@ func prepareForecastSeries(hist [][2]float64, step int64) (vals, ts []float64, e
 	for i, p := range raw {
 		ts[i], vals[i] = p.t, p.v
 	}
-	// 保留原始波动供形态回放；极端野值仅在非突发路径由 fitVals 掐尖
+	// 保留原始波动供形态回放；极端野值仅在非突发路径由 fitVals 掐尖。
+	// 重采样到均匀栅格后再交给各模型——原因见 resampleForecastSeries。
+	return resampleForecastSeries(ts, vals, step)
+}
+
+// forecastMaxFitPoints 限制拟合栅格的点数：自定义超长窗（90 天）配上小 step
+// 会算出几十万个点，模型是 O(n·候选数)，会把一次图表刷新拖成秒级。
+const forecastMaxFitPoints = 3000
+
+// resampleForecastSeries 把不等间隔的历史点重采样到固定 step 的均匀时间栅格。
+//
+// 这是整个预测/趋势链路里最关键的一步，之前完全缺失。本文件所有模型
+// （dampedHoltForecast / driftForecast / holtWintersForecast / seasonalNaiveForecast /
+// shapeReplayForecast）都是**按数组下标**递推的：它们默认 vals[i] 与 vals[i+1]
+// 相隔恰好一个 step。而实际喂进来的序列几乎从来不是均匀的：
+//
+//   - 主机详情曲线 = VM 那半（adaptiveHistoryStep，24h 窗为 180s）+ 内存实时尾巴
+//     （Agent 上报间隔 5～10s）拼接而成；
+//   - /metrics/forecast 还会把更粗粒度的 VM lookback 直接前置到可见窗之前；
+//   - VM 的 query_range 在无数据的评估点上不出点，alignSamplesToStep 又会跳过
+//     超过 3 个 step 的空洞，于是序列里天然带断点。
+//
+// 后果是系统性的：drift 的斜率是 (末值-中值)/下标差，密集尾段会让「每步变化」
+// 按下标而不是按时间计算，外推时再乘以 step 秒——24h 窗下末段斜率被放大近 20 倍。
+// 磁盘写满时间、CPU 触阈 ETA、AI 预警（raiseForecastEarlyWarning）全部建立在这个
+// 斜率上，所以表现出来就是"趋势分析异常"：一会儿说 2 小时后写满，一会儿说 30 天。
+//
+// 另外还要处理断点：跨越真实中断（主机离线、VM 空洞）做线性插值等于凭空造数据，
+// 更糟的是把中断前后的水位差当成趋势。这里的做法是只保留**最后一段连续区间**。
+func resampleForecastSeries(rawTs, rawVals []float64, step int64) (vals, ts []float64, errMsg string) {
+	n := len(rawTs)
+	if n < 2 || step < 1 {
+		return rawVals, rawTs, ""
+	}
+	fstep := float64(step)
+	maxGap := fstep * 5
+	if med := medianDeltaOf(rawTs); med > 0 && med*5 > maxGap {
+		maxGap = med * 5
+	}
+	start := 0
+	for i := n - 1; i > 0; i-- {
+		if rawTs[i]-rawTs[i-1] > maxGap {
+			start = i
+			break
+		}
+	}
+	// 尾段太短就退回整段：宁可带着断点拟合，也好过只剩两三个点直接判"数据不足"。
+	if n-start < 4 {
+		start = 0
+	}
+	rawTs, rawVals = rawTs[start:], rawVals[start:]
+	n = len(rawTs)
+
+	span := rawTs[n-1] - rawTs[0]
+	steps := int(span/fstep) + 1
+	if steps < 4 {
+		return rawVals, rawTs, "" // 跨度不足几个栅格，重采样反而丢信息
+	}
+	if steps > forecastMaxFitPoints {
+		steps = forecastMaxFitPoints
+	}
+
+	// 栅格锚在**最后一个真实采样点**上向前铺：末点必须精确，
+	// 因为 band 的起点、blendForecastAnchor 的锚点都取 vals[n-1]。
+	end := rawTs[n-1]
+	vals = make([]float64, steps)
+	ts = make([]float64, steps)
+	j := 0
+	for k := 0; k < steps; k++ {
+		t := end - float64(steps-1-k)*fstep
+		for j+1 < n && rawTs[j+1] <= t {
+			j++
+		}
+		ts[k] = t
+		switch {
+		case t <= rawTs[0]:
+			vals[k] = rawVals[0]
+		case j+1 >= n:
+			vals[k] = rawVals[n-1]
+		default:
+			t0, t1 := rawTs[j], rawTs[j+1]
+			if t1 <= t0 {
+				vals[k] = rawVals[j+1]
+				break
+			}
+			w := (t - t0) / (t1 - t0)
+			vals[k] = rawVals[j]*(1-w) + rawVals[j+1]*w
+		}
+	}
 	return vals, ts, ""
+}
+
+// medianDeltaOf 返回相邻时间戳差值的中位数（用于识别真实中断的阈值）。
+func medianDeltaOf(ts []float64) float64 {
+	if len(ts) < 2 {
+		return 0
+	}
+	d := make([]float64, 0, len(ts)-1)
+	for i := 1; i < len(ts); i++ {
+		if delta := ts[i] - ts[i-1]; delta > 0 {
+			d = append(d, delta)
+		}
+	}
+	if len(d) == 0 {
+		return 0
+	}
+	sort.Float64s(d)
+	return d[len(d)/2]
 }
 
 func atoiSuffix(name, prefix string) int {
@@ -1491,6 +1597,29 @@ func computePoPChange(cur, prev [][2]float64) (pct float64, ok bool) {
 		return 0, false
 	}
 	return (a - b) / math.Abs(b) * 100, true
+}
+
+// crossThresholdInBand 在**已经画给用户看的那条预测曲线**上找阈值穿越点。
+//
+// 为什么必须有这个函数：原来"预计 X 小时后触及阈值"是用 forecastCrossThreshold
+// 另跑一次 robustForecast 算出来的——不同的 horizon（step*200）、不同的选型入口
+// （无 learnKey、强制 auto），于是同一次回答里图上那条虚线和文字结论可以互相矛盾，
+// 而真正据以创建预警事件（raiseForecastEarlyWarning）的是文字那一路。
+// 用户看到的和系统据以告警的不是同一个预测，这个闭环本身就是断的。
+func crossThresholdInBand(band []forecastPoint, lastVal, threshold float64) (crossAt int64, ok bool) {
+	if len(band) == 0 {
+		return 0, false
+	}
+	rising := threshold > lastVal
+	for _, p := range band {
+		if rising && p.Value >= threshold {
+			return int64(p.TS), true
+		}
+		if !rising && p.Value <= threshold {
+			return int64(p.TS), true
+		}
+	}
+	return 0, false
 }
 
 // forecastDeadline helper for AI: estimate when series crosses threshold using linear trend.

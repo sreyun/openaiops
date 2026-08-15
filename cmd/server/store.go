@@ -350,7 +350,7 @@ func (s *Store) UpsertAuthenticated(r shared.Report, fingerprint string) (*Host,
 
 	// Tier 2: 1-min aggregates (last 48h)
 	if now-h.last1mTs >= hist1mInterval {
-		agg := h.aggregateSamples(h.histRaw, h.last1mTs, now, hist1mInterval)
+		agg := h.aggregateSamples(h.histRaw, aggWindowStart(h.last1mTs, now, hist1mInterval), now, hist1mInterval)
 		if agg != nil {
 			h.hist1m = append(h.hist1m, *agg)
 			if len(h.hist1m) > hist1mMax {
@@ -362,7 +362,7 @@ func (s *Store) UpsertAuthenticated(r shared.Report, fingerprint string) (*Host,
 
 	// Tier 3: 5-min aggregates (last 7 days)
 	if now-h.last5mTs >= hist5mInterval {
-		agg := h.aggregateSamples(h.hist1m, h.last5mTs, now, hist5mInterval)
+		agg := h.aggregateSamples(h.hist1m, aggWindowStart(h.last5mTs, now, hist5mInterval), now, hist5mInterval)
 		if agg != nil {
 			h.hist5m = append(h.hist5m, *agg)
 			if len(h.hist5m) > hist5mMax {
@@ -425,6 +425,23 @@ func hostMeta(h *Host) *Host {
 		cp.Latest = &l
 	}
 	return &cp
+}
+
+// aggWindowStart 把降采样窗口的起点钳制在「最多回看一个 interval」。
+//
+// 原来直接用 last1mTs / last5mTs 当起点，主机中断后重新上报时就出问题：
+// 假设一台机器掉线 4 小时再回来，last1mTs 停在 4 小时前，窗口就成了 [4h前, 现在)，
+// aggregateSamples 会把**整个 raw 环**（含中断前的全部样本）平均成一个点，
+// 再打上"现在"的时间戳塞进 1m 层。5m 层同理，还会把这个已经错的点再平均一遍。
+// 结果是内存分层里凭空出现一个跨越几小时的伪样本——VM 读失败回退到内存时，
+// 曲线上就是一个来路不明的平台，这正是"数据错乱"的一种。
+//
+// 首次聚合（last=0）同理：不钳制的话会把启动以来的所有样本压成一个点。
+func aggWindowStart(last, now, interval int64) int64 {
+	if lo := now - interval; last < lo {
+		return lo
+	}
+	return last
 }
 
 // aggregateSamples aggregates samples within [from, to] into a single sample.

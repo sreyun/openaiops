@@ -92,6 +92,126 @@ type serverTarget struct {
 	logKey []byte // 服务端注册时下发的日志加密密钥（32B AES-256）；空 = 明文上报
 
 	probeMu sync.Mutex // 分布式探测：确保同一 target 同时只跑一轮探测任务，避免慢探测堆积
+
+	// backfill 是发往**这个** target 失败的采样缓冲。每个 target 一份是必须的：
+	// 多面板部署里 A 通着、B 挂了，只有 B 欠着那些点，共用一份会让 A 收到重复数据。
+	backfillMu sync.Mutex
+	backfill   []shared.BackfillSample
+}
+
+// 补传缓冲的保留策略。
+//
+// 目标是「最长兜住 7 天的中断」，但 7 天 × 10 秒间隔 = 6 万多条样本，每条 Metrics
+// 带着磁盘/GPU/连接数组约 2~4 KB —— 原样缓存要 150~250 MB，装在被监控主机上完全
+// 不可接受：监控 Agent 绝不能因为服务端挂了而把业务机的内存吃掉。
+//
+// 所以按「越老越稀」分级保留，与服务端自己的 raw/1m/5m 分层同构：
+//
+//	  < 1h ：全部保留（原始分辨率，中断恢复后曲线看不出接缝）
+//	1h~24h：至少间隔 60s
+//	24h~7d：至少间隔 600s
+//	  > 7d ：丢弃
+//
+// 条数上限约 360 + 1380 + 864 ≈ 2600 条，内存占用稳定在 10 MB 量级，且**与中断时长
+// 无关**——中断越久，老数据自动变稀，不会无界增长。硬上限 agentBackfillMaxSamples
+// 是最后一道防线（采集间隔被调到 1 秒之类的极端配置）。
+const (
+	agentBackfillMaxAge      = 7 * 24 * time.Hour
+	agentBackfillFullWindow  = time.Hour        // 该窗口内不抽稀
+	agentBackfillMidWindow   = 24 * time.Hour   // 1h~24h
+	agentBackfillMidSpacing  = 60 * time.Second // 1h~24h 的最小间隔
+	agentBackfillOldSpacing  = 600 * time.Second
+	agentBackfillMaxSamples  = 4000
+	agentBackfillPerBatch    = 60               // 每批补传条数
+	agentBackfillDrainPeriod = 20 * time.Second // 后台补传节奏
+)
+
+// spoolBackfill 记下一条没能送出去的采样。
+func (t *serverTarget) spoolBackfill(s shared.BackfillSample) {
+	// 历史点不需要进程名列表：服务端的历史链路本来就会丢弃它（见 Store.UpsertAuthenticated
+	// 里的 sample.ProcessNames = nil），留着只会让缓冲和补传包白白膨胀几十倍。
+	s.Metrics.ProcessNames = nil
+	t.backfillMu.Lock()
+	defer t.backfillMu.Unlock()
+	t.backfill = append(t.backfill, s)
+	t.pruneBackfillLocked(s.Ts)
+}
+
+// pruneBackfillLocked 按分级保留策略压缩缓冲。调用方必须持有 backfillMu。
+// now 用最新样本的时间戳而不是 time.Now()，这样单元测试可以完全确定地驱动它。
+func (t *serverTarget) pruneBackfillLocked(now int64) {
+	if len(t.backfill) == 0 {
+		return
+	}
+	maxAge := int64(agentBackfillMaxAge / time.Second)
+	full := int64(agentBackfillFullWindow / time.Second)
+	mid := int64(agentBackfillMidWindow / time.Second)
+	midGap := int64(agentBackfillMidSpacing / time.Second)
+	oldGap := int64(agentBackfillOldSpacing / time.Second)
+
+	kept := t.backfill[:0]
+	var lastKept int64 = -1 << 62
+	for _, s := range t.backfill {
+		age := now - s.Ts
+		if age > maxAge {
+			continue // 超过 7 天：丢
+		}
+		gap := int64(0)
+		switch {
+		case age <= full:
+			gap = 0 // 最近 1 小时全留
+		case age <= mid:
+			gap = midGap
+		default:
+			gap = oldGap
+		}
+		if gap > 0 && s.Ts-lastKept < gap {
+			continue
+		}
+		kept = append(kept, s)
+		lastKept = s.Ts
+	}
+	t.backfill = kept
+	// 兜底硬上限：极端采集间隔下仍不允许无界增长，丢最旧的。
+	if n := len(t.backfill) - agentBackfillMaxSamples; n > 0 {
+		t.backfill = append(t.backfill[:0], t.backfill[n:]...)
+	}
+}
+
+// takeBackfill 取出最多 agentBackfillPerBatch 条待补传采样（最旧优先）。
+func (t *serverTarget) takeBackfill() []shared.BackfillSample {
+	t.backfillMu.Lock()
+	defer t.backfillMu.Unlock()
+	n := len(t.backfill)
+	if n == 0 {
+		return nil
+	}
+	if n > agentBackfillPerBatch {
+		n = agentBackfillPerBatch
+	}
+	out := make([]shared.BackfillSample, n)
+	copy(out, t.backfill[:n])
+	t.backfill = append(t.backfill[:0], t.backfill[n:]...)
+	return out
+}
+
+// backfillPending 返回当前还欠着多少条（用于日志/自检）。
+func (t *serverTarget) backfillPending() int {
+	t.backfillMu.Lock()
+	defer t.backfillMu.Unlock()
+	return len(t.backfill)
+}
+
+// returnBackfill 把一批没送成的补传样本放回队首，保持时间顺序。
+func (t *serverTarget) returnBackfill(items []shared.BackfillSample) {
+	if len(items) == 0 {
+		return
+	}
+	t.backfillMu.Lock()
+	defer t.backfillMu.Unlock()
+	t.backfill = append(items, t.backfill...)
+	newest := t.backfill[len(t.backfill)-1].Ts
+	t.pruneBackfillLocked(newest)
 }
 
 // refreshToken loads AIOPS_TOKEN_FILE (or the path stored on this target) when
@@ -580,6 +700,18 @@ func (a *Agent) Run(ctx context.Context) {
 		}()
 	}
 
+	// Start one backfill drainer per target: it refills the gaps left by report
+	// cycles that could not reach this server, strictly in the background so the
+	// live report path stays untouched. See runBackfillDrainerFor.
+	for _, t := range a.targets {
+		childWg.Add(1)
+		tgt := t
+		go func() {
+			defer childWg.Done()
+			a.runBackfillDrainerFor(ctx, tgt)
+		}()
+	}
+
 	// Start hardware collectors
 	if len(a.redfishTargets) > 0 || len(a.oceanStorTargets) > 0 {
 		agg := newHardwareAggregator(a.identity.HostID, a.identity.Fingerprint, a.postHardwareReport)
@@ -849,6 +981,11 @@ func (a *Agent) reportOnce() {
 	}
 	rep.Events = events
 	rep.Desktop = probeDesktopServices()
+	// 采集时刻：这条样本万一送不出去，要靠它在补传时落回正确的时间点。
+	// 实时上报本身不带它——实时样本由服务端在收到时打戳，保持原样。
+	collectedAt := time.Now().Unix()
+	// 本周期这条样本，发失败时要原样存起来（各 target 独立）。
+	thisSample := shared.BackfillSample{Ts: collectedAt, Metrics: base}
 
 	// Broadcast to all targets concurrently — each gets its own goroutine so
 	// a slow/unreachable server can't block the others (30s timeout isolation).
@@ -867,6 +1004,9 @@ func (a *Agent) reportOnce() {
 			t.regMu.Lock()
 			t.registered = false
 			t.regMu.Unlock()
+			// 熔断期同样要攒着。这段窗口恰恰是服务端重启的高发期，跳过就等于
+			// 把「最该补回来的那几十秒」直接扔掉。
+			t.spoolBackfill(thisSample)
 			results[i] = false
 			continue
 		}
@@ -878,6 +1018,7 @@ func (a *Agent) reportOnce() {
 			// Circuit breaker: skip if open (already checked above, but
 			// double-check for the half-open race).
 			if !tgt.cb.allow() {
+				tgt.spoolBackfill(thisSample)
 				results[idx] = false
 				return
 			}
@@ -890,11 +1031,16 @@ func (a *Agent) reportOnce() {
 				}
 			}
 
+			// 实时上报永远是那个"小而快"的包：补传**不搭这趟车**，由 runBackfillDrainerFor
+			// 在后台用独立端点按自己的节奏慢慢滴。把几百 KB 的历史挂在每个周期的实时包上，
+			// 会让链路差的机器连实时数据都送不出去——本末倒置。
+			//
 			// sendWithRetry handles in-cycle retries, gzip degradation,
 			// and 403 re-registration — all within a single report cycle.
 			err := tgt.sendWithRetry(rep)
 			if err != nil {
 				slog.Error("上报失败", "server", tgt.server, "err", err)
+				tgt.spoolBackfill(thisSample)
 				tgt.cb.failure()
 				if tgt.cb.isOpen() {
 					slog.Warn("断路器已打开，暂停向该服务端上报", "server", tgt.server)
@@ -942,6 +1088,97 @@ func short(s string) string {
 		return s[:8]
 	}
 	return s
+}
+
+// runBackfillDrainerFor 后台把中断期间攒下的采样一批一批补给这个 target。
+//
+// 三条设计原则，都是「实时优先」的直接推论：
+//
+//  1. **独立通道**。走 /api/v1/agent/backfill，不占用实时上报那条 POST，补传再慢、
+//     再大、再失败，都不会影响每个周期的实时数据。
+//  2. **只在链路健康时才滴**。断路器是开的（服务端还没恢复）就一条都不发——那只会
+//     制造无谓的超时，还会把断路器一直摁住，反过来拖累实时上报的恢复。
+//  3. **一次一批、留有间隔**。每 20 秒最多 60 条：服务端刚重启完最不需要的就是全网
+//     Agent 同时灌历史。满缓冲（约 2600 条）大致 15 分钟补完，期间实时数据始终正常。
+func (a *Agent) runBackfillDrainerFor(ctx context.Context, t *serverTarget) {
+	ticker := time.NewTicker(agentBackfillDrainPeriod)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if t.backfillPending() == 0 {
+			continue
+		}
+		// 服务端仍不可用时不要浪费一次往返，等实时上报把断路器合上再说。
+		if t.cb.isOpen() || !t.isRegistered() {
+			continue
+		}
+		batch := t.takeBackfill()
+		if len(batch) == 0 {
+			continue
+		}
+		if err := a.postBackfill(t, batch); err != nil {
+			t.returnBackfill(batch)
+			slog.Warn("补传失败，样本已放回缓冲等待下一轮", "server", t.server, "samples", len(batch), "err", err)
+			continue
+		}
+		slog.Info("已补传中断期间的采样", "server", t.server, "samples", len(batch),
+			"oldest_ts", batch[0].Ts, "remaining", t.backfillPending())
+	}
+}
+
+// postBackfill 把一批补传采样送到服务端（指纹鉴权，与 hardware/netflow 同构）。
+func (a *Agent) postBackfill(t *serverTarget, batch []shared.BackfillSample) error {
+	rep := shared.BackfillReport{
+		HostID:     t.hostIDOr(a.identity.HostID),
+		Hostname:   a.identity.Hostname,
+		ReportedAt: time.Now().Unix(),
+		Samples:    batch,
+	}
+	body, err := json.Marshal(rep)
+	if err != nil {
+		return err
+	}
+	// 补传包比实时包大一到两个数量级，压缩收益明显（同构指标 JSON 通常能压到 1/10）。
+	buf := getBytesBuf()
+	defer putBytesBuf(buf)
+	gw, _ := gzip.NewWriterLevel(buf, 3)
+	_, _ = gw.Write(body)
+	_ = gw.Close()
+	reader := bytes.NewReader(body)
+	enc := ""
+	if buf.Len() < len(body) {
+		reader = bytes.NewReader(buf.Bytes())
+		enc = "gzip"
+	}
+	req, err := http.NewRequest("POST", t.server+"/api/v1/agent/backfill", reader)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if enc != "" {
+		req.Header.Set("Content-Encoding", enc)
+	}
+	if fp := a.identity.Fingerprint; fp != "" {
+		req.Header.Set("X-Agent-Fingerprint", fp)
+	}
+	resp, err := t.httpc.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+	if resp.StatusCode == http.StatusNotFound {
+		// 老服务端没有这个端点：补传对它没有意义，丢掉这批而不是无限重试。
+		return nil
+	}
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("服务端返回状态码 %d", resp.StatusCode)
+	}
+	return nil
 }
 
 // postHardwareReport sends a Redfish hardware snapshot to all server targets.

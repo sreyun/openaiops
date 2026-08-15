@@ -51,5 +51,5 @@ func newContainerExecPTY(cli, containerID, shell string, cols, rows int) termShe
 		return nil
 	}
 	slave.Close()
-	return &unixPTY{master: master, cmd: cmd}
+	return adoptUnixPTY(master, cmd)
 }

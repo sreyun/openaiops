@@ -33,6 +33,7 @@ func setWinsize(fd uintptr, cols, rows int) {
 type unixPTY struct {
 	master *os.File
 	cmd    *exec.Cmd
+	holder *exec.Cmd // keeps the PTY master open if the Agent process dies
 }
 
 // newPTY opens a pty pair and starts the shell attached to it. Returns nil on any
@@ -114,7 +115,48 @@ func newPTY(cols, rows int) termShell {
 		return nil
 	}
 	slave.Close() // the child owns the slave now; the parent only needs the master
-	return &unixPTY{master: master, cmd: cmd}
+	return adoptUnixPTY(master, cmd)
+}
+
+// adoptUnixPTY moves the shell tree out of the Agent cgroup and attaches a
+// holder process that keeps the PTY master open. Without the holder, Agent
+// death closes the last master fd and the kernel SIGHUPs the foreground job
+// (xjar → Java) even when KillMode=process left those processes alive.
+func adoptUnixPTY(master *os.File, cmd *exec.Cmd) *unixPTY {
+	if cmd != nil && cmd.Process != nil {
+		escapeAgentCgroupTree(cmd.Process.Pid)
+	}
+	return &unixPTY{master: master, cmd: cmd, holder: attachPTYHolder(master)}
+}
+
+// attachPTYHolder starts a tiny setsid process that inherits a dup of master
+// and then sleeps. It is itself cgroup-escaped so a mixed/control-group unit
+// stop cannot take the holder down and hang up the session.
+func attachPTYHolder(master *os.File) *exec.Cmd {
+	if master == nil {
+		return nil
+	}
+	for _, argv := range [][]string{
+		{"sleep", "infinity"},
+		{"sleep", "2147483647"},
+		{"tail", "-f", "/dev/null"},
+	} {
+		c := exec.Command(argv[0], argv[1:]...)
+		c.Stdin = nil
+		c.Stdout = nil
+		c.Stderr = nil
+		c.ExtraFiles = []*os.File{master}
+		c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		if err := c.Start(); err != nil {
+			continue
+		}
+		if c.Process != nil {
+			escapeAgentCgroup(c.Process.Pid)
+		}
+		return c
+	}
+	slog.Warn("PTY holder 启动失败，Agent 退出时前台作业可能收到 SIGHUP")
+	return nil
 }
 
 // ensureUTF8 is a no-op on Linux/macOS: the terminal already uses UTF-8 by
@@ -129,8 +171,15 @@ func (u *unixPTY) Write(b []byte) (int, error) { return u.master.Write(b) }
 func (u *unixPTY) Resize(cols, rows int) error { setWinsize(u.master.Fd(), cols, rows); return nil }
 func (u *unixPTY) Wait() error                 { return u.cmd.Wait() }
 func (u *unixPTY) Close() error {
-	if u.cmd.Process != nil {
+	if u.cmd != nil && u.cmd.Process != nil {
 		_ = u.cmd.Process.Kill()
 	}
-	return u.master.Close()
+	if u.holder != nil && u.holder.Process != nil {
+		_ = u.holder.Process.Kill()
+		go func() { _ = u.holder.Wait() }()
+	}
+	if u.master != nil {
+		return u.master.Close()
+	}
+	return nil
 }

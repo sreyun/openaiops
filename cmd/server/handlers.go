@@ -691,6 +691,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/agent/forward/rx", s.handleAgentForwardRx)
 	mux.HandleFunc("POST /api/v1/agent/forward/tx", s.handleAgentForwardTx)
 	// Hardware + NetFlow: agent ingest (fingerprint-gated)
+	mux.HandleFunc("POST /api/v1/agent/backfill", s.handleAgentBackfill)
 	mux.HandleFunc("POST /api/v1/agent/hardware", s.handleAgentHardware)
 	mux.HandleFunc("POST /api/v1/agent/netflow", s.handleAgentNetFlow)
 	// SNMP: agent ingest (fingerprint-gated)

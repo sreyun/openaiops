@@ -83,6 +83,94 @@ func TestRecentHistoryTail(t *testing.T) {
 	}
 }
 
+func TestFillHistoryGapsStitchesOutageHole(t *testing.T) {
+	// 24h chart step is 180s; maxGap = 3*step = 540s. A 20-minute VM outage
+	// must be filled from RAM, otherwise the chart has a hole then a live tail.
+	vm := []shared.Sample{
+		{Timestamp: 1000, Metrics: shared.Metrics{CPUPercent: 10}},
+		{Timestamp: 1180, Metrics: shared.Metrics{CPUPercent: 11}},
+		{Timestamp: 3000, Metrics: shared.Metrics{CPUPercent: 40}}, // 1820s hole
+		{Timestamp: 3180, Metrics: shared.Metrics{CPUPercent: 41}},
+	}
+	ram := []shared.Sample{
+		{Timestamp: 1180, Metrics: shared.Metrics{CPUPercent: 99}}, // duplicate of VM — skip
+		{Timestamp: 1600, Metrics: shared.Metrics{CPUPercent: 20}},
+		{Timestamp: 2000, Metrics: shared.Metrics{CPUPercent: 30}},
+		{Timestamp: 2400, Metrics: shared.Metrics{CPUPercent: 35}},
+		{Timestamp: 3300, Metrics: shared.Metrics{CPUPercent: 50}}, // after last VM — append
+	}
+	got := fillHistoryGaps(vm, ram, 540)
+	if len(got) != 8 {
+		t.Fatalf("len=%d want 8: %+v", len(got), tsOf(got))
+	}
+	if got[0].CPUPercent != 10 || got[1].CPUPercent != 11 {
+		t.Fatalf("VM prefix should win: %+v", got[:2])
+	}
+	if got[2].CPUPercent != 20 || got[3].CPUPercent != 30 || got[4].CPUPercent != 35 {
+		t.Fatalf("hole should come from RAM: %+v", got[2:5])
+	}
+	if got[5].CPUPercent != 40 || got[6].CPUPercent != 41 || got[7].CPUPercent != 50 {
+		t.Fatalf("VM resumes then RAM tail: %+v", got[5:])
+	}
+}
+
+func TestFillHistoryGapsDoesNotDensifyCoarseGrid(t *testing.T) {
+	// 7d chart: VM points ~21 min apart, RAM is 1-minute. Filling every RAM
+	// point would make the line look like scribble. maxGap is 3*step.
+	const step int64 = 1260
+	vm := []shared.Sample{
+		{Timestamp: 0, Metrics: shared.Metrics{CPUPercent: 1}},
+		{Timestamp: step, Metrics: shared.Metrics{CPUPercent: 2}},
+		{Timestamp: 2 * step, Metrics: shared.Metrics{CPUPercent: 3}},
+	}
+	ram := make([]shared.Sample, 0, 2*int(step)/60)
+	for ts := int64(60); ts < 2*step; ts += 60 {
+		ram = append(ram, shared.Sample{Timestamp: ts, Metrics: shared.Metrics{CPUPercent: 90}})
+	}
+	got := fillHistoryGaps(vm, ram, 3*step)
+	if len(got) != 3 {
+		t.Fatalf("densified 7d grid to %d points: %v", len(got), tsOf(got))
+	}
+}
+
+func TestFillHistoryGapsPrependsWhenVMOnlyHasTail(t *testing.T) {
+	vm := []shared.Sample{
+		{Timestamp: 5000, Metrics: shared.Metrics{CPUPercent: 80}},
+		{Timestamp: 5060, Metrics: shared.Metrics{CPUPercent: 81}},
+	}
+	ram := []shared.Sample{
+		{Timestamp: 1000, Metrics: shared.Metrics{CPUPercent: 10}},
+		{Timestamp: 2000, Metrics: shared.Metrics{CPUPercent: 20}},
+		{Timestamp: 4000, Metrics: shared.Metrics{CPUPercent: 40}},
+	}
+	got := fillHistoryGaps(vm, ram, 180)
+	if len(got) != 5 {
+		t.Fatalf("len=%d want 5: %v", len(got), tsOf(got))
+	}
+	if got[0].CPUPercent != 10 || got[2].CPUPercent != 40 || got[3].CPUPercent != 80 {
+		t.Fatalf("RAM should prepend the missing prefix: %+v", got)
+	}
+}
+
+func TestHistoryGapFillMaxTracksStep(t *testing.T) {
+	// 1h window: step ~7s, floor at 120s so we still stitch a real outage.
+	if g := historyGapFillMax(0, 3600); g != 120 {
+		t.Fatalf("1h maxGap=%d want 120", g)
+	}
+	// 24h window: step=180, 3*step=540
+	if g := historyGapFillMax(0, 86400); g != 540 {
+		t.Fatalf("24h maxGap=%d want 540", g)
+	}
+}
+
+func tsOf(samples []shared.Sample) []int64 {
+	out := make([]int64, len(samples))
+	for i, s := range samples {
+		out[i] = s.Timestamp
+	}
+	return out
+}
+
 func TestQueryHistoryExportFallbackWindow(t *testing.T) {
 	if !queryHistoryAllowsExportFallback(6 * 3600) {
 		t.Fatal("6h must fall back to /export when query_range fails")
@@ -176,7 +264,26 @@ func TestFormatHostTrendLine(t *testing.T) {
 	if !strings.Contains(got, "近6h趋势") || !strings.Contains(got, "CPU") || !strings.Contains(got, "3点") {
 		t.Fatalf("%s", got)
 	}
+	if !strings.Contains(got, "小于请求窗口") {
+		t.Fatalf("3 points over 2s is not a 6h window: %s", got)
+	}
 	if formatHostTrendLine(nil, 6) != "" {
 		t.Fatal("empty samples")
+	}
+}
+
+func TestHistoryCoverageNote(t *testing.T) {
+	from, to := int64(1000), int64(1000+6*3600)
+	full := make([]shared.Sample, 36)
+	span := to - from
+	for i := range full {
+		full[i].Timestamp = from + span*int64(i)/int64(len(full)-1)
+	}
+	if historyCoverageNote(full, from, to) != "" {
+		t.Fatal("full window should be silent")
+	}
+	tail := []shared.Sample{{Timestamp: to - 120}, {Timestamp: to}}
+	if historyCoverageNote(tail, from, to) == "" {
+		t.Fatal("2-minute tail of a 6h window must warn")
 	}
 }

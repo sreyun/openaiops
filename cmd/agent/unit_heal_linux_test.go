@@ -36,6 +36,21 @@ NoNewPrivileges=false
 	}
 }
 
+func TestLinuxUnitNeedsKillModeHeal(t *testing.T) {
+	if linuxUnitNeedsKillModeHeal("KillMode=process\n") {
+		t.Fatal("process is the desired mode")
+	}
+	if !linuxUnitNeedsKillModeHeal("KillMode=mixed\n") {
+		t.Fatal("mixed must heal — it SIGKILLs terminal-started Java on Agent stop")
+	}
+	if !linuxUnitNeedsKillModeHeal("KillMode=control-group\n") {
+		t.Fatal("control-group must heal")
+	}
+	if !linuxUnitNeedsKillModeHeal("[Service]\nUser=root\n") {
+		t.Fatal("missing KillMode defaults to control-group and must heal")
+	}
+}
+
 func TestHealLinuxUnitBody(t *testing.T) {
 	in := `[Unit]
 Description=AIOps Agent
@@ -79,6 +94,30 @@ WantedBy=multi-user.target
 	}
 	if strings.Contains(out, "ProtectHome=read-only") || strings.Contains(out, "User=ubuntu") {
 		t.Fatal("old sandbox/user lines must be gone")
+	}
+	if !strings.Contains(out, "KillMode=process") {
+		t.Fatal("healed unit must pin KillMode=process")
+	}
+}
+
+func TestHealLinuxUnitBodyRewritesMixedKillModeWithoutTouchingUser(t *testing.T) {
+	in := `[Service]
+User=root
+ProtectHome=false
+ProtectSystem=false
+PrivateTmp=false
+NoNewPrivileges=false
+KillMode=mixed
+`
+	out, changed := healLinuxUnitBody(in, false)
+	if !changed {
+		t.Fatal("KillMode=mixed must be rewritten")
+	}
+	if !strings.Contains(out, "KillMode=process") || strings.Contains(out, "KillMode=mixed") {
+		t.Fatalf("KillMode not rewritten:\n%s", out)
+	}
+	if !strings.Contains(out, "User=root") {
+		t.Fatal("privilege-clean unit should keep User=root")
 	}
 }
 

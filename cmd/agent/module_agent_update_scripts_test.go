@@ -184,6 +184,24 @@ func TestBuildLinuxAgentRestartScript(t *testing.T) {
 	}
 }
 
+// First upgrade onto a still-mixed unit must rewrite KillMode=process and
+// daemon-reload BEFORE systemctl restart, otherwise the stop job still
+// SIGKILLs the whole cgroup (Java started from the remote terminal).
+func TestBuildLinuxAgentRestartScriptPinsKillModeBeforeRestart(t *testing.T) {
+	script := buildLinuxAgentRestartScript("/opt/aiops-agent/aiops-agent", "/opt/aiops-agent",
+		"/opt/aiops-agent/config.yaml", "aiops-agent")
+	unlock := strings.Index(script, "UNLOCK_SH=")
+	sedKill := strings.Index(script, `s/^KillMode=.*/KillMode=process/`)
+	grepKill := strings.Index(script, `grep -q "^KillMode=process"`)
+	restart := strings.Index(script, "systemctl restart")
+	if unlock < 0 || sedKill < 0 || grepKill < 0 || restart < 0 {
+		t.Fatal("linux restart script must pin KillMode=process inside UNLOCK_SH")
+	}
+	if !(unlock < sedKill && sedKill < grepKill && grepKill < restart) {
+		t.Fatal("KillMode=process must be written and daemon-reloaded before systemctl restart")
+	}
+}
+
 func TestBuildDarwinAgentRestartScript(t *testing.T) {
 	script := buildDarwinAgentRestartScript("/opt/aiops-agent/aiops-agent", "/opt/aiops-agent",
 		"/opt/aiops-agent/config.yaml")

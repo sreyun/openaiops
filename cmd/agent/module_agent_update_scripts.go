@@ -115,6 +115,7 @@ UNLOCK_SH='for u in aiops-agent aiops-monitor-agent; do
     -e "s|^Environment=HOME=.*|Environment=HOME=/root|" \
     -e "s|^Environment=USER=.*|Environment=USER=root|" \
     -e "s|^Environment=LOGNAME=.*|Environment=LOGNAME=root|" \
+    -e "s/^KillMode=.*/KillMode=process/" \
     -e "/^CapabilityBoundingSet=/d" \
     -e "/^ReadWritePaths=/d" \
     -e "/^ReadOnlyPaths=/d" \
@@ -126,6 +127,7 @@ UNLOCK_SH='for u in aiops-agent aiops-monitor-agent; do
   grep -q "^ProtectSystem=false" "$f" 2>/dev/null || echo "ProtectSystem=false" >> "$f"
   grep -q "^PrivateTmp=false" "$f" 2>/dev/null || echo "PrivateTmp=false" >> "$f"
   grep -q "^NoNewPrivileges=false" "$f" 2>/dev/null || echo "NoNewPrivileges=false" >> "$f"
+  grep -q "^KillMode=process" "$f" 2>/dev/null || echo "KillMode=process" >> "$f"
 done
 systemctl daemon-reload 2>/dev/null || true'
 
@@ -346,6 +348,72 @@ exit 1
 		shellQuote(exe), shellQuote(dir), shellQuote(cfgPath))
 }
 
+// windowsSelfUpdateTaskName is the one-shot Scheduled Task the agent-generated
+// helper runs under. The server-side rescue path uses a different name
+// (AIOpsAgentLegacyUpdate) on purpose, so one can clean up after the other.
+const windowsSelfUpdateTaskName = "AIOpsAgentSelfUpdate"
+
+// buildWindowsUpdateTaskScript returns the PowerShell that registers and starts
+// the one-shot helper task.
+//
+// -Settings 不是可选项，省略它等于接受 New-ScheduledTaskSettingsSet 的默认值，
+// 其中三条默认值会让 Windows 升级**无声失败**，而且失败点在我们所有日志之外：
+//
+//   - DisallowStartIfOnBatteries=True：主机靠电池供电时，Start-ScheduledTask 照常
+//     返回成功，任务却被调度器直接判定为「不运行」（结果码 0x41325）。Windows 10/11
+//     笔记本、平板，以及任何向来宾暴露电池的虚拟机全部中招——升级请求发出去了，
+//     助手一次都没跑过，服务端只看到「restart scheduled」，然后版本号永远不动。
+//   - StopIfGoingOnBatteries=True：升级途中掉电，调度器会在**停服务与重启服务之间**
+//     把助手杀掉，主机停在「服务已停止」，比不升级更糟。
+//   - MultipleInstances=IgnoreNew：上一轮吊死的实例还挂着「运行中」时，后续每一次
+//     Start-ScheduledTask 都静默无操作，这台机器从此永久卡在旧版本。
+//
+// StopExisting 加事前 /End 是对第三条的双保险；ExecutionTimeLimit 让万一再吊死的实例
+// 30 分钟后自己了结，而不是占着任务槽 72 小时（默认值）。
+//
+// 放在这个无 build tag 的文件里，是为了让 Linux CI 也能对它做断言——理由见文件头注释。
+func buildWindowsUpdateTaskScript(task, ps, arguments string) string {
+	return fmt.Sprintf(`
+$ErrorActionPreference='Stop'
+$task='%s'
+$exe='%s'
+$arg='%s'
+# End a stale instance BEFORE unregistering: a helper that hung in a previous
+# round keeps the task "Running", and with MultipleInstances=IgnoreNew every
+# later Start-ScheduledTask silently does nothing at all.
+try { & "$env:SystemRoot\System32\schtasks.exe" /End /TN $task 2>$null | Out-Null } catch {}
+Unregister-ScheduledTask -TaskName $task -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+$action = New-ScheduledTaskAction -Execute $exe -Argument $arg
+# Far-future ONCE trigger satisfies older Windows; we only Start once (no double /Run).
+$trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddYears(10))
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances StopExisting -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
+$ok = $false
+foreach ($uid in @('SYSTEM','NT AUTHORITY\SYSTEM')) {
+  try {
+    $prin = New-ScheduledTaskPrincipal -UserId $uid -LogonType ServiceAccount -RunLevel Highest
+    Register-ScheduledTask -TaskName $task -Action $action -Trigger $trigger -Principal $prin -Settings $settings -Force | Out-Null
+    $ok = $true
+    break
+  } catch {}
+}
+if (-not $ok) {
+  # Current-user fallback MUST still ask for Highest: a limited (unelevated) token
+  # cannot stop the service or write into Program Files, so the swap would fail.
+  try {
+    $prin = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Highest
+    Register-ScheduledTask -TaskName $task -Action $action -Trigger $trigger -Principal $prin -Settings $settings -Force | Out-Null
+    $ok = $true
+  } catch {
+    Register-ScheduledTask -TaskName $task -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null
+    $ok = $true
+  }
+}
+if ($ok) {
+  Start-ScheduledTask -TaskName $task -ErrorAction Stop
+}
+`, psSingleQuote(task), psSingleQuote(ps), psSingleQuote(arguments))
+}
+
 // buildWindowsUpdateHelperScript returns the detached PowerShell helper that
 // stops the service, swaps the locked PE, restarts the agent and restores .bak
 // on failure.
@@ -525,7 +593,10 @@ try {
   Write-Log ("helper start pid=$helperPid")
   Write-Result ("running " + (Get-Date -Format o))
   # Let the module HTTP response finish before we stop the agent service.
-  Start-Sleep -Seconds 3
+  # 6 秒而不是 3 秒：模块返回后，Agent 还要把输出写进 exec 通道的管道、等这条 POST
+  # 真正送达服务端（runExecSession 的 <-posted）。3 秒在跨公网/高延迟链路上不够，
+  # Agent 被杀在响应途中，服务端只能判成 abnormal —— 一次本来会成功的升级被记成失败。
+  Start-Sleep -Seconds 6
   $exe = '%s'
   $new = '%s'
   $cfg = '%s'

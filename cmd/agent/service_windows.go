@@ -402,6 +402,7 @@ func svcRunSupervisor(stop <-chan struct{}, reconciled <-chan struct{}) {
 	case <-time.After(45 * time.Second):
 		slog.Warn("规范身份同步超时，桌面 worker 先行启动")
 	}
+	reapLeftoverDesktopWorkers(svcExePath)
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 

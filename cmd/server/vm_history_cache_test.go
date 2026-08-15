@@ -87,6 +87,43 @@ func TestVMHistoryCacheGetPutAndExpiry(t *testing.T) {
 	}
 }
 
+func TestVMHistoryCacheableRejectsIncompleteWindow(t *testing.T) {
+	from, to := int64(1_700_000_000), int64(1_700_000_000+24*3600)
+	full := make([]shared.Sample, 48)
+	span := to - from
+	for i := range full {
+		full[i].Timestamp = from + span*int64(i)/int64(len(full)-1)
+	}
+	if !vmHistoryCacheable(full, from, to) {
+		t.Fatal("a full 24h series must be cacheable")
+	}
+	// VM just came back: two minutes of new samples at the end of a 24h window.
+	tail := []shared.Sample{
+		{Timestamp: to - 120},
+		{Timestamp: to - 60},
+		{Timestamp: to},
+	}
+	if vmHistoryCacheable(tail, from, to) {
+		t.Fatal("a 2-minute tail must not be cached as 24h history")
+	}
+	if vmHistoryCacheable(nil, from, to) {
+		t.Fatal("empty series must not be cached")
+	}
+}
+
+func TestVMWriterShutdownStopsRun(t *testing.T) {
+	v := newVMWriter(&ConfigStore{})
+	go v.run()
+	v.shutdown(2 * time.Second)
+	select {
+	case <-v.stopped:
+	default:
+		t.Fatal("run did not exit after shutdown")
+	}
+	// Second call must not panic on a closed stopCh.
+	v.shutdown(time.Second)
+}
+
 func TestVMHistoryCacheEvictsWhenFull(t *testing.T) {
 	c := newVMHistoryCache()
 	samples := []shared.Sample{{Timestamp: 1}}

@@ -193,7 +193,7 @@ func TestInstallScriptsRobustness(t *testing.T) {
 		"gui/$AIOPS_UID", "aiops_has_systemd", "aiops_fetch", "unsupported architecture",
 		"AmbientCapabilities=CAP_NET_RAW",
 		"TERM_SHELL=", "Environment=SHELL=$TERM_SHELL", "Environment=HOME=", "ProtectHome=false",
-		"ProtectSystem=false", "PrivateTmp=false",
+		"ProtectSystem=false", "PrivateTmp=false", "KillMode=process",
 		"<key>EnvironmentVariables</key>", "<key>SHELL</key>", "<key>HOME</key>",
 		"aiops_is_installed", "aiops_stop_and_uninstall_existing", "aiops_purge_systemd_unit",
 		".service.d",

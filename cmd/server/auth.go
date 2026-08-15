@@ -54,7 +54,7 @@ func isPublicPath(r *http.Request) bool {
 	// Agent-facing hardware/netflow/hyperv/snmp ingest are fingerprint-gated, not
 	// session-gated (the fingerprint is verified inside each handler).
 	if p == "/api/v1/agent/hardware" || p == "/api/v1/agent/netflow" || p == "/api/v1/agent/hyperv" ||
-		p == "/api/v1/agent/containers" ||
+		p == "/api/v1/agent/containers" || p == "/api/v1/agent/backfill" ||
 		p == "/api/v1/agent/snmp" || p == "/api/v1/agent/snmp/trap" || p == "/api/v1/agent/dnsmap" ||
 		p == "/api/v1/agent/content-audit" || p == "/api/v1/agent/probe-results" {
 		return true

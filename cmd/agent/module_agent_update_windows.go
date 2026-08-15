@@ -40,8 +40,30 @@ func agentReplaceAndRestart(exe, staging, cfgPath string) error {
 	logPath := filepath.Join(workDir, "aiops-agent-update.log")
 	resultPath := filepath.Join(dir, "aiops-agent-update.result")
 	altResult := filepath.Join(workDir, "aiops-agent-update.result")
+	// 三个文件都必须先清掉，尤其是 resultPath。
+	//
+	// waitWindowsUpdateHelperAlive 判定「助手已经跑起来」的依据就是这三个文件里出现
+	// helper start / running / ok / fail 之一。resultPath 原来不在清理列表里，而助手
+	// 成功时会往它写 "ok <时间>" 且从不删除——于是**任何一台成功升级过一次的机器**，
+	// 之后每一次升级都会在第一次轮询就读到上一轮留下的 "ok "，立刻认为助手已启动。
+	// 计划任务被电池策略挡掉、breakaway 落进不可脱离的 Job、脚本被拦下，全都被这行
+	// 陈旧记录掩盖成功，模块照常回报 "restart scheduled"，主机却纹丝不动。
+	// 这正是「第一次能升、以后再也升不动」的 Windows 主机的成因。
+	// 删之前先把上一轮的证据留下来，随本次模块输出回传给服务端（见 updateDiagnostics）。
+	var prev []string
+	if t := tailFileForDiagnostics(resultPath, 512); t != "" {
+		prev = append(prev, "result: "+t)
+	} else if t := tailFileForDiagnostics(altResult, 512); t != "" {
+		prev = append(prev, "result: "+t)
+	}
+	if t := tailFileForDiagnostics(logPath, 2048); t != "" {
+		prev = append(prev, "log tail:\n"+t)
+	}
+	setUpdateDiagnostics(strings.Join(prev, "\n"))
+
 	_ = os.Remove(logPath)
 	_ = os.Remove(altResult)
+	_ = os.Remove(resultPath)
 
 	script := buildWindowsUpdateHelperScript(exe, staging, cfgPath, logPath, resultPath, altResult)
 	if err := os.WriteFile(helper, []byte(script), 0o644); err != nil {
@@ -68,12 +90,31 @@ func agentReplaceAndRestart(exe, staging, cfgPath string) error {
 			"/Delete", "/TN", "AIOpsAgentSelfUpdate", "/F").Run()
 	}
 
+	var startErrs []string
 	if err := startWindowsBreakaway(ps, psArgs, workDir); err != nil {
+		startErrs = append(startErrs, "breakaway: "+err.Error())
 		if err2 := startWindowsCmdStart(ps, helper, workDir); err2 != nil {
 			return fmt.Errorf("start update helper: schtasks/breakaway/cmd all failed: %v / %v", err, err2)
 		}
 	}
-	_ = waitWindowsUpdateHelperAlive(logPath, altResult, resultPath, 4*time.Second)
+	// 「进程创建成功」≠「助手真的跑起来了」。计划任务被电池策略挡掉、breakaway 落进
+	// 一个不允许脱离的 Job、脚本被 AppLocker/受限执行策略拦下——这些都会让 Start 返回
+	// 成功而助手一行都没执行。原来这里把探测结果直接丢弃并 return nil，模块于是向服务端
+	// 回报「restart scheduled」，服务端把主机挂进 pending_verify，白等满 5 分钟的校验窗
+	// 才轮到 legacy 脚本救援。返回错误可以让服务端**在同一次任务里立刻**改走服务端下发的
+	// legacy 脚本（shouldLegacyAgentUpdateFallback 认得 "start update helper" 这个前缀），
+	// 而那条路径的正文由服务端生成，正是为修这类 Agent 侧缺陷准备的。
+	//
+	// 12 秒而不是 4 秒：老机器上光是 powershell.exe 冷启动就要好几秒，窗口太短会把
+	// 正常运行的助手误判成没起来，白白多跑一次 legacy 脚本。助手一进正文就先写
+	// "helper start" 与 "running"，12 秒足够覆盖冷启动。
+	if !waitWindowsUpdateHelperAlive(logPath, altResult, resultPath, 12*time.Second) {
+		detail := "scheduled task did not run and no helper process appeared"
+		if len(startErrs) > 0 {
+			detail += " (" + strings.Join(startErrs, "; ") + ")"
+		}
+		return fmt.Errorf("start update helper: %s; see %s", detail, logPath)
+	}
 	return nil
 }
 
@@ -142,41 +183,28 @@ func windowsUpdateHelperProcessAlive() bool {
 	return err == nil && strings.TrimSpace(string(out)) != ""
 }
 
+// scheduleWindowsUpdateTask registers and starts the one-shot helper task.
+//
+// -Settings 不是可选项，省略它等于接受 New-ScheduledTaskSettingsSet 的默认值，
+// 其中三条默认值会让 Windows 升级**无声失败**，而且失败点在我们的日志之外：
+//
+//   - DisallowStartIfOnBatteries=True：主机靠电池供电时，Start-ScheduledTask 照常
+//     返回成功，任务却被调度器直接判定为「不运行」（结果码 0x41325）。Windows 10/11
+//     笔记本、平板，以及任何向来宾暴露电池的虚拟机全部中招——升级请求发出去了，
+//     助手一次都没跑过，服务端只看到「restart scheduled」然后版本永远不动。
+//   - StopIfGoingOnBatteries=True：升级途中拔掉电源，调度器会在**停服务与重启服务
+//     之间**把助手杀掉，主机就停在「服务已停止」，比不升级更糟。
+//   - MultipleInstances=IgnoreNew：上一轮吊死的实例还挂着「运行中」时，后续每一次
+//     Start-ScheduledTask 都静默无操作，这台机器从此永久卡在旧版本。
+//
+// StopExisting + 事前 /End 是对第三条的双保险；ExecutionTimeLimit 让万一再吊死的
+// 实例 30 分钟后自己了结，而不是占着任务槽 72 小时（默认值）。
 func scheduleWindowsUpdateTask(ps string, psArgs []string) error {
-	// Prefer Register-ScheduledTask (locale-safe dates) over schtasks /SD.
-	// SYSTEM + Highest when elevated; fall back to current-user task.
 	argLine := make([]string, 0, len(psArgs))
 	for _, a := range psArgs {
 		argLine = append(argLine, quoteWinArg(a))
 	}
-	arguments := strings.Join(argLine, " ")
-	task := "AIOpsAgentSelfUpdate"
-	psSchedule := fmt.Sprintf(`
-$ErrorActionPreference='Stop'
-$task='%s'
-$exe='%s'
-$arg='%s'
-Unregister-ScheduledTask -TaskName $task -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
-$action = New-ScheduledTaskAction -Execute $exe -Argument $arg
-# Far-future ONCE trigger satisfies older Windows; we only Start once (no double /Run).
-$trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddYears(10))
-$ok = $false
-try {
-  $prin = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-  Register-ScheduledTask -TaskName $task -Action $action -Trigger $trigger -Principal $prin -Force | Out-Null
-  $ok = $true
-} catch {
-  try {
-    Register-ScheduledTask -TaskName $task -Action $action -Trigger $trigger -Force | Out-Null
-    $ok = $true
-  } catch {
-    throw $_
-  }
-}
-if ($ok) {
-  Start-ScheduledTask -TaskName $task -ErrorAction Stop
-}
-`, psSingleQuote(task), psSingleQuote(ps), psSingleQuote(arguments))
+	psSchedule := buildWindowsUpdateTaskScript(windowsSelfUpdateTaskName, ps, strings.Join(argLine, " "))
 
 	cmd := exec.Command(ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", psSchedule)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}

@@ -147,6 +147,38 @@ type Report struct {
 	Desktop *DesktopInfo `json:"desktop,omitempty"`
 }
 
+// BackfillSample 是一条「采到了但当时没送出去」的历史采样。
+//
+// 为什么需要它：Agent 每个周期采一次、发一次，发不出去就直接丢。服务端滚动升级、
+// 重启、网络抖动，随便哪一样占用 30~60 秒，每台主机的曲线上就是一段谁也补不回来的
+// 空洞——而这正是"服务重启后数据丢失"最后一个、也是唯一发生在服务端之外的来源。
+//
+// 时间戳必须由 Agent 自己带上：实时上报的样本是服务端在收到时用 time.Now() 打戳的，
+// 补传样本要是沿用这个规则，一次积压 5 分钟的补传会把五分钟前的数据全部盖在"现在"，
+// 比丢掉更糟。服务端按 ReportedAt 换算时钟偏移后落到正确的时间点上（见
+// ingestAgentBackfill），并且**只写时序库、不进内存环**——内存环表达的是"最近实时
+// 状态"，往里塞历史点会污染 LastSeen 与降采样分层。
+type BackfillSample struct {
+	Ts      int64   `json:"ts"` // 采集时刻（Agent 本地 unix 秒）
+	Metrics Metrics `json:"metrics"`
+}
+
+// BackfillReport 是一批补传采样，走**独立端点**（/api/v1/agent/backfill），
+// 与实时上报（/api/v1/agent/report）完全分开。
+//
+// 为什么不能搭实时上报的顺风车：补传包比实时包大一到两个数量级。挂在同一个 POST 上，
+// 一次积压恢复就会让每个周期的实时上报都背着几百 KB 传输——链路差的机器会因此超时，
+// 于是「实时数据」被「历史数据」拖垮，正好本末倒置。分成两条通道后，实时上报永远是
+// 那个小而快的包，补传在后台按自己的节奏慢慢滴，失败也只影响它自己。
+//
+// 鉴权与 hardware/netflow 一致：X-Agent-Fingerprint 头。
+type BackfillReport struct {
+	HostID     string           `json:"host_id"`
+	Hostname   string           `json:"hostname,omitempty"`
+	ReportedAt int64            `json:"reported_at"` // Agent 本地时钟，用于换算时钟偏移
+	Samples    []BackfillSample `json:"samples"`     // 最旧在前
+}
+
 // DesktopInfo describes whether the agent host appears to offer a GUI remote
 // protocol (RDP / VNC) and which port the dashboard should tunnel to.
 type DesktopInfo struct {

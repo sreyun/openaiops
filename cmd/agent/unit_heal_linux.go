@@ -51,6 +51,7 @@ func ensureLinuxAgentUnitPrivileges(cfgPath string) {
 	}
 
 	healed := false
+	needRestart := false
 	for _, name := range []string{"aiops-agent", "aiops-monitor-agent"} {
 		path := "/etc/systemd/system/" + name + ".service"
 		body, err := os.ReadFile(path)
@@ -58,8 +59,9 @@ func ensureLinuxAgentUnitPrivileges(cfgPath string) {
 			continue
 		}
 		needFile := linuxUnitNeedsPrivilegeHeal(string(body), allowNonRoot)
+		needKill := linuxUnitNeedsKillModeHeal(string(body))
 		needEff := systemdEffectiveNeedsHeal(name, allowNonRoot)
-		if !needFile && !needEff {
+		if !needFile && !needKill && !needEff {
 			continue
 		}
 		next, changed := healLinuxUnitBody(string(body), allowNonRoot)
@@ -77,9 +79,12 @@ func ensureLinuxAgentUnitPrivileges(cfgPath string) {
 			continue
 		}
 		purgeUnitDropIns(name)
-		slog.Info("已重写 Agent systemd unit（解除沙箱 / 恢复 root 终端权限）",
-			"unit", name, "file_heal", needFile, "effective_heal", needEff)
+		slog.Info("已重写 Agent systemd unit（解除沙箱 / 恢复 root 终端权限 / KillMode=process）",
+			"unit", name, "file_heal", needFile, "kill_mode_heal", needKill, "effective_heal", needEff)
 		healed = true
+		if needFile || needEff {
+			needRestart = true
+		}
 	}
 
 	// Even when the unit file looks fine, a still-running sandboxed process keeps
@@ -87,6 +92,10 @@ func ensureLinuxAgentUnitPrivileges(cfgPath string) {
 	// unit (or purged drop-ins via a successful write path). Restarting while /etc
 	// is still RO and unlock failed just loops without progress — interactive
 	// shells rely on nsenter instead.
+	//
+	// KillMode-only rewrites must NOT restart: mixed/control-group would SIGKILL
+	// every Java/xjar child in this cgroup on the way down. daemon-reload is
+	// enough — systemd reads KillMode when the next stop job starts.
 	if !healed {
 		if !allowNonRoot && !etcWritable() {
 			slog.Warn("root 下 /etc 仍不可写且未能重写 unit；跳过盲目重启，依赖远程终端 nsenter",
@@ -95,6 +104,10 @@ func ensureLinuxAgentUnitPrivileges(cfgPath string) {
 		return
 	}
 	_ = exec.Command("systemctl", "daemon-reload").Run()
+	if !needRestart {
+		slog.Info("已将 Agent unit 改为 KillMode=process 并 daemon-reload（不重启，以免误杀终端拉起的业务进程）")
+		return
+	}
 	go func() {
 		time.Sleep(800 * time.Millisecond)
 		_ = exec.Command("systemctl", "restart", detectLinuxAgentUnit()).Run()
@@ -265,7 +278,7 @@ Environment=LOGNAME=%s
 ExecStart=%s
 Restart=always
 RestartSec=5
-KillMode=mixed
+KillMode=process
 LimitNOFILE=65536
 ProtectHome=false
 ProtectSystem=false
@@ -321,7 +334,7 @@ func systemdEffectiveNeedsHeal(unit string, allowNonRoot bool) bool {
 }
 
 func healLinuxUnitBody(body string, allowNonRoot bool) (string, bool) {
-	if !linuxUnitNeedsPrivilegeHeal(body, allowNonRoot) {
+	if !linuxUnitNeedsPrivilegeHeal(body, allowNonRoot) && !linuxUnitNeedsKillModeHeal(body) {
 		return body, false
 	}
 	lines := strings.Split(body, "\n")
@@ -336,6 +349,7 @@ func healLinuxUnitBody(body string, allowNonRoot bool) (string, bool) {
 		hasHOME          bool
 		hasUSER          bool
 		hasSHELL         bool
+		hasKillMode      bool
 		inService        bool
 	)
 	skipPrefixes := []string{
@@ -369,7 +383,7 @@ func healLinuxUnitBody(body string, allowNonRoot bool) (string, bool) {
 		}
 		if strings.HasPrefix(trim, "[") && trim != "[Service]" {
 			if inService {
-				out = appendUnlockDirectives(out, hasProtectHome, hasProtectSystem, hasPrivateTmp, hasNNP, hasUser, hasGroup, hasHOME, hasUSER, hasSHELL, allowNonRoot)
+				out = appendUnlockDirectives(out, hasProtectHome, hasProtectSystem, hasPrivateTmp, hasNNP, hasUser, hasGroup, hasHOME, hasUSER, hasSHELL, hasKillMode, allowNonRoot)
 				inService = false
 			}
 			out = append(out, ln)
@@ -439,12 +453,15 @@ func healLinuxUnitBody(body string, allowNonRoot bool) (string, bool) {
 		case strings.HasPrefix(trim, "Environment=SHELL="):
 			hasSHELL = true
 			out = append(out, ln)
+		case strings.HasPrefix(trim, "KillMode="):
+			hasKillMode = true
+			out = append(out, "KillMode=process")
 		default:
 			out = append(out, ln)
 		}
 	}
 	if inService {
-		out = appendUnlockDirectives(out, hasProtectHome, hasProtectSystem, hasPrivateTmp, hasNNP, hasUser, hasGroup, hasHOME, hasUSER, hasSHELL, allowNonRoot)
+		out = appendUnlockDirectives(out, hasProtectHome, hasProtectSystem, hasPrivateTmp, hasNNP, hasUser, hasGroup, hasHOME, hasUSER, hasSHELL, hasKillMode, allowNonRoot)
 	}
 	next := strings.Join(out, "\n")
 	if !strings.HasSuffix(next, "\n") {
@@ -453,7 +470,7 @@ func healLinuxUnitBody(body string, allowNonRoot bool) (string, bool) {
 	return next, next != body
 }
 
-func appendUnlockDirectives(out []string, hasProtectHome, hasProtectSystem, hasPrivateTmp, hasNNP, hasUser, hasGroup, hasHOME, hasUSER, hasSHELL, allowNonRoot bool) []string {
+func appendUnlockDirectives(out []string, hasProtectHome, hasProtectSystem, hasPrivateTmp, hasNNP, hasUser, hasGroup, hasHOME, hasUSER, hasSHELL, hasKillMode, allowNonRoot bool) []string {
 	if !hasUser && !allowNonRoot {
 		out = append(out, "User=root")
 	}
@@ -485,7 +502,22 @@ func appendUnlockDirectives(out []string, hasProtectHome, hasProtectSystem, hasP
 	if !hasNNP {
 		out = append(out, "NoNewPrivileges=false")
 	}
+	if !hasKillMode {
+		out = append(out, "KillMode=process")
+	}
 	return out
+}
+
+// linuxUnitNeedsKillModeHeal is true when stop/restart would still tear down
+// the whole cgroup (default control-group, or the old mixed setting).
+func linuxUnitNeedsKillModeHeal(body string) bool {
+	for _, ln := range strings.Split(body, "\n") {
+		ln = strings.TrimSpace(ln)
+		if strings.HasPrefix(ln, "KillMode=") {
+			return !strings.EqualFold(strings.TrimSpace(strings.TrimPrefix(ln, "KillMode=")), "process")
+		}
+	}
+	return true
 }
 
 func linuxUnitNeedsPrivilegeHeal(body string, allowNonRoot bool) bool {

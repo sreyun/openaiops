@@ -280,6 +280,19 @@ func TestLegacyUnixAgentUpdateScriptPrefersInstallService(t *testing.T) {
 	}
 }
 
+func TestLegacyUnixAgentUpdateScriptPinsKillModeBeforeRestart(t *testing.T) {
+	sh := legacyUnixAgentUpdateScript("https://mon.example", "aiops-agent-linux-amd64", testPinSHA, false)
+	sedKill := strings.Index(sh, `s/^KillMode=.*/KillMode=process/`)
+	grepKill := strings.Index(sh, `grep -q "^KillMode=process"`)
+	startCall := strings.Index(sh, "start_units; then")
+	if sedKill < 0 || grepKill < 0 || startCall < 0 {
+		t.Fatal("legacy linux helper must pin KillMode=process before restart")
+	}
+	if !(sedKill < grepKill && grepKill < startCall) {
+		t.Fatal("KillMode=process must be written before start_units runs")
+	}
+}
+
 // windowsUpdateScriptsUnderTest returns every generated Windows PowerShell body,
 // decoded where it ships base64 — assert on the decoded text, or checks silently
 // pass against base64 noise.

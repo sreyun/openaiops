@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"aiops-monitor/shared"
@@ -180,4 +181,129 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 	go s.checkSlowDegradation(rep.HostID)
 	// 响应体额外下发「分布式探测任务」：agent 作为多地探针执行并回报（迭代 D，additive/向后兼容）
 	writeJSON(w, http.StatusOK, shared.ReportResponse{Status: "ok", HostID: h.ID, ProbeTasks: s.distProbeTasks()})
+}
+
+// handleAgentBackfill 接收 Agent 在失联期间攒下的采样（POST /api/v1/agent/backfill）。
+//
+// 与实时上报分成两个端点是刻意的：补传包比实时包大一到两个数量级，混在一起会让链路差
+// 的机器连实时数据都送不出去。这里也**只写时序库**，绝不碰 Store —— 详见
+// ingestAgentBackfill 的说明。
+func (s *Server) handleAgentBackfill(w http.ResponseWriter, r *http.Request) {
+	// 补传包默认是 gzip 的（体积比实时包大一到两个数量级，压缩收益明显），
+	// 而 Go 的 http.Server 不会自动解压请求体——必须显式走 decompressBody。
+	body, err := decompressBody(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid gzip body"})
+		return
+	}
+	defer body.Close()
+	var rep shared.BackfillReport
+	if err := json.NewDecoder(body).Decode(&rep); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	if strings.TrimSpace(rep.HostID) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "host_id required"})
+		return
+	}
+	fp := r.Header.Get("X-Agent-Fingerprint")
+	if fp == "" {
+		fp = r.URL.Query().Get("fp")
+	}
+	if !s.forwardFingerprintOKByHost(rep.HostID, fp) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "fingerprint mismatch"})
+		return
+	}
+	accepted, dropped := s.ingestAgentBackfill(rep)
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "accepted": accepted, "dropped": dropped})
+}
+
+const (
+	// agentBackfillMaxPerReport 是单次补传允许接收的条数上限。Agent 侧本来就分批
+	// （agentBackfillPerBatch=60），这里是对「异常/被篡改的 Agent 一次灌几万条」的防线。
+	agentBackfillMaxPerReport = 240
+	// agentBackfillMaxAgeSec 是补传样本的最大回溯窗口，与 Agent 侧的缓冲上限
+	// （agentBackfillMaxAge = 7 天）对齐。两边必须一致：服务端收窄会让 Agent 辛苦攒下
+	// 的老数据在入口被静默丢掉，放宽则等于允许一台时钟错乱的主机往任意历史位置写点。
+	agentBackfillMaxAgeSec = 7 * 24 * 3600
+	// agentBackfillMaxSkewSec 是能接受的时钟偏移。超出即视为时钟不可信，按零偏移处理
+	// （宁可让这批点落在原始时间戳上，也不要按一个荒谬的偏移把它们搬到别处）。
+	agentBackfillMaxSkewSec = 24 * 3600
+)
+
+// ingestAgentBackfill 把 Agent 在失联期间攒下的采样写入 VictoriaMetrics。
+//
+// 三条约束，缺一不可：
+//
+//  1. **只写时序库，不进内存环**。内存环（Store）表达的是"最近实时状态"，其
+//     LastSeen、多级降采样、告警评估全部假设样本是按时间顺序刚刚到达的。把一批
+//     五分钟前的历史点塞进去，会立刻污染 1m/5m 分层并可能触发过期数据的告警。
+//     历史的唯一真源是 VM，补传也只补 VM。
+//
+//  2. **按时钟偏移换算时间戳**。实时样本是服务端收到时用自己的时钟打戳的，而补传
+//     样本带的是 Agent 本地时钟。两者不校准的话，一台快 3 分钟的主机补上来的点会和
+//     它自己的实时点错开 3 分钟——曲线上就是一段重叠又断裂的"数据错乱"。用
+//     ReportedAt（Agent 构造本次上报时的本地时刻）与服务端 now 的差值做平移，正好
+//     把补传点放回它在服务端时间轴上应有的位置。
+//
+//  3. **对时间戳做硬校验**。未来时间、超过一天的陈旧点、荒谬的偏移一律丢弃：VM 的
+//     保留期是 100 年，一条写歪的点会永久留在那里，且没有任何界面能发现它。
+func (s *Server) ingestAgentBackfill(rep shared.BackfillReport) (accepted, dropped int) {
+	if s == nil || s.vm == nil || len(rep.Samples) == 0 || !s.vm.enabled() {
+		return 0, 0
+	}
+	now := time.Now().Unix()
+	skew := backfillClockSkew(rep.ReportedAt, now)
+	cat := s.effectiveCategory(rep.HostID)
+	hostname := rep.Hostname
+	if h := s.hostByID(rep.HostID); h != nil && h.Hostname != "" {
+		hostname = h.Hostname
+	}
+	for i, b := range rep.Samples {
+		if accepted >= agentBackfillMaxPerReport {
+			dropped += len(rep.Samples) - i
+			break
+		}
+		ts, ok := backfillTimestamp(b.Ts, skew, now)
+		if !ok {
+			dropped++
+			continue
+		}
+		s.vm.enqueue(rep.HostID, hostname, cat, ts, b.Metrics)
+		accepted++
+	}
+	if accepted > 0 || dropped > 0 {
+		slog.Info("已接收 Agent 补传采样", "host", shortID(rep.HostID),
+			"accepted", accepted, "dropped", dropped, "skew_sec", skew)
+	}
+	return accepted, dropped
+}
+
+// backfillClockSkew 返回把 Agent 本地时间换算到服务端时间轴的偏移量。
+// 偏移荒谬（超过一天）时返回 0：宁可让这批点落在它们自称的时间上，也不要按一个
+// 明显错误的偏移把它们整体搬到别处——后者会在曲线上造出一段凭空出现的历史。
+func backfillClockSkew(reportedAt, now int64) int64 {
+	if reportedAt <= 0 {
+		return 0
+	}
+	d := now - reportedAt
+	if d <= -agentBackfillMaxSkewSec || d >= agentBackfillMaxSkewSec {
+		return 0
+	}
+	return d
+}
+
+// backfillTimestamp 把一条补传样本的时间戳换算到服务端时间轴并做硬校验。
+// VM 的保留期是 100 年，一条写歪的点会永久留在那里且没有任何界面能发现它，
+// 所以未来时间、超过保留窗口的陈旧点一律拒绝。
+func backfillTimestamp(ts, skew, now int64) (int64, bool) {
+	if ts <= 0 {
+		return 0, false
+	}
+	out := ts + skew
+	// 允许 60s 的向前容差（采集与送达之间的正常延迟 + 取整），再多就是时钟有问题。
+	if out > now+60 || now-out > agentBackfillMaxAgeSec {
+		return 0, false
+	}
+	return out, true
 }
