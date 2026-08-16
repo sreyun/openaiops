@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -331,6 +330,3 @@ func verifyJSONBytes(v *assistVerifyResult) json.RawMessage {
 	return b
 }
 
-func (s *Server) ensureAIRunsSchemaHint() string {
-	return fmt.Sprintf("ai_runs ready=%v", s != nil && s.pg != nil)
-}

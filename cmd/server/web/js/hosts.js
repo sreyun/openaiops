@@ -1109,16 +1109,67 @@ function historySourceHintText(src) {
 // 元信息没有区别。但它描述的是一个**数据在流失**的状态：内存里的 5 分钟历史有 30 天，
 // 所以只要进程不重启，曲线看着是完整的；一旦重启，这段历史就永远没了——用户看到的
 // 就是「发版后曲线只剩重启之后」。这条状态必须在它还能被挽救的时候被看见。
-function historySourceBanner(src) {
+// historyReasonText：把服务端给出的**具体**原因翻成一句能指导下一步的话。
+// 「查询失败 / 熔断 / 窗口为空」三者的处置方向完全不同——前两个查读路径，第三个查
+// 写入路径。原来把三种并列写在一句里，等于让用户自己猜。
+function historyReasonText(reason) {
+  switch (String(reason || "")) {
+    case "read_breaker":
+      return I18N.t("section.history_reason_breaker", "读路径断路器已打开：此前连续查询失败，冷却后会自动重试");
+    case "query_error":
+      return I18N.t("section.history_reason_query", "查询时序库失败：地址不可达 / 超时 / 返回非 200");
+    case "empty_window":
+      return I18N.t("section.history_reason_empty", "时序库已应答，但该时间窗内没有数据——问题在写入侧，不是查询");
+    case "vm_disabled":
+      return I18N.t("section.history_reason_disabled", "未启用持久化时序库（VictoriaMetrics）");
+    default:
+      return "";
+  }
+}
+function historySourceBanner(src, reason) {
   const v = String(src || "").toLowerCase();
   if (v !== "ram-fallback" && v !== "vm_miss" && v !== "ram") return "";
-  const why = v === "ram"
+  const why = historyReasonText(reason) || (v === "ram"
     ? I18N.t("section.history_ram_only_why", "未启用持久化时序库（VictoriaMetrics）")
-    : I18N.t("section.history_vm_miss_why", "持久化时序库没有返回数据（查询失败 / 熔断 / 该窗口确实为空）");
-  return `<div class="hint warn history-src-warn">⚠ ${why}。` +
+    : I18N.t("section.history_vm_miss_why", "持久化时序库没有返回数据"));
+  return `<div class="hint warn history-src-warn">⚠ ${esc(why)}。` +
     I18N.t("section.history_ram_risk", "当前曲线来自内存缓存，服务重启后这段历史会全部消失") +
+    ` <a href="#" data-history-diag="1">${I18N.t("section.history_diag", "查看时序库健康")}</a>` +
     `</div>`;
 }
+// 点开「查看时序库健康」：就地把 /vm/diagnostics 的结论展开在警告条里。
+// 刻意不跳页、不弹窗——用户正盯着这张缺数据的图，答案应该出现在图旁边。
+async function openHistoryDiagnostics(anchorEl) {
+  if (!anchorEl) return;
+  const box = anchorEl.closest(".history-src-warn");
+  if (!box) return;
+  anchorEl.textContent = I18N.t("common.loading", "加载中…");
+  try {
+    const d = await fetch(`${API}/vm/diagnostics`, { credentials: "same-origin" }).then(r => r.json());
+    const at = ts => ts ? fmtDateTime(ts) : I18N.t("common.never", "从未");
+    const rows = [
+      [I18N.t("section.vm_verdict", "结论"), d.verdict || "-"],
+      [I18N.t("section.vm_url", "地址"), d.url || "-"],
+      [I18N.t("section.vm_last_write_ok", "最近一次写入成功"), at(d.last_write_ok_at)],
+      [I18N.t("section.vm_last_write_err", "最近一次写入失败"), d.last_write_err ? `${at(d.last_write_err_at)} · ${d.last_write_err}` : "-"],
+      [I18N.t("section.vm_last_read_ok", "最近一次读取成功"), at(d.last_read_ok_at)],
+      [I18N.t("section.vm_last_read_err", "最近一次读取失败"), d.last_read_err ? `${at(d.last_read_err_at)} · ${d.last_read_err}` : "-"],
+      [I18N.t("section.vm_breakers", "断路器（写/读）"), `${d.write_breaker || "-"} / ${d.read_breaker || "-"}`],
+      [I18N.t("section.vm_probe", "现场探测 count(aiops_cpu_percent)"), d.probe_ok === false ? I18N.t("section.vm_probe_failed", "查询失败") : String(d.probe_series_count ?? "-")],
+    ];
+    box.innerHTML = `<div style="font-weight:600;margin-bottom:6px">⚠ ${esc(String(d.verdict || ""))}</div>` +
+      rows.slice(1).map(([k, v]) => `<div><span style="opacity:.75">${esc(k)}：</span>${esc(String(v))}</div>`).join("");
+  } catch (e) {
+    anchorEl.textContent = I18N.t("section.history_diag", "查看时序库健康");
+    toast(I18N.t("sre.load_failed", "加载失败") + ": " + e, "err");
+  }
+}
+document.addEventListener("click", e => {
+  const a = e.target && e.target.closest ? e.target.closest("[data-history-diag]") : null;
+  if (!a) return;
+  e.preventDefault();
+  openHistoryDiagnostics(a);
+});
 function chartSpanLabel(h) {
   return h < 24 ? h + I18N.t("time.hour") : (h / 24) + I18N.t("time.day");
 }
@@ -1346,6 +1397,7 @@ async function loadAndRenderCharts() {
     const dataSpan = samples.length > 1 ? (samples[samples.length - 1].timestamp - samples[0].timestamp) : 0;
     const reqSpan = Math.max(0, to - from);
     const src = (r.headers && r.headers.get) ? (r.headers.get("X-AIOps-History-Source") || "") : "";
+    const srcReason = (r.headers && r.headers.get) ? (r.headers.get("X-AIOps-History-Reason") || "") : "";
     const srcText = historySourceHintText(src);
     const srcHint = srcText ? ` · ${srcText}` : "";
     const coverHint = (reqSpan > 3600 && dataSpan > 0 && dataSpan < reqSpan * 0.5)
@@ -1358,7 +1410,7 @@ async function loadAndRenderCharts() {
       `<button class="chart-enlarge" data-chart="${id}" title="${I18N.t('ui.zoom_preview')}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg></button></div>`;
     body.innerHTML = `
       ${renderDetailToolbar(from, to)}
-      ${historySourceBanner(src)}
+      ${historySourceBanner(src, srcReason)}
       <div class="chart-container">
         ${wrap('chartCombo')}${wrap('chartCPU')}${wrap('chartMem')}${wrap('chartLoad')}${wrap('chartDisk')}${hasGPU ? wrap('chartGPU') + wrap('chartGPUTemp') + wrap('chartGPUMemPct') + wrap('chartGPUMem') : ''}${wrap('chartNet')}${hasConns ? wrap('chartConns') + wrap('chartConnStates') : ''}${wrap('chartDiskIO')}${wrap('chartIOPS')}${wrap('chartProc')}
       </div>

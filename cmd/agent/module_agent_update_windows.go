@@ -259,12 +259,24 @@ func startWindowsCmdStart(ps, helper, dir string) error {
 	// start "" /b launches a new process not tied to our console/job as tightly.
 	line := fmt.Sprintf(`start "" /b "%s" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%s"`, ps, helper)
 	cmd := exec.Command(cmdExe, "/c", line)
+	// 这一行**必须**原样交给 cmd.exe：line 里带引号，而 os/exec 会按 CRT 约定把它们
+	// 转义成 \"，cmd.exe 不认这套（见 useRawCmdLine）。转义之后 cmd 收到的是
+	//     start "" /b \"C:\…\powershell.exe\" … -File \"C:\…\helper.ps1\"
+	// ——程序名以 \" 开头，进程根本起不来。
+	//
+	// 这是「计划任务 → breakaway → cmd start」三级兜底里的**最后一级**，也就是说
+	// 前两级都失败的机器（Job 不允许脱离、任务调度器被策略挡下）上，第三级必然也失败：
+	// 三条路一起断，主机永久停在旧版本。同一个缺陷此前已在 terminal.go 修过一次，
+	// 这里当时漏掉了。
 	cmd.Dir = dir
 	cmd.Env = enrichWindowsShellEnv(os.Environ())
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		CreationFlags: createBreakawayJob | createNewProcessGroup | createNoWindow,
 		HideWindow:    true,
 	}
+	// 必须在 SysProcAttr 赋值之后调用：useRawCmdLine 写的是 SysProcAttr.CmdLine，
+	// 上面那次整体赋值会把它覆盖掉。
+	useRawCmdLine(cmd, cmdExe, line)
 	return cmd.Start()
 }
 

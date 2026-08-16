@@ -77,7 +77,10 @@ type vmWriter struct {
 	breaker      *vmCircuitBreaker
 	readBreaker  *vmCircuitBreaker
 	historyCache *vmHistoryCache
-	dropped      atomic.Uint64
+	// diag 记录读写两个方向最近一次的结果，供 /api/v1/vm/diagnostics 回答
+	// 「到底写进去没有 / 读得到吗」。见 vm_diag.go。
+	diag    vmDiag
+	dropped atomic.Uint64
 	stopCh       chan struct{}
 	stopped      chan struct{}
 	stopOnce     sync.Once
@@ -161,8 +164,54 @@ func (v *vmWriter) enqueue(hostID, hostname, category string, ts int64, m shared
 // run batches queued samples and pushes them to VM every few seconds.
 // Failed pushes keep the batch and retry next tick — dropping them was why a
 // VM restart punched a hole in every chart (RAM had the points, VM never did).
+// vmReadyBudget caps how long run() waits for VictoriaMetrics to answer before
+// starting to push anyway.
+//
+// compose 里 server 只 depends_on victoriametrics 的 service_started —— 容器起来了
+// 不等于 8428 端口能应答：VM 启动时要先扫描并合并磁盘分片，数据量大时要几十秒。
+// 这段窗口里每一批写入都会失败、进重试缓冲、并给写熔断器记账，而它正好落在**每次发版
+// 重启之后**——也就是用户最容易发现「曲线缺了一段」的时刻。
+//
+// 先等端口应答再开泵：等待期间样本照常在 channel 里排队（容量 8192），VM 一就绪就整批
+// 落库，不丢点。等不到也只是回到原来的行为，不阻塞启动。
+const vmReadyBudget = 90 * time.Second
+
+// waitReady blocks until VM's HTTP endpoint answers, the budget expires, or the
+// writer is shut down.
+//
+// 判据刻意是「**收到了任何 HTTP 响应**」而不是「200」：这里要确认的是端点已经存在，
+// 而不是某个具体路径的语义。反代或旧版本在 /health 上回 404 同样说明 VM 活着、能收写入，
+// 拿状态码卡反而会把可用的部署判成不可用。
+func (v *vmWriter) waitReady(budget time.Duration) {
+	c := v.cfg.VMConfig()
+	if !c.Enabled || c.URL == "" {
+		return
+	}
+	url := strings.TrimRight(c.URL, "/") + "/health"
+	deadline := time.Now().Add(budget)
+	probe := &http.Client{Timeout: 3 * time.Second}
+	for attempt := 0; time.Now().Before(deadline); attempt++ {
+		resp, err := probe.Get(url)
+		if err == nil {
+			_ = resp.Body.Close()
+			if attempt > 0 {
+				slog.Info("VictoriaMetrics 已就绪，开始写入", "attempts", attempt+1)
+			}
+			return
+		}
+		select {
+		case <-v.stopCh:
+			return
+		case <-time.After(2 * time.Second):
+		}
+	}
+	slog.Warn("VictoriaMetrics 在就绪预算内未应答，仍按原有重试逻辑开始写入",
+		"url", url, "budget", budget.String())
+}
+
 func (v *vmWriter) run() {
 	defer close(v.stopped)
+	v.waitReady(vmReadyBudget)
 	buf := make([]vmSample, 0, 512)
 	cbuf := make([]vmCheckSample, 0, 256)
 	abuf := make([]vmAPISample, 0, 256)
@@ -299,17 +348,21 @@ const (
 func (v *vmWriter) vmImportDone(resp *http.Response, err error, kind string, n int) bool {
 	if err != nil {
 		slog.Warn("VictoriaMetrics 写入失败（将重试）", "kind", kind, "n", n, "err", err)
+		v.diag.writeErr(err.Error())
 		return false
 	}
 	defer resp.Body.Close()
 	io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
 	switch {
 	case resp.StatusCode/100 == 2:
+		v.diag.writeOK()
 		return true
 	case resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests:
 		slog.Warn("VictoriaMetrics 暂时不可用（将重试）", "kind", kind, "status", resp.StatusCode, "n", n)
+		v.diag.writeErr(fmt.Sprintf("HTTP %d (%s)", resp.StatusCode, kind))
 		return false
 	default:
+		v.diag.writeErr(fmt.Sprintf("HTTP %d rejected (%s)", resp.StatusCode, kind))
 		// 5xx 已经在 doVMRequest 里打过熔断器，4xx 没有。
 		if v.breaker != nil {
 			v.breaker.failure()
@@ -1269,6 +1322,42 @@ func (v *vmWriter) queryHistory(hostID string, from, to int64) ([]shared.Sample,
 }
 
 func (v *vmWriter) queryHistoryFilter(hostID string, from, to int64, names []string) ([]shared.Sample, bool) {
+	out, ok, _ := v.queryHistoryFilterReason(hostID, from, to, names)
+	return out, ok
+}
+
+// queryHistoryFilterReason is queryHistoryFilter plus WHY it came back empty.
+//
+// 「查询失败」「熔断」「窗口确实为空」此前都塌缩成同一个 ok=false，于是前端只能把三种
+// 原因并列写进一句提示里让人自己猜。可它们的处置方向完全相反：前两种查读路径（VM 是否
+// 可达、断路器为何打开），第三种查写路径（数据到底有没有写进去）。分开报，才谈得上排查。
+func (v *vmWriter) queryHistoryFilterReason(hostID string, from, to int64, names []string) ([]shared.Sample, bool, string) {
+	if v == nil || !v.enabled() {
+		return nil, false, historyReasonDisabled
+	}
+	if strings.TrimSpace(hostID) == "" {
+		return nil, false, historyReasonQueryError
+	}
+	out, ok := v.queryHistoryFilterInner(hostID, from, to, names)
+	if ok && len(out) > 0 {
+		v.diag.readOK()
+		return out, true, historyReasonNone
+	}
+	// 断路器优先判定：它开着的时候查询根本没有发出去，谈不上「窗口为空」。
+	if v.queryBreaker().state() == "open" {
+		return nil, false, historyReasonBreaker
+	}
+	// 走到这里说明请求真的发出去了。用一次极轻的存在性探测把「VM 答了但没数据」和
+	// 「VM 根本没答上来」分开——前者是写入侧的问题，后者是读路径的问题。
+	if _, probeOK := v.vmInstantScalar(`count(aiops_cpu_percent)`); !probeOK {
+		v.diag.readErr("history query failed and the liveness probe also failed")
+		return nil, false, historyReasonQueryError
+	}
+	v.diag.readEmpty()
+	return nil, false, historyReasonEmpty
+}
+
+func (v *vmWriter) queryHistoryFilterInner(hostID string, from, to int64, names []string) ([]shared.Sample, bool) {
 	if !v.enabled() || strings.TrimSpace(hostID) == "" {
 		return nil, false
 	}

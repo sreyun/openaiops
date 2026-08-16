@@ -133,6 +133,11 @@ func (s *Server) handleHostHistory(w http.ResponseWriter, r *http.Request) {
 	// be indistinguishable from the outside.
 	w.Header().Set("X-AIOps-History-Source", source)
 	if source == historySourceFallback {
+		// 把「为什么」也带上：查询失败 / 熔断 / 窗口为空的处置方向完全不同，
+		// 只说「没返回数据」等于把人推回猜测。见 vm_diag.go。
+		if reason := historyFallbackReasonFor(id); reason != "" {
+			w.Header().Set("X-AIOps-History-Reason", reason)
+		}
 		s.warnHistoryFallback(id, from, to)
 	}
 

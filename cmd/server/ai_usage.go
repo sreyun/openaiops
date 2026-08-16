@@ -70,7 +70,7 @@ INSERT INTO ai_feedback_events(ts, task, actor, action, source_hash)
 VALUES ($1,$2,$3,$4,$5)`,
 		time.Now().Unix(), task, actor, action, sourceHash)
 	if err != nil {
-		slog.Warn("PG ? AI ??????", "err", err)
+		slog.Warn("PG 写入 AI 反馈事件失败", "err", err)
 		return false
 	}
 	return true
@@ -101,7 +101,7 @@ SELECT COUNT(*),
        COALESCE(SUM(cost_estimate),0)
 FROM ai_call_events_p WHERE ts >= $1`, sinceTs).Scan(&total, &fail, &sumLat, &sumTok, &sumExactTok, &sumCost)
 	if err != nil {
-		slog.Warn("PG ?? AI ????", "err", err)
+		slog.Warn("PG 查询 AI 调用统计失败", "err", err)
 		out["persisted"] = false
 		return out
 	}
@@ -187,7 +187,7 @@ SELECT COUNT(*),
 FROM ai_feedback_events WHERE ts >= $1`, sinceTs).
 		Scan(&a.Total, &a.Applied, &a.Helpful, &a.Unhelpful)
 	if err != nil {
-		slog.Warn("PG ?? AI ????", "err", err)
+		slog.Warn("PG 查询 AI 反馈统计失败", "err", err)
 		out["feedback_persisted"] = false
 		return out
 	}
@@ -265,7 +265,7 @@ WHERE ts >= $1 AND ts <= $2
 GROUP BY 1 ORDER BY 1`
 	rows, err := p.db.Query(q, fromTs, toTs)
 	if err != nil {
-		slog.Warn("PG ?? AI ??????", "err", err)
+		slog.Warn("PG 查询 AI 用量历史失败", "err", err)
 		return nil
 	}
 	defer rows.Close()
@@ -309,7 +309,7 @@ FROM ai_call_events_p
 WHERE ts >= $1 AND ts <= $2
 GROUP BY 1 ORDER BY SUM(approx_tokens) DESC NULLS LAST LIMIT $3`, fromTs, toTs, limit)
 	if err != nil {
-		slog.Warn("PG ?? AI ??????", "err", err)
+		slog.Warn("PG 查询 AI 用户用量失败", "err", err)
 		return nil
 	}
 	defer rows.Close()
@@ -390,7 +390,7 @@ FROM ai_call_events_p
 WHERE ts >= $1 AND ts <= $2
 GROUP BY 1 ORDER BY 1`, fromTs, toTs)
 	if err != nil {
-		slog.Warn("PG ?? AI billing reconcile", "err", err)
+		slog.Warn("PG 查询 AI 账单对账失败", "err", err)
 		return nil
 	}
 	defer rows.Close()
@@ -618,7 +618,7 @@ SELECT COALESCE((data->>'timestamp')::bigint, ts),
 FROM audit_log_p WHERE `+where+`
 ORDER BY ts DESC LIMIT $`+strconv.Itoa(n)+` OFFSET $`+strconv.Itoa(n+1), args...)
 	if err != nil {
-		slog.Warn("PG ??????????", "err", err)
+		slog.Warn("PG 查询终端命令审计失败", "err", err)
 		return nil, total
 	}
 	defer rows.Close()
@@ -693,7 +693,7 @@ ON CONFLICT (id) DO UPDATE SET ts=EXCLUDED.ts, playbook_id=EXCLUDED.playbook_id,
   status=EXCLUDED.status, data=EXCLUDED.data`,
 		e.ID, ts, e.PlaybookID, e.Status, raw)
 	if err != nil {
-		slog.Warn("PG ???????", "err", err)
+		slog.Warn("PG 写入剧本执行记录失败", "err", err)
 	}
 }
 
@@ -742,7 +742,7 @@ ON CONFLICT (id) DO UPDATE SET ts=EXCLUDED.ts, rule_id=EXCLUDED.rule_id,
   status=EXCLUDED.status, data=EXCLUDED.data`,
 		run.ID, ts, run.RuleID, run.Status, raw)
 	if err != nil {
-		slog.Warn("PG ???????", "err", err)
+		slog.Warn("PG 写入自愈执行记录失败", "err", err)
 	}
 }
 

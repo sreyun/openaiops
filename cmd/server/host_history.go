@@ -418,7 +418,8 @@ func (s *Server) loadDurableHostHistorySource(hostID string, from, to int64, nam
 	if !s.vm.enabled() {
 		return mem, historySourceRAM, true
 	}
-	vm, ok := s.vm.queryHistoryFilter(hostID, from, to, names)
+	vm, ok, reason := s.vm.queryHistoryFilterReason(hostID, from, to, names)
+	lastHistoryFallbackReason.Store(hostID, reason)
 	if ok && len(vm) > 0 {
 		filled := fillHistoryGaps(vm, mem, historyGapFillMax(from, to))
 		// Overlay uses a short window so GetHistory prefers histRaw (nested
@@ -437,6 +438,20 @@ func (s *Server) loadDurableHostHistorySource(hostID string, from, to int64, nam
 // historyFallbackWarnEvery throttles the degraded-read warning. Chart polls are
 // frequent and a VM outage hits every one of them; logging each would bury the
 // signal in its own noise.
+// lastHistoryFallbackReason carries WHY the most recent read for a host fell back,
+// so the HTTP layer can put it in a header without threading a new return value
+// through every caller of loadDurableHostHistory.
+var lastHistoryFallbackReason sync.Map // hostID -> reason
+
+func historyFallbackReasonFor(hostID string) string {
+	if v, ok := lastHistoryFallbackReason.Load(hostID); ok {
+		if s, ok2 := v.(string); ok2 {
+			return s
+		}
+	}
+	return ""
+}
+
 const historyFallbackWarnEvery = 60 * time.Second
 
 var (
@@ -453,7 +468,7 @@ func (s *Server) warnHistoryFallback(hostID string, from, to int64) {
 	}
 	historyFallbackWarnAt = now
 	historyFallbackWarnMu.Unlock()
-	slog.Warn("主机历史读取回退到内存环：VictoriaMetrics 未返回数据（查询失败/熔断/该窗口无数据）。"+
+	slog.Warn("主机历史读取回退到内存环："+historyReasonHint(historyFallbackReasonFor(hostID))+"。"+
 		"内存只保留 raw 1200 / 1m 2880 / 5m 8640 点，长窗口会明显缩水",
 		"host", shortID(hostID), "window_sec", to-from)
 }

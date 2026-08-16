@@ -40,10 +40,6 @@ func endAIUsageSlot(id uint64) {
 	aiUsageSlots.Delete(id)
 }
 
-func captureAIUsage(promptTok, completionTok int) {
-	captureAIUsageCtx(context.Background(), promptTok, completionTok)
-}
-
 func captureAIUsageCtx(ctx context.Context, promptTok, completionTok int) {
 	if promptTok <= 0 && completionTok <= 0 {
 		return
@@ -92,11 +88,8 @@ func takeCapturedAIUsageCtx(ctx context.Context) (promptTok, completionTok int, 
 	return promptTok, completionTok, true
 }
 
-// captureAIUsageFromJSON extracts usage from a chat/completions JSON object or SSE data payload.
-func captureAIUsageFromJSON(raw []byte) {
-	captureAIUsageFromJSONCtx(context.Background(), raw)
-}
-
+// captureAIUsageFromJSONCtx extracts usage from a chat/completions JSON object
+// or SSE data payload and binds it to this call's usage slot.
 func captureAIUsageFromJSONCtx(ctx context.Context, raw []byte) {
 	var v map[string]any
 	if json.Unmarshal(raw, &v) != nil {
@@ -219,7 +212,7 @@ SELECT COALESCE(NULLIF(route_reason,''),'(none)'),
 FROM ai_call_events_p WHERE ts >= $1
 GROUP BY 1 ORDER BY COUNT(*) DESC`, sinceTs)
 	if err != nil {
-		slog.Warn("PG ?? AI route reason", "err", err)
+		slog.Warn("PG 查询 AI 路由原因统计失败", "err", err)
 		return out
 	}
 	defer rows.Close()

@@ -20,6 +20,26 @@ type vmCircuitBreaker struct {
 	halfOpenProbe bool
 }
 
+// state reports the breaker in words, for the diagnostics endpoint. 断路器是
+// 「曲线突然只剩内存」的三种原因之一，而它此前在外部完全不可见。
+func (b *vmCircuitBreaker) state() string {
+	if b == nil {
+		return "disabled"
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.openUntil.IsZero() && time.Now().Before(b.openUntil) {
+		return "open"
+	}
+	if b.halfOpenProbe {
+		return "half-open"
+	}
+	if b.failures > 0 {
+		return "closed(degraded)"
+	}
+	return "closed"
+}
+
 func newVMCircuitBreaker() *vmCircuitBreaker {
 	th := 5
 	if v := strings.TrimSpace(os.Getenv("AIOPS_VM_BREAKER_THRESHOLD")); v != "" {

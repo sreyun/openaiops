@@ -854,6 +854,8 @@ func (s *Server) Routes() http.Handler {
 	// 不读磁盘，且它正是「Agent 侧助手坏掉时的唯一逃生口」——没有 dist 目录的
 	// 部署同样需要它可用。更具体的路由优先于下面的 "GET /dl/" 前缀路由。
 	mux.HandleFunc("GET "+windowsUpdateHelperPath, s.handleAgentUpdateHelperScript)
+	// VM 读写健康：一次请求回答「写进去了吗 / 读得到吗」，见 vm_diag.go。
+	mux.HandleFunc("GET /api/v1/vm/diagnostics", s.handleVMDiagnostics)
 	// agent binaries + plugins.zip for the one-line install command
 	if s.distDir != "" {
 		mux.HandleFunc("GET /dl/", s.handleDownload)

@@ -22,7 +22,7 @@ INSERT INTO ai_eval_runs(
 		s.RunID, time.Now().Unix(), s.Model, s.Mode, s.EvalSetVersion, s.CaseCount, s.PassedCount,
 		s.PassRate, s.RootCauseHitRate, s.ActionAcceptRate, s.VerifyAgreement, detail)
 	if err != nil {
-		slog.Warn("PG ?? eval run persist", "err", err)
+		slog.Warn("PG 写入 AI 评测结果失败", "err", err)
 	}
 }
 
