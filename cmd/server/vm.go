@@ -899,16 +899,34 @@ func (v *vmWriter) vmQueryRangeSeries(promql string, startTs, endTs, stepSec int
 		return nil, false
 	}
 	var out struct {
-		Status string `json:"status"`
-		Data   struct {
+		Status    string `json:"status"`
+		ErrorType string `json:"errorType"`
+		Error     string `json:"error"`
+		Data      struct {
 			Result []struct {
 				Metric map[string]string `json:"metric"`
 				Values [][]any           `json:"values"`
 			} `json:"result"`
 		} `json:"data"`
 	}
-	if json.NewDecoder(resp.Body).Decode(&out) != nil || out.Status != "success" {
-		v.diag.readErr("query_range: response was not a successful matrix")
+	// 先整段读进来再解码：VictoriaMetrics 对一部分查询错误是 **HTTP 200 + status:error**
+	// 返回的，错误原因只写在正文里。原来这里只说「response was not a successful matrix」，
+	// 把 VM 自己给出的答案吞掉了——查到这一步却还是不知道为什么，等于白查。
+	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if readErr != nil {
+		v.diag.readErr("query_range: read body: " + readErr.Error())
+		return nil, false
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		v.diag.readErr("query_range: body is not JSON: " + snippetForDiag(raw))
+		return nil, false
+	}
+	if out.Status != "success" {
+		detail := strings.TrimSpace(out.ErrorType + " " + out.Error)
+		if detail == "" {
+			detail = snippetForDiag(raw)
+		}
+		v.diag.readErr("query_range rejected by VictoriaMetrics: " + detail)
 		return nil, false
 	}
 	series := make([]promMatrix, 0, len(out.Data.Result))
@@ -1302,6 +1320,15 @@ func setSampleDisk(s *shared.Sample, path, name string, val float64) string {
 // stable ~400–600 point density. Without this, raw /export floods long ranges
 // (timeouts / empty charts) while short ranges look fine — the classic
 // "switching 1h→6h→24h returns different empty/wrong curves" symptom.
+// snippetForDiag 截一小段正文用于诊断，去掉换行以便安全放进日志与 JSON 字段。
+func snippetForDiag(b []byte) string {
+	t := strings.TrimSpace(strings.ReplaceAll(string(b), "\n", " "))
+	if len(t) > 300 {
+		t = t[:300] + "…"
+	}
+	return t
+}
+
 func adaptiveHistoryStep(from, to int64) int64 {
 	span := to - from
 	if span < 1 {

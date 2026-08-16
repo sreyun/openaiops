@@ -1219,6 +1219,16 @@ func (s *Server) decideAutoUpdate(h *Host) (bool, string, string) {
 	if !agentVersionBehind(h.AgentVersion, appVersion) {
 		// Version caught up — release any leftover cooldown early.
 		s.agentUpdates.clearInFlight(h.ID)
+		// 「判定为不落后」是这条闸门里**唯一完全静默**的出口：不记跳过原因、不打日志。
+		// 正常情况没问题（绝大多数主机本来就是最新的，记下来只会淹没真实原因）。但如果
+		// 上报的版本串**和目标不一样**却仍被判成不落后，那要么是版本比较出了偏差，要么是
+		// Agent 上报的版本与它实际运行的二进制不符——这台机器会被永久忽略，而屏幕上一个
+		// 字都不会有。这正是「没升级、也没报错」的形态，所以只在这种可疑情形下记一条。
+		if normalizeAgentVer(h.AgentVersion) != normalizeAgentVer(appVersion) {
+			return false, "version_not_behind", fmt.Sprintf(
+				"上报版本 %q 与目标 %q 不同，但比较结果判定为「不落后」，因此不会升级；"+
+					"请核对该 Agent 实际运行的二进制版本", h.AgentVersion, appVersion)
+		}
 		return false, "", ""
 	}
 	// Do not soft-retry while a prior job is still awaiting version ack.

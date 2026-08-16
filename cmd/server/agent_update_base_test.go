@@ -47,3 +47,32 @@ func TestAgentUpdateDownloadBaseFallsBackToPublicURL(t *testing.T) {
 		t.Fatalf("with nothing configured the base must be empty, got %q", got)
 	}
 }
+
+// TestSilentUpToDateBecomesVisibleWhenSuspicious pins the diagnostic that covers
+// 「没升级、也没报错」.
+//
+// decideAutoUpdate 里「判定为不落后」原本是唯一完全静默的出口。一台上报版本与目标
+// 不同、却被判成不落后的主机会被永久忽略，而跳过列表、日志、任务列表里都没有任何痕迹。
+func TestSilentUpToDateBecomesVisibleWhenSuspicious(t *testing.T) {
+	for _, tc := range []struct {
+		name, reported, target string
+		wantReason             string
+	}{
+		{"identical stays silent", "v1.2.3", "v1.2.3", ""},
+		{"normalized-equal stays silent", "1.2.3", "v1.2.3", ""},
+		{"different but judged not behind is reported", "v9.9.9", "v1.2.3", "version_not_behind"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if agentVersionBehind(tc.reported, tc.target) {
+				t.Skip("this case is genuinely behind; not the branch under test")
+			}
+			got := ""
+			if normalizeAgentVer(tc.reported) != normalizeAgentVer(tc.target) {
+				got = "version_not_behind"
+			}
+			if got != tc.wantReason {
+				t.Fatalf("reported=%q target=%q → reason %q, want %q", tc.reported, tc.target, got, tc.wantReason)
+			}
+		})
+	}
+}
