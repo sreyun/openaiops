@@ -84,6 +84,17 @@ func (d *vmDiag) readEmpty() {
 	d.mu.Unlock()
 }
 
+// lastReadErrSince reports whether a read error was recorded at or after ts.
+// 用「这次查询期间有没有记下错误」来判定，比事后猜测可靠。
+func (d *vmDiag) lastReadErrSince(ts int64) (bool, string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.lastReadErr != "" && d.lastReadErrAt >= ts {
+		return true, d.lastReadErr
+	}
+	return false, ""
+}
+
 func (d *vmDiag) snapshot() map[string]any {
 	d.mu.Lock()
 	defer d.mu.Unlock()

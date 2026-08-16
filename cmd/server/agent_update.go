@@ -794,7 +794,7 @@ func (s *Server) rescueWindowsAgentUpdate(job *agentUpdateJob, hostID, target st
 		return false
 	}
 
-	base := agentDownloadBase(h, job.ServerURL)
+	base := s.agentUpdateDownloadBase(h, job.ServerURL)
 	if base == "" {
 		s.agentUpdates.mu.Lock()
 		if hr.Status == "pending_verify" {
@@ -882,7 +882,7 @@ func (s *Server) executeAgentUpdateHost(job *agentUpdateJob, hr *agentUpdateHost
 		// cloud PublicURL — agents behind a gateway cannot reach it, and validateUpdateServerURL
 		// would reject it against allowedBases. Empty server → agent uses configured report base.
 		moduleBase := agentReportedDownloadBase(h)
-		scriptBase := agentDownloadBase(h, job.ServerURL)
+		scriptBase := s.agentUpdateDownloadBase(h, job.ServerURL)
 		if hostSupportsAgentUpdateModule(h) {
 			args := map[string]string{
 				"force": bool01(job.Force || job.Rollback),
@@ -1074,6 +1074,25 @@ func agentDownloadBase(h *Host, fallback string) string {
 		return u
 	}
 	return strings.TrimRight(strings.TrimSpace(fallback), "/")
+}
+
+// agentUpdateDownloadBase resolves the /dl base for the SERVER-generated scripts
+// (legacy fallback + Windows rescue): agent-reported → job → dashboard public URL.
+//
+// 修的是一条真实的断链。闸门允许「支持模块的主机」以**空基址**入队——模块跑在 Agent
+// 自己进程里，用它已配置的上报地址即可，所以 job.ServerURL 常常是空的。但服务端生成的
+// 脚本必须把 /dl 地址写死进正文，于是 rescueWindowsAgentUpdate 拿不到基址就直接判死：
+//
+//	"helper never completed the swap and no download base is known for the legacy rescue"
+//
+// 而闸门在**非模块主机**那一支是会回退到 public_url 的，救援这一支却从来不查。结果是：
+// 只要 Agent 没上报 server_url，这条专为「Agent 侧助手已损坏」准备的逃生口就永远打不开
+// ——而模块路径正是老 Windows Agent 上坏掉的那条。两条路同时失效，主机永久停在旧版本。
+func (s *Server) agentUpdateDownloadBase(h *Host, jobURL string) string {
+	if u := agentDownloadBase(h, jobURL); u != "" {
+		return u
+	}
+	return s.agentPublicBaseURL()
 }
 
 func (s *Server) runLegacyAgentUpdateScript(h *Host, serverURL string, force bool) (string, error) {

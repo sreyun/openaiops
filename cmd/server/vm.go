@@ -886,10 +886,16 @@ func (v *vmWriter) vmQueryRangeSeries(promql string, startTs, endTs, stepSec int
 	}
 	resp, err := v.doVMQuery(req)
 	if err != nil {
+		// 记下真实原因。主机曲线查不到数据时，「查询报错」和「窗口为空」在界面上长得
+		// 一模一样，但一个要查读路径、一个要查写入侧——不把 VM 自己说的话留下来，
+		// 排查就只能靠猜。
+		v.diag.readErr("query_range: " + err.Error())
 		return nil, false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<10))
+		v.diag.readErr(fmt.Sprintf("query_range HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body))))
 		return nil, false
 	}
 	var out struct {
@@ -902,6 +908,7 @@ func (v *vmWriter) vmQueryRangeSeries(promql string, startTs, endTs, stepSec int
 		} `json:"data"`
 	}
 	if json.NewDecoder(resp.Body).Decode(&out) != nil || out.Status != "success" {
+		v.diag.readErr("query_range: response was not a successful matrix")
 		return nil, false
 	}
 	series := make([]promMatrix, 0, len(out.Data.Result))
@@ -1338,6 +1345,7 @@ func (v *vmWriter) queryHistoryFilterReason(hostID string, from, to int64, names
 	if strings.TrimSpace(hostID) == "" {
 		return nil, false, historyReasonQueryError
 	}
+	queryStart := time.Now().Unix()
 	out, ok := v.queryHistoryFilterInner(hostID, from, to, names)
 	if ok && len(out) > 0 {
 		v.diag.readOK()
@@ -1347,8 +1355,15 @@ func (v *vmWriter) queryHistoryFilterReason(hostID string, from, to int64, names
 	if v.queryBreaker().state() == "open" {
 		return nil, false, historyReasonBreaker
 	}
-	// 走到这里说明请求真的发出去了。用一次极轻的存在性探测把「VM 答了但没数据」和
-	// 「VM 根本没答上来」分开——前者是写入侧的问题，后者是读路径的问题。
+	// 走到这里说明请求真的发出去了。此前这里只用「存活探测是否成功」来区分，那是错的：
+	// **主机曲线这条查询自己报错、而探测正常**是完全可能的（选择器过长、序列数超限、
+	// step 不合法…），却会被判成 empty_window 并告诉用户「问题在写入侧」——把人指向
+	// 相反的方向。现在以 vmQueryRangeSeries 刚记下的真实错误为准。
+	// 只回原因码，不把 VM 的错误正文拼进去：这个值会进 HTTP 响应头，而错误正文可能带
+	// 换行、非 ASCII、长度不可控。正文已经记在 diag.lastReadErr 里，诊断接口会给出。
+	if errAt, _ := v.diag.lastReadErrSince(queryStart); errAt {
+		return nil, false, historyReasonQueryError
+	}
 	if _, probeOK := v.vmInstantScalar(`count(aiops_cpu_percent)`); !probeOK {
 		v.diag.readErr("history query failed and the liveness probe also failed")
 		return nil, false, historyReasonQueryError
