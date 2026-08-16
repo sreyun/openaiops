@@ -175,6 +175,7 @@ func (s *Server) handleDeleteHost(w http.ResponseWriter, r *http.Request) {
 	}
 	label := s.hostLabelForID(id)
 	ok := s.store.DeleteHost(id)
+	lastHistoryFallbackReason.Delete(id) // 主机没了，它的降级留痕也该走
 	_ = s.cfg.SetCategory(id, "") // drop override + folder assign for the removed host
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "common.host_not_found")})

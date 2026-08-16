@@ -1,6 +1,7 @@
 package main
 
 import (
+	"sync"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -143,14 +144,19 @@ func TestHandleMCPGetSSEHeaders(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer get-sse-token")
 	req.Header.Set("Accept", "text/event-stream")
 	rr := httptest.NewRecorder()
+	// SSE 处理器会一直写到 ctx 取消，所以它必须跑在另一个 goroutine 里；而这个测试要
+	// 一边等 "event: endpoint" 出现一边取消。httptest.ResponseRecorder **没有任何加锁**，
+	// 直接边写边读 rr.Body 是数据竞争（-race 下必然失败）。用带锁的包装把两侧隔开：
+	// 生产路径没有这个问题——真实的 ResponseWriter 只被请求自己的 goroutine 写。
+	lw := &lockedRecorder{rec: rr}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		s.handleMCP(rr, req)
+		s.handleMCP(lw, req)
 	}()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if strings.Contains(rr.Body.String(), "event: endpoint") {
+		if strings.Contains(lw.body(), "event: endpoint") {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -167,9 +173,42 @@ func TestHandleMCPGetSSEHeaders(t *testing.T) {
 	if rr.Header().Get("Mcp-Session-Id") == "" {
 		t.Fatal("missing Mcp-Session-Id")
 	}
-	if !strings.Contains(rr.Body.String(), "event: endpoint") {
-		t.Fatalf("missing endpoint event: %s", rr.Body.String())
+	if !strings.Contains(lw.body(), "event: endpoint") {
+		t.Fatalf("missing endpoint event: %s", lw.body())
 	}
+}
+
+// lockedRecorder serialises writes from the handler goroutine against reads from
+// the test goroutine. Only needed for the streaming (SSE) handlers.
+type lockedRecorder struct {
+	mu  sync.Mutex
+	rec *httptest.ResponseRecorder
+}
+
+func (l *lockedRecorder) Header() http.Header { return l.rec.Header() }
+
+func (l *lockedRecorder) Write(b []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.rec.Write(b)
+}
+
+func (l *lockedRecorder) WriteHeader(code int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.rec.WriteHeader(code)
+}
+
+func (l *lockedRecorder) Flush() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.rec.Flush()
+}
+
+func (l *lockedRecorder) body() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.rec.Body.String()
 }
 
 func TestHandleMCPPromptsAndResources(t *testing.T) {

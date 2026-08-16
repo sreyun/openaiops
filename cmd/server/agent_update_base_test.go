@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // TestAgentUpdateDownloadBaseFallsBackToPublicURL pins the escape hatch open.
 //
@@ -75,4 +78,59 @@ func TestSilentUpToDateBecomesVisibleWhenSuspicious(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSuperviseLoopSurvivesPanicAndRestarts pins the property that matters most:
+// 一条后台循环 panic 不能带走整个进程，而且要自己回来。
+//
+// Go 的规则是「任何 goroutine 未捕获的 panic 终止整个进程」。这个服务端启动时拉起
+// 十几条常驻循环，全都在处理外部来的不可信数据（Agent 上报、用户配的 PromQL/剧本、
+// 第三方 CI 的 JSON、VM 的响应）。任意一条上的一次空指针或越界，就会让所有人用来
+// 发现故障的那个东西自己先没了。
+func TestSuperviseLoopSurvivesPanicAndRestarts(t *testing.T) {
+	prev := superviseRestartDelay
+	superviseRestartDelay = 10 * time.Millisecond // 测试里不等 5 秒
+	t.Cleanup(func() { superviseRestartDelay = prev })
+	calls := make(chan int, 4)
+	n := 0
+	done := make(chan struct{})
+	go superviseLoop("test-loop", func() {
+		n++
+		calls <- n
+		if n < 3 {
+			panic("boom") // 前两轮崩溃，第三轮正常返回
+		}
+		close(done)
+	})
+
+	for i := 1; i <= 3; i++ {
+		select {
+		case got := <-calls:
+			if got != i {
+				t.Fatalf("attempt %d, want %d", got, i)
+			}
+		case <-time.After(30 * time.Second):
+			t.Fatalf("loop did not restart after panic (attempt %d)", i)
+		}
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("loop never completed normally")
+	}
+}
+
+// safeGo 隔离一次性任务的 panic：只丢这一次，不牵连进程。
+func TestSafeGoIsolatesPanic(t *testing.T) {
+	ran := make(chan struct{})
+	safeGo("test-task", func() {
+		defer close(ran)
+		panic("boom")
+	})
+	select {
+	case <-ran:
+	case <-time.After(5 * time.Second):
+		t.Fatal("safeGo task never ran")
+	}
+	// 走到这里就说明进程没被带走。
 }

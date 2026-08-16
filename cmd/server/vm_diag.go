@@ -143,7 +143,9 @@ func (s *Server) handleVMDiagnostics(w http.ResponseWriter, r *http.Request) {
 			out["verdict"] = "VictoriaMetrics 查询不可用 —— 看 last_read_err 与 read_breaker"
 		case series == 0:
 			out["verdict"] = "VictoriaMetrics 可达，但里面没有任何主机 CPU 指标 —— 问题在写入侧或数据已被清空"
-		case depth <= 0:
+		case depth < 0:
+			out["verdict"] = "VictoriaMetrics 有主机指标，但保留深度探测超时——请稍后重试或直接查 VM"
+		case depth == 0:
 			out["verdict"] = "VictoriaMetrics 只有『刚刚』的数据：连 1 小时前都查不到。" +
 				"写入正常说明链路是通的，那么历史是**被清掉的**——检查 VM 数据目录是否在发版时随部署目录一起被删（compose 默认挂 ./vm-data）"
 		default:
@@ -194,6 +196,10 @@ func historyReasonHint(reason string) string {
 // 用 count() 在**过去某一时刻**求值（VM 的 /api/v1/query 支持 time=），而不是 range 查询：
 // 一次请求一个标量，最便宜，也不受 step / 抽样的影响。
 func (v *vmWriter) probeRetentionDepth() (int64, string) {
+	// 整体预算。单次 VM 查询默认超时 15 秒，而这里最多要探 5 个刻度——VM 一慢，诊断接口
+	// 就会被自己卡住一分钟以上，而运维恰恰是在「东西不对劲」的时候点开它的。
+	// 正常情况只需一次查询（最老的刻度有数据就立即返回），所以这个预算不影响常态。
+	deadline := time.Now().Add(12 * time.Second)
 	type mark struct {
 		sec   int64
 		label string
@@ -207,6 +213,9 @@ func (v *vmWriter) probeRetentionDepth() (int64, string) {
 	}
 	now := time.Now().Unix()
 	for _, m := range marks {
+		if time.Now().After(deadline) {
+			return -1, "探测超时（VictoriaMetrics 响应过慢，未能判定）"
+		}
 		series, ok := v.vmQueryVectorAt(`count(aiops_cpu_percent)`, now-m.sec)
 		if !ok {
 			continue

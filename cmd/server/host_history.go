@@ -419,7 +419,12 @@ func (s *Server) loadDurableHostHistorySource(hostID string, from, to int64, nam
 		return mem, historySourceRAM, true
 	}
 	vm, ok, reason := s.vm.queryHistoryFilterReason(hostID, from, to, names)
-	lastHistoryFallbackReason.Store(hostID, reason)
+	// 只在降级时留痕，成功就删掉：这张表按 host 累积，只写不删的话主机删了条目还在。
+	if reason == historyReasonNone {
+		lastHistoryFallbackReason.Delete(hostID)
+	} else {
+		lastHistoryFallbackReason.Store(hostID, reason)
+	}
 	if ok && len(vm) > 0 {
 		filled := fillHistoryGaps(vm, mem, historyGapFillMax(from, to))
 		// Overlay uses a short window so GetHistory prefers histRaw (nested
