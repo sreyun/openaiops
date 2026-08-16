@@ -57,7 +57,12 @@ type RemediationRun struct {
 	IncidentID         int64  `json:"incident_id,omitempty"`
 	RollbackPlaybookID string `json:"rollback_playbook_id,omitempty"`
 	RollbackExecID     int64  `json:"rollback_execution_id,omitempty"`
-	CreatedAt          int64  `json:"created_at"`
+	// Verify records whether the ALERT actually cleared after a successful run —
+	// "" (not applicable) | pending | cleared | still_firing | unknown.
+	// Status 只说明剧本跑完了，Verify 才说明问题解决了。
+	Verify     string `json:"verify,omitempty"`
+	VerifiedAt int64  `json:"verified_at,omitempty"`
+	CreatedAt  int64  `json:"created_at"`
 	DecidedAt          int64  `json:"decided_at,omitempty"`
 	DecidedBy          string `json:"decided_by,omitempty"`
 }
@@ -77,6 +82,14 @@ func levelRank(l string) int {
 
 // remediationManager evaluates rules and tracks runs. Playbook execution is done
 // through a server-provided callback so this file stays free of HTTP/agent code.
+// remediationVerifyDelay is how long to wait after a successful playbook before
+// asking whether the alert actually cleared.
+//
+// 下限由告警引擎决定：评估周期 10s，且需连续 alertClearTicks 次消失才判恢复，
+// 也就是条件消失后还要 ~20-30s 才从 active 集合里退出。90s 给剧本留出真正生效的
+// 时间（重启服务、清理磁盘、扩容），同时仍然足够快，能在运维还在看这条告警时给出结论。
+const remediationVerifyDelay = 90 * time.Second
+
 type remediationManager struct {
 	mu      sync.Mutex
 	cfg     *ConfigStore
@@ -98,6 +111,11 @@ type remediationManager struct {
 	onNotify func(level, title, body string, incidentID int64)
 	// onPersist writes each run to PG permanently (no ring-buffer loss).
 	onPersist func(run RemediationRun)
+	// alertActive answers "is that alert still firing?" — the observation half of
+	// the loop. Nil disables verification (runs simply carry no Verify value).
+	alertActive func(alertKey string) bool
+	// verifyAfter overrides remediationVerifyDelay in tests.
+	verifyAfter time.Duration
 }
 
 func newRemediationManager(cfg *ConfigStore) *remediationManager {
@@ -320,10 +338,15 @@ func (m *remediationManager) finish(runID int64, ok bool, reason, rollbackPlaybo
 	}
 	if m.onNotify != nil {
 		if ok {
-			m.onNotify("success", "自动修复成功："+name, "主机 "+hostname+" 已成功执行修复剧本。", incID)
+			// 措辞刻意从「自动修复成功」改成「已执行」：此刻我们只知道剧本跑完了，
+			// 还没有回看告警是否消失。结论由 verifyRun 在验证窗后单独推送。
+			m.onNotify("success", "自动修复已执行："+name, "主机 "+hostname+" 已执行修复剧本，正在回看告警是否消除。", incID)
 		} else {
 			m.onNotify("critical", "自动修复失败："+name, "主机 "+hostname+"："+trimLine(reason, 160), incID)
 		}
+	}
+	if ok {
+		m.scheduleVerify(runID)
 	}
 	if !ok && rollbackPlaybookID != "" && m.getPlaybook != nil && m.trigger != nil {
 		if rpb, okPB := m.getPlaybook(rollbackPlaybookID); okPB {
@@ -354,6 +377,88 @@ func (m *remediationManager) finish(runID int64, ok bool, reason, rollbackPlaybo
 				}
 			}
 		}
+	}
+}
+
+// scheduleVerify closes the loop: after a successful playbook we wait one
+// verification window and then ask whether the alert that triggered it is gone.
+//
+// 为什么必须有这一步：整套自愈的价值主张是「发现 → 处置 → 确认」，而此前只有前两步。
+// 「剧本退出码 0」被直接当成「修复成功」推送出去，于是三件事同时发生：
+//   1. 运维收到一条**可能是假的**成功通知，从此不再盯这条告警；
+//   2. 每条规则的真实有效性无从回答——「这条自愈到底有没有用」没有任何数据支撑；
+//   3. 冷却窗被这次「成功」占满，真正该做的处置反而被推迟。
+// 现在把结论拆成两条消息：执行完一条，验证完一条。只在**没修好**时升级为告警级别，
+// 修好了则安静地标成 cleared——不给运维增加噪声。
+func (m *remediationManager) scheduleVerify(runID int64) {
+	if m == nil || m.alertActive == nil {
+		return
+	}
+	m.mu.Lock()
+	run := m.findRun(runID)
+	if run == nil || run.AlertKey == "" || strings.HasPrefix(run.AlertKey, "proposal/") {
+		// 人工提案没有对应的告警键，无从回看。
+		m.mu.Unlock()
+		return
+	}
+	run.Verify = "pending"
+	cp := *run
+	delay := m.verifyAfter
+	m.mu.Unlock()
+	m.persistRun(cp)
+	if delay <= 0 {
+		delay = remediationVerifyDelay
+	}
+	go func() {
+		time.Sleep(delay)
+		m.verifyRun(runID)
+	}()
+}
+
+// verifyRun records whether the triggering alert survived the remediation.
+func (m *remediationManager) verifyRun(runID int64) {
+	if m == nil || m.alertActive == nil {
+		return
+	}
+	m.mu.Lock()
+	run := m.findRun(runID)
+	if run == nil || run.Verify != "pending" {
+		m.mu.Unlock()
+		return
+	}
+	key, name, hostname, incID := run.AlertKey, run.PlaybookName, run.Hostname, run.IncidentID
+	m.mu.Unlock()
+
+	stillFiring := m.alertActive(key)
+
+	m.mu.Lock()
+	run = m.findRun(runID)
+	if run == nil || run.Verify != "pending" {
+		m.mu.Unlock()
+		return
+	}
+	if stillFiring {
+		run.Verify = "still_firing"
+	} else {
+		run.Verify = "cleared"
+	}
+	run.VerifiedAt = time.Now().Unix()
+	verdict := run.Verify
+	cp := *run
+	m.mu.Unlock()
+	m.persistRun(cp)
+
+	if m.onIncident != nil && incID > 0 {
+		key := "remediation.evt_verify_cleared"
+		if verdict == "still_firing" {
+			key = "remediation.evt_verify_still_firing"
+		}
+		m.onIncident(incID, "remediation", "auto", Tz(key, name, hostname))
+	}
+	// 只在没修好时打扰人：修好了本来就是预期结果。
+	if verdict == "still_firing" && m.onNotify != nil {
+		m.onNotify("critical", "自动修复未生效："+name,
+			"主机 "+hostname+" 的告警在修复剧本执行后仍在触发，需要人工介入。", incID)
 	}
 }
 

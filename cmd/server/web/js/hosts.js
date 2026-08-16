@@ -1103,6 +1103,22 @@ function historySourceHintText(src) {
     default: return "";
   }
 }
+// historySourceBanner：把「这条曲线其实来自内存回退」提升成警告条。
+//
+// 这个信息以前只作为灰色小字拼在「采样点 288 · 粒度 5分钟聚合」后面，读起来和普通
+// 元信息没有区别。但它描述的是一个**数据在流失**的状态：内存里的 5 分钟历史有 30 天，
+// 所以只要进程不重启，曲线看着是完整的；一旦重启，这段历史就永远没了——用户看到的
+// 就是「发版后曲线只剩重启之后」。这条状态必须在它还能被挽救的时候被看见。
+function historySourceBanner(src) {
+  const v = String(src || "").toLowerCase();
+  if (v !== "ram-fallback" && v !== "vm_miss" && v !== "ram") return "";
+  const why = v === "ram"
+    ? I18N.t("section.history_ram_only_why", "未启用持久化时序库（VictoriaMetrics）")
+    : I18N.t("section.history_vm_miss_why", "持久化时序库没有返回数据（查询失败 / 熔断 / 该窗口确实为空）");
+  return `<div class="hint warn history-src-warn">⚠ ${why}。` +
+    I18N.t("section.history_ram_risk", "当前曲线来自内存缓存，服务重启后这段历史会全部消失") +
+    `</div>`;
+}
 function chartSpanLabel(h) {
   return h < 24 ? h + I18N.t("time.hour") : (h / 24) + I18N.t("time.day");
 }
@@ -1342,6 +1358,7 @@ async function loadAndRenderCharts() {
       `<button class="chart-enlarge" data-chart="${id}" title="${I18N.t('ui.zoom_preview')}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg></button></div>`;
     body.innerHTML = `
       ${renderDetailToolbar(from, to)}
+      ${historySourceBanner(src)}
       <div class="chart-container">
         ${wrap('chartCombo')}${wrap('chartCPU')}${wrap('chartMem')}${wrap('chartLoad')}${wrap('chartDisk')}${hasGPU ? wrap('chartGPU') + wrap('chartGPUTemp') + wrap('chartGPUMemPct') + wrap('chartGPUMem') : ''}${wrap('chartNet')}${hasConns ? wrap('chartConns') + wrap('chartConnStates') : ''}${wrap('chartDiskIO')}${wrap('chartIOPS')}${wrap('chartProc')}
       </div>

@@ -31,6 +31,8 @@ func (s *Server) wireSRE() {
 	s.remediation.category = s.effectiveCategory
 	s.remediation.trigger = s.triggerPlaybookOnHost
 	s.remediation.onIncident = s.incidents.AddEvent
+	// 闭环的「观察」半边：剧本跑完之后回看告警是否真的消失（见 scheduleVerify）。
+	s.remediation.alertActive = s.notifier.AlertActive
 	s.remediation.onPersist = func(run RemediationRun) {
 		if s.pg != nil {
 			s.pg.upsertRemediationRun(run)

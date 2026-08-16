@@ -728,6 +728,9 @@ section{scroll-margin-top:80px; margin-bottom:24px}
 .subhead.subhead-first{margin-top:0; padding-top:0; border-top:none}
 .grid2{display:grid; grid-template-columns:1fr 1fr; gap:12px}
 .hint{font-size:11px; color:var(--muted2); margin-top:6px; line-height:1.55}
+/* 历史降级警告：曲线来自内存缓存、重启即丢，必须比普通 hint 更显眼。 */
+.hint.history-src-warn{color:var(--warn-txt,#f2c078); background:var(--warn-soft); border:1px solid var(--warn);
+  border-radius:var(--r-sm,6px); padding:7px 10px; margin:8px 0 0; font-size:12px}
 .spark{margin-top:6px}
 svg.sparkline{width:100%; height:46px; display:block}
 

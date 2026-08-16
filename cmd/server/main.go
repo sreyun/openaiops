@@ -436,6 +436,10 @@ func main() {
 	go server.startAgentAutoUpdateScanner(5 * time.Minute) // 周期性扫描在线且版本落后的 agent 主动入队升级
 	go server.startCICDFailureWatcher(2 * time.Minute)     // 勾了「失败告警 / 自动事件」的 CI/CD 连接：红流水线 → 告警 / SRE 事件
 	server.initForecastLearn()                             // 预测台账对比实测 → 校准因子 + AI 自学习记忆
+	// 启动后自检持久化历史：内存里的 5 分钟环有 30 天，进程活着时会把「VM 里其实
+	// 没有数据」完全掩盖，直到下一次发版重启才暴露成「曲线只剩重启之后」。见
+	// history_selfcheck.go。
+	go server.verifyDurableHistoryAfterStart(time.Now().Unix())
 
 	logProductionSecurityBaseline(cfg)
 	store.onAudit = server.exportAuditEntry

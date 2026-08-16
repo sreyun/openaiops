@@ -282,6 +282,8 @@
   "remediation.evt_pending": "Auto-remediation awaiting approval: rule \"%s\" → playbook \"%s\"",
   "remediation.evt_triggered": "Auto-remediation triggered: rule \"%s\" → playbook \"%s\" on %s",
   "remediation.evt_success": "Auto-remediation succeeded: playbook \"%s\" on %s",
+  "remediation.evt_verify_cleared": "Verified: the alert cleared after playbook \"%s\" ran on %s",
+  "remediation.evt_verify_still_firing": "NOT fixed: the alert is still firing after playbook \"%s\" ran on %s",
   "remediation.evt_failed": "Auto-remediation failed: playbook \"%s\" on %s",
   "remediation.evt_rejected": "Auto-remediation rejected: rule \"%s\"",
   "remediation.run_not_found": "Remediation run not found",

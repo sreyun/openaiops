@@ -280,6 +280,8 @@
   "remediation.evt_pending": "自動修復待審批：規則「%s」→ 劇本「%s」",
   "remediation.evt_triggered": "已觸發自動修復：規則「%s」→ 劇本「%s」於 %s",
   "remediation.evt_success": "自動修復成功：劇本「%s」於 %s",
+  "remediation.evt_verify_cleared": "已回驗：劇本「%s」在 %s 執行後告警已消除",
+  "remediation.evt_verify_still_firing": "未生效：劇本「%s」在 %s 執行後告警仍在觸發",
   "remediation.evt_failed": "自動修復失敗：劇本「%s」於 %s",
   "remediation.evt_rejected": "自動修復已被拒絕：規則「%s」",
   "remediation.run_not_found": "修復記錄不存在",

@@ -69,6 +69,27 @@ func NewNotifier(store *Store, cfg *ConfigStore) *Notifier {
 
 func alertKey(a Alert) string { return a.HostID + "/" + a.Type + "/" + a.Scope }
 
+// AlertActive reports whether the alert identified by alertKey() is still in the
+// firing set.
+//
+// 这是自愈闭环缺失的那一半「观察」。remediation.go 的文件头写着 closed-loop，但它
+// 判定一次自愈成功的唯一依据是**剧本退出码为 0**——「命令跑完了」和「问题没了」是
+// 两个不同的断言。重启一个起来就挂的服务、清一块马上又满的磁盘，都会退出 0，于是
+// 运维收到「自动修复成功」的通知、不再去看，而告警其实一直在响；同时冷却窗被这次
+// 「成功」占用，真正的处置反而被推迟。
+//
+// active 集合本身已经带了抖动抑制（连续 alertClearTicks 次消失才判恢复），所以它
+// 正是这里要的信号：拿它回看一眼，就能把「执行成功」和「确实修好了」分开。
+func (n *Notifier) AlertActive(key string) bool {
+	if n == nil || key == "" {
+		return false
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	_, ok := n.active[key]
+	return ok
+}
+
 // Run evaluates alerts every interval and notifies on state transitions.
 func (n *Notifier) Run(interval time.Duration) {
 	n.tick() // evaluate promptly on startup

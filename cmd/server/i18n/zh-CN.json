@@ -282,6 +282,8 @@
   "remediation.evt_pending": "自动修复待审批：规则「%s」→ 剧本「%s」",
   "remediation.evt_triggered": "已触发自动修复：规则「%s」→ 剧本「%s」于 %s",
   "remediation.evt_success": "自动修复成功：剧本「%s」于 %s",
+  "remediation.evt_verify_cleared": "已回验：剧本「%s」在 %s 执行后告警已消除",
+  "remediation.evt_verify_still_firing": "未生效：剧本「%s」在 %s 执行后告警仍在触发",
   "remediation.evt_failed": "自动修复失败：剧本「%s」于 %s",
   "remediation.evt_rejected": "自动修复已被拒绝：规则「%s」",
   "remediation.run_not_found": "修复记录不存在",

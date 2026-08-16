@@ -28,8 +28,20 @@
       "transition:background .15s,color .15s}" +
     ".tree-toggle-btn:hover{color:var(--text);background:rgba(127,127,127,.12)}" +
     ".tree-wrap.tree-collapsed .tree-pane{display:none}" +
-    // 窄屏单列布局折叠意义不大：隐藏把手并强制展开，避免出现难看的横条。
-    "@media(max-width:960px){.tree-toggle-btn{display:none}.tree-wrap.tree-collapsed .tree-pane{display:block}}";
+    // 窄屏（≤960px）下 .rtx-wrap 变成单列：左树从侧栏变成压在内容上方的横条。
+    //
+    // 这里原来是 `.tree-toggle-btn{display:none}` 外加 `.tree-collapsed .tree-pane{display:block}`
+    // ——即**隐藏把手并强制展开**，理由写的是「窄屏折叠意义不大」。这个判断反了：单列布局下
+    // 左树占掉视口顶部 220px，正是最该能收起来的时候，而唯一的收起控件恰好在此时消失，
+    // 表现就是「左侧无法收起」。1366×768 / 1280 宽的屏幕开 125%~150% 缩放，CSS 视口就是
+    // 910~1092px，一大批办公机和服务器控制台都落在这个区间里。
+    // 现在把手保留，只把它从「竖条」改成「横条」以适配单列方向。
+    // 方向也要跟着转：JS 写进按钮的字形是 ‹ / ›（左右），单列布局下该读成上下。
+    // 用伪元素按 aria-expanded 出字形，既不和 JS 的 textContent 打架，也不需要各视图改代码。
+    "@media(max-width:960px){.tree-toggle-btn{flex:0 0 24px;min-height:0;width:100%;" +
+      "border-left:none;border-right:none;font-size:0}" +
+      ".tree-toggle-btn::after{font-size:13px;line-height:1;content:\"\\2303\"}" +
+      ".tree-toggle-btn[aria-expanded=\"false\"]::after{content:\"\\2304\"}}";
   (document.head || document.documentElement).appendChild(st);
 
   document.addEventListener("click", function(e){
