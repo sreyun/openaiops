@@ -1156,6 +1156,7 @@ async function openHistoryDiagnostics(anchorEl) {
       [I18N.t("section.vm_last_read_err", "最近一次读取失败"), d.last_read_err ? `${at(d.last_read_err_at)} · ${d.last_read_err}` : "-"],
       [I18N.t("section.vm_breakers", "断路器（写/读）"), `${d.write_breaker || "-"} / ${d.read_breaker || "-"}`],
       [I18N.t("section.vm_probe", "现场探测 count(aiops_cpu_percent)"), d.probe_ok === false ? I18N.t("section.vm_probe_failed", "查询失败") : String(d.probe_series_count ?? "-")],
+      [I18N.t("section.vm_oldest", "时序库里最早的数据"), d.oldest_data_label || "-"],
     ];
     box.innerHTML = `<div style="font-weight:600;margin-bottom:6px">⚠ ${esc(String(d.verdict || ""))}</div>` +
       rows.slice(1).map(([k, v]) => `<div><span style="opacity:.75">${esc(k)}：</span>${esc(String(v))}</div>`).join("");

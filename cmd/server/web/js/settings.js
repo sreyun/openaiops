@@ -698,6 +698,9 @@ async function loadAgentAutoUpdateStatus() {
   }
   parts.push(`<span>上次周期扫描 <b>${st.last_scan_at ? esc(fmtDateTime(st.last_scan_at)) : "尚未扫描"}</b></span>`);
   if (meta) meta.innerHTML = parts.join("");
+  // 必须在「跳过列表为空」的提前 return 之前调用：没有跳过记录恰恰说明任务**已经入队**，
+  // 也就是最需要看任务结果的时候。
+  loadAgentAutoUpdateJobs();
   if (!skips) return;
   const list = Array.isArray(st.skips) ? st.skips : [];
   if (!list.length) {
@@ -712,6 +715,48 @@ async function loadAgentAutoUpdateStatus() {
   skips.innerHTML = `<div class="agent-auto-skips-title">最近未升级的主机与原因</div>
     <div style="overflow:auto;max-height:220px"><table class="agent-auto-skips-tbl"><thead><tr><th>主机</th><th>原因</th><th>时间</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
+// 最近的自动升级任务：把「后台跑了、失败了、没人看见」变成看得见。
+// 每台主机带 method（module / script / script-rescue）与 message —— 后者在 Windows
+// 换版失败时会捎回主机本地助手日志的尾巴（服务端 windowsUpdateEvidence 取回）。
+async function loadAgentAutoUpdateJobs() {
+  const box = $("agentAutoStatusJobs");
+  if (!box) return;
+  let jobs;
+  try {
+    jobs = await fetch(`${API}/agents/update/jobs?limit=5`, { credentials: "same-origin" }).then(r => r.json());
+  } catch (e) {
+    box.innerHTML = `<div class="hint" style="margin-top:8px">最近任务不可用（${esc(String(e.message || e))}）</div>`;
+    return;
+  }
+  const list = Array.isArray(jobs) ? jobs : [];
+  if (!list.length) {
+    box.innerHTML = `<div class="hint" style="margin-top:8px">最近没有升级任务（自动升级未触发，或所有主机已是目标版本）</div>`;
+    return;
+  }
+  const rows = [];
+  list.slice(0, 5).forEach(j => {
+    (j.hosts || []).forEach(h => {
+      const bad = h.status === "failed" || h.status === "pending_verify";
+      rows.push(`<tr class="${bad ? "agent-job-row-bad" : ""}">
+        <td class="mono">${esc(h.hostname || (h.host_id || "").slice(0, 8))}</td>
+        <td>${esc(h.status || "-")}</td>
+        <td>${esc(h.method || "-")}</td>
+        <td class="mono">${esc(h.from_version || "-")}→${esc(j.target_version || "-")}</td>
+        <td style="max-width:520px;word-break:break-all">${esc(String(h.message || "").slice(0, 400))}</td>
+        <td class="mono">${j.created_at ? esc(fmtDateTime(j.created_at)) : "-"}</td>
+      </tr>`);
+    });
+  });
+  if (!rows.length) {
+    box.innerHTML = `<div class="hint" style="margin-top:8px">最近任务里没有主机记录</div>`;
+    return;
+  }
+  box.innerHTML = `<div class="agent-auto-skips-title">最近的升级任务（每台主机的真实结果）</div>
+    <div style="overflow:auto;max-height:280px"><table class="agent-auto-skips-tbl">
+    <thead><tr><th>主机</th><th>状态</th><th>方式</th><th>版本</th><th>消息</th><th>时间</th></tr></thead>
+    <tbody>${rows.join("")}</tbody></table></div>`;
+}
+
 function normalizeInstallServerURL(u) {
   return String(u || "").trim().replace(/\/+$/, "").toLowerCase();
 }

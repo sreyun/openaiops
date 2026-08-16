@@ -1793,6 +1793,10 @@
             <div class="hint">服务端每 5 分钟扫描在线且版本落后的主机并自动入队；维护窗口外到达的上报会在下一轮扫描补上。指纹未绑定的老主机首次带指纹上报时自动绑定（TOFU）。</div>
             <div class="agent-auto-status-meta" id="agentAutoStatusMeta"></div>
             <div id="agentAutoStatusSkips"></div>
+            <!-- 最近的自动升级任务。服务端一直有这份记录，但两个控制台此前都没读过：
+                 「跳过原因」只列没入队的主机，而任务栏只在手动发起时出现，于是后台
+                 自动升级反复失败时，屏幕上没有任何痕迹。 -->
+            <div id="agentAutoStatusJobs"></div>
           </div>
         </div>
       </div>

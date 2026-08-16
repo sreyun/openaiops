@@ -124,12 +124,19 @@ func (s *Server) handleVMDiagnostics(w http.ResponseWriter, r *http.Request) {
 		series, ok := s.vm.vmInstantScalar(`count(aiops_cpu_percent)`)
 		out["probe_series_count"] = series
 		out["probe_ok"] = ok
-		if ok && series == 0 {
-			out["verdict"] = "VictoriaMetrics 可达，但里面没有任何主机 CPU 指标 —— 问题在写入侧或数据已被清空"
-		} else if !ok {
+		depth, depthLabel := s.vm.probeRetentionDepth()
+		out["oldest_data_age_sec"] = depth
+		out["oldest_data_label"] = depthLabel
+		switch {
+		case !ok:
 			out["verdict"] = "VictoriaMetrics 查询不可用 —— 看 last_read_err 与 read_breaker"
-		} else {
-			out["verdict"] = "VictoriaMetrics 有主机指标；若曲线仍缺，检查该主机/该时间窗"
+		case series == 0:
+			out["verdict"] = "VictoriaMetrics 可达，但里面没有任何主机 CPU 指标 —— 问题在写入侧或数据已被清空"
+		case depth <= 0:
+			out["verdict"] = "VictoriaMetrics 只有『刚刚』的数据：连 1 小时前都查不到。" +
+				"写入正常说明链路是通的，那么历史是**被清掉的**——检查 VM 数据目录是否在发版时随部署目录一起被删（compose 默认挂 ./vm-data）"
+		default:
+			out["verdict"] = "VictoriaMetrics 最早的数据在 " + depthLabel + " 之前；比这更早的窗口查不到属正常"
 		}
 	} else {
 		out["verdict"] = "未启用 VictoriaMetrics"
@@ -164,4 +171,40 @@ func historyReasonHint(reason string) string {
 		return "未启用 VictoriaMetrics"
 	}
 	return ""
+}
+
+// probeRetentionDepth answers the one question that separates「没写进去」from
+// 「写进去了但被删了」：**VictoriaMetrics 里最早的数据是什么时候**。
+//
+// 写入正常 + 读取正常 + 序列数不为零，却依然只看得到重启之后的曲线——这三者同时成立时，
+// 唯一自洽的解释就是库里真的只剩下重启之后的点。与其让人去猜，不如直接在几个时间刻度上
+// 各探一次：返回「最早还能查到数据的那个刻度」。
+//
+// 用 count() 在**过去某一时刻**求值（VM 的 /api/v1/query 支持 time=），而不是 range 查询：
+// 一次请求一个标量，最便宜，也不受 step / 抽样的影响。
+func (v *vmWriter) probeRetentionDepth() (int64, string) {
+	type mark struct {
+		sec   int64
+		label string
+	}
+	marks := []mark{
+		{30 * 86400, "30 天"},
+		{7 * 86400, "7 天"},
+		{86400, "24 小时"},
+		{6 * 3600, "6 小时"},
+		{3600, "1 小时"},
+	}
+	now := time.Now().Unix()
+	for _, m := range marks {
+		series, ok := v.vmQueryVectorAt(`count(aiops_cpu_percent)`, now-m.sec)
+		if !ok {
+			continue
+		}
+		for _, s := range series {
+			if s.Value > 0 {
+				return m.sec, m.label
+			}
+		}
+	}
+	return 0, "1 小时以内"
 }
