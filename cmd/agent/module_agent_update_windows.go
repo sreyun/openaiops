@@ -21,6 +21,14 @@ const (
 	createNewProcessGroup = 0x00000200
 )
 
+// windowsHelperAliveWindow is how long we wait for a launched helper to prove it
+// is running (it writes "helper start" as its very first statement). One shared
+// value for BOTH launchers: a cold powershell.exe on an older or AV-scanned host
+// routinely needs several seconds before it reaches the first line of a 13 KB
+// script, and the scheduled-task path — which pays the highest cold-start cost —
+// used to get only half the window the breakaway path got.
+const windowsHelperAliveWindow = 12 * time.Second
+
 // agentReplaceAndRestart cannot overwrite a running Windows PE. Stage stays as
 // .new; a detached helper (prefer SYSTEM scheduled task, else breakaway process)
 // stops the service/process, swaps files, and brings the agent back via
@@ -82,10 +90,22 @@ func agentReplaceAndRestart(exe, staging, cfgPath string) error {
 		_ = os.WriteFile(altResult, []byte("scheduled "+time.Now().Format(time.RFC3339)), 0o644)
 	}
 	// Task registration ≠ helper running. Verify, else fall through to breakaway.
-	if scheduled && waitWindowsUpdateHelperAlive(logPath, altResult, resultPath, 6*time.Second) {
-		return nil
-	}
+	//
+	// 这里必须给满 windowsHelperAliveWindow，而且**看到活迹象就绝不能删任务**。
+	// 原来的写法是「等 6 秒，没动静就 schtasks /Delete /F」，两处都错：
+	//   - 6 秒是本文件里唯一没跟上的窗口。下面 breakaway 那条路早就因为「老机器上光是
+	//     powershell.exe 冷启动就要好几秒」放宽到 12 秒，而计划任务这条恰恰是**冷启动
+	//     最慢**的一条（调度器另起进程、无父进程缓存、杀毒软件要扫一遍 13KB 脚本）。
+	//   - `/Delete /F` 会**连正在运行的实例一起终止**。于是慢一点的机器上，主路径刚把
+	//     PowerShell 拉起来就被自己删掉，只能退到更弱的 breakaway；而 breakaway 在
+	//     不允许脱离的 Job 里同样起不来，最后整台机器报「helper 没起来」。
+	// 现在：看到 marker 就直接成功返回（任务留着，助手自己会在 finally 里清理）；
+	// 只有一整个窗口内毫无动静——即确认它一行都没跑——才删任务，此时删除是安全的，
+	// 而且必须删，否则它晚点才触发会和 breakaway 起来的第二个助手抢同一次换版。
 	if scheduled {
+		if waitWindowsUpdateHelperAlive(logPath, altResult, resultPath, windowsHelperAliveWindow) {
+			return nil
+		}
 		_ = exec.Command(filepath.Join(windowsSystemRoot(), "System32", "schtasks.exe"),
 			"/Delete", "/TN", "AIOpsAgentSelfUpdate", "/F").Run()
 	}
@@ -105,10 +125,10 @@ func agentReplaceAndRestart(exe, staging, cfgPath string) error {
 	// legacy 脚本（shouldLegacyAgentUpdateFallback 认得 "start update helper" 这个前缀），
 	// 而那条路径的正文由服务端生成，正是为修这类 Agent 侧缺陷准备的。
 	//
-	// 12 秒而不是 4 秒：老机器上光是 powershell.exe 冷启动就要好几秒，窗口太短会把
-	// 正常运行的助手误判成没起来，白白多跑一次 legacy 脚本。助手一进正文就先写
-	// "helper start" 与 "running"，12 秒足够覆盖冷启动。
-	if !waitWindowsUpdateHelperAlive(logPath, altResult, resultPath, 12*time.Second) {
+	// windowsHelperAliveWindow 而不是 4 秒：老机器上光是 powershell.exe 冷启动就要好几秒，
+	// 窗口太短会把正常运行的助手误判成没起来，白白多跑一次 legacy 脚本。助手一进正文就先写
+	// "helper start" 与 "running"，这个窗口足够覆盖冷启动。
+	if !waitWindowsUpdateHelperAlive(logPath, altResult, resultPath, windowsHelperAliveWindow) {
 		detail := "scheduled task did not run and no helper process appeared"
 		if len(startErrs) > 0 {
 			detail += " (" + strings.Join(startErrs, "; ") + ")"

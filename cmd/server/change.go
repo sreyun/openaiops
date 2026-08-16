@@ -209,6 +209,36 @@ func (m *changeManager) List() []ChangeRecord {
 	return out
 }
 
+// ChangeListRow is the list projection of a ChangeRecord.
+//
+// The three free-text plans (execution / rollback / test) are what make a change
+// record big — they are runbooks, not labels — and no list column renders them.
+// Change records are append-only like tickets, so shipping every plan on every
+// list load only gets more expensive. Detail comes from GET /api/v1/changes/{id};
+// the has_* flags let a row show that a plan exists without carrying it.
+type ChangeListRow struct {
+	ChangeRecord
+	HasPlan         bool `json:"has_plan"`
+	HasRollbackPlan bool `json:"has_rollback_plan"`
+	HasTestPlan     bool `json:"has_test_plan"`
+}
+
+func changeListRows(list []ChangeRecord) []ChangeListRow {
+	out := make([]ChangeListRow, 0, len(list))
+	for _, c := range list {
+		row := ChangeListRow{
+			HasPlan:         strings.TrimSpace(c.Plan) != "",
+			HasRollbackPlan: strings.TrimSpace(c.RollbackPlan) != "",
+			HasTestPlan:     strings.TrimSpace(c.TestPlan) != "",
+		}
+		// c is a per-iteration copy; blanking here does not touch the manager.
+		c.Plan, c.RollbackPlan, c.TestPlan = "", "", ""
+		row.ChangeRecord = c
+		out = append(out, row)
+	}
+	return out
+}
+
 func (m *changeManager) Get(id int64) (ChangeRecord, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -395,9 +395,14 @@ func runShellCommandCtx(ctx context.Context, command string) ([]byte, int) {
 		// 命令，退出码取命令自身；chcp 的输出/报错全部丢弃，非 UTF-8 字节仍由上层 ensureUTF8 兜底。
 		// Use absolute cmd + PATH repair so LocalSystem playbooks find ipconfig 等.
 		chcp := filepath.Join(windowsSystemRoot(), "System32", "chcp.com")
-		cmd = exec.CommandContext(ctx, windowsCmdPath(), "/c",
-			fmt.Sprintf(`set "PATH=%s;%%PATH%%" & "%s" 65001 >nul 2>nul & %s`,
-				strings.Join(windowsEssentialPathDirs(windowsSystemRoot()), ";"), chcp, command))
+		cmdExe := windowsCmdPath()
+		line := fmt.Sprintf(`set "PATH=%s;%%PATH%%" & "%s" 65001 >nul 2>nul & %s`,
+			strings.Join(windowsEssentialPathDirs(windowsSystemRoot()), ";"), chcp, command)
+		cmd = exec.CommandContext(ctx, cmdExe, "/c", line)
+		// The line above is full of quotes, and Go would hand them to cmd.exe
+		// CRT-escaped as \" — which cmd does not understand, silently voiding the
+		// PATH repair and the chcp call. Pass the line verbatim instead.
+		useRawCmdLine(cmd, cmdExe, line)
 	} else {
 		cmd = exec.CommandContext(ctx, "/bin/sh", "-c", command)
 	}

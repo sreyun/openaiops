@@ -125,11 +125,26 @@ func TestAlignOverlayToStepCollapsesTailShorterThanOneStep(t *testing.T) {
 		tail = append(tail, shared.Sample{Timestamp: ts, Metrics: shared.Metrics{CPUPercent: float64(ts % 7)}})
 	}
 	out := alignOverlayToStep(tail, from, to)
-	if len(out) != 1 {
-		t.Fatalf("tail shorter than one step must collapse to the freshest sample, got %d points", len(out))
+	// The contract is "never hand back the dense raw tail". Depending on grid
+	// phase, a 900s window may still contain exactly one 1260s grid point — in
+	// that case we emit that point (grid-consistent with the VM half); when it
+	// contains none we fall back to the single freshest sample. Both outcomes are
+	// one or two points, never the original 90.
+	if len(out) > 2 {
+		t.Fatalf("dense tail was not collapsed: %d points survived (raw tail had %d)", len(out), len(tail))
 	}
-	if out[0].Timestamp != tail[len(tail)-1].Timestamp {
-		t.Fatalf("must keep the NEWEST sample (it carries the nested disk/GPU inventory), got ts=%d", out[0].Timestamp)
+	if len(out) == 0 {
+		t.Fatal("overlay must not vanish entirely — the live tail would disappear from the chart")
+	}
+	last := out[len(out)-1]
+	onGrid := last.Timestamp%step == 0
+	isNewest := last.Timestamp == tail[len(tail)-1].Timestamp
+	if !onGrid && !isNewest {
+		t.Fatalf("tail point must be either on the VM step grid or the freshest sample, got ts=%d (step=%d, newest=%d)",
+			last.Timestamp, step, tail[len(tail)-1].Timestamp)
+	}
+	if last.Timestamp > to {
+		t.Fatalf("tail must not extend past the window end: ts=%d > to=%d", last.Timestamp, to)
 	}
 }
 

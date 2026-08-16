@@ -138,7 +138,11 @@ func moduleAgentUpdate(args map[string]string, allowedBases []string) ([]byte, i
 		if lastDL == nil {
 			lastDL = fmt.Errorf("no candidate binary")
 		}
-		return []byte("agent_update: download failed: " + lastDL.Error()), 1
+		// Carry the previous round's helper evidence even when we die at the
+		// download: a host that fails here every time would otherwise never hand
+		// back the log explaining why the round BEFORE it failed, which is exactly
+		// the host an operator most needs to see.
+		return []byte("agent_update: download failed: " + lastDL.Error() + takeUpdateDiagnostics()), 1
 	}
 
 	// Backup current binary. On Windows the running PE is often locked for

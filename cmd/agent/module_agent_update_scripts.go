@@ -417,6 +417,17 @@ if ($ok) {
 // buildWindowsUpdateHelperScript returns the detached PowerShell helper that
 // stops the service, swaps the locked PE, restarts the agent and restores .bak
 // on failure.
+//
+// **正文必须是纯 ASCII**（TestWindowsAgentScriptsAreASCII 强制）。Agent 把它以
+// UTF-8、**不带 BOM** 写进 .ps1，而 Windows PowerShell 5.1 读无 BOM 的脚本用的是
+// 系统 ANSI 代码页——中文机器上是 GBK。UTF-8 的中文字节在 GBK 下是非法多字节序列，
+// 只能靠 MultiByteToWideChar 的替换字符兜底：这台机器上最关键的一段脚本，是否可解析
+// 取决于一个未定义行为。它还会把本该解释失败原因的诊断文字变成乱码，而这段脚本恰恰
+// 跑在 Agent 被杀之后的独立进程里，那份日志是唯一的证据。
+//
+// 服务端下发的那份助手（cmd/server/agent_update_script.go）早有同样的硬规则和测试，
+// Agent 侧这份——也就是每台主机实际走的主路径——此前两者都没有。
+// 中文说明一律留在 Go 注释里，与服务端保持一致。
 func buildWindowsUpdateHelperScript(exe, staging, cfgPath, logPath, resultPath, altResult string) string {
 	return fmt.Sprintf(`$ErrorActionPreference='Stop'
 $log = '%s'
@@ -433,15 +444,13 @@ function Write-Result($m){
 # Invoke-Native runs a native command WITHOUT merging its stderr into the success
 # stream. Windows PowerShell 5.1 turns native stderr captured via 2>&1 into
 # NativeCommandError records, and $ErrorActionPreference='Stop' promotes the
-# first one to a terminating error — that alone aborted every self-update before
+# first one to a terminating error - that alone aborted every self-update before
 # the binary swap, because the agent prints a config warning on startup. Judge
 # native commands by their exit code instead.
 #
-# 参数名绝不能叫 $Args：$Args 是 PowerShell 的自动变量，声明成参数后**每次调用都会
-# 被清空成空数组**（位置绑定、-Args 命名绑定一样中招），于是 "& $File @Args" 退化成不带
-# 任何参数地裸跑目标程序。这曾让全部 Windows Agent 的自动升级无一例外地失败：
-# Invoke-Native $new @('--version') 实际执行的是 "& $new"，把刚下载的 Agent 当守护进程
-# 前台拉起，Out-String 永远等不到管道结束，助手就吊死在换二进制之前。
+# The parameter must NOT be named $Args: that is a PowerShell automatic variable,
+# and declaring it as a parameter silently clears it on every call, so
+# "& $File @Args" degenerates into running the target with no arguments at all.
 function Invoke-Native {
   param([string]$File,[string[]]$Arguments)
   $prevEAP = $ErrorActionPreference
@@ -459,9 +468,10 @@ function Invoke-Native {
   }
   return [pscustomobject]@{ ExitCode = $code; Output = $out.Trim() }
 }
-# Invoke-VersionProbe 是「跑一个 Agent 二进制的 --version」的唯一入口，且带硬超时。
-# 这类探测的输入正是一个随时可能变成守护进程的程序，一旦它不退出，助手就永久卡死在
-# 换二进制之前 —— 主机静默停在旧版本，且没有任何错误可上报。宁可超时判失败。
+# Running an agent binary's --version needs a hard timeout: the probe target can
+# turn into a daemon at any moment, and an unbounded pipe read would hang the
+# helper forever right before the swap, leaving the host silently on the old
+# version with nothing to report.
 function Invoke-VersionProbe {
   param([string]$File,[int]$TimeoutSec = 20)
   $o = [IO.Path]::GetTempFileName()
@@ -572,11 +582,10 @@ function Restart-AgentService {
       Write-Log ("install-service exit=" + $code)
     }
   }
-  # 已注册的服务，它的 ImagePath 里本来就带着 "--service --config <绝对路径>"，所以
-  # **直接启动**永远是正确的恢复动作——包括「exe 旁边找不到配置」的安装（--config 可以
-  # 指向任意绝对路径）。这一步原先被锁在 $Cfg 判断里：换完二进制、停掉服务之后直接掉进
-  # user-mode 分支，而 user-mode 又以「没有配置」为由拒绝启动，主机就带着一个崭新的、
-  # 从未跑起来过的二进制永久离线。
+  # A registered service already carries '--service --config <abs>' in its
+  # ImagePath, so a plain start is the correct recovery -- including for installs
+  # whose config does not sit beside the exe. Gating this on $Cfg is how a host
+  # ended up with a freshly swapped binary and a service that never came back.
   foreach ($name in $svcs) {
     try {
       [void](Invoke-Native "$env:SystemRoot\System32\sc.exe" @('start',$name))
@@ -593,9 +602,10 @@ try {
   Write-Log ("helper start pid=$helperPid")
   Write-Result ("running " + (Get-Date -Format o))
   # Let the module HTTP response finish before we stop the agent service.
-  # 6 秒而不是 3 秒：模块返回后，Agent 还要把输出写进 exec 通道的管道、等这条 POST
-  # 真正送达服务端（runExecSession 的 <-posted）。3 秒在跨公网/高延迟链路上不够，
-  # Agent 被杀在响应途中，服务端只能判成 abnormal —— 一次本来会成功的升级被记成失败。
+  # 6s, not 3s: after the module returns, the agent still has to push the output
+  # through the exec channel and see that POST land on the server. 3s is not
+  # enough over a WAN, and an agent killed mid-response reads as abnormal --
+  # an update that was about to succeed gets recorded as a failure.
   Start-Sleep -Seconds 6
   $exe = '%s'
   $new = '%s'
@@ -628,7 +638,7 @@ try {
   }
   Stop-AgentProcesses
   Start-Sleep -Milliseconds 1000
-  # Second pass — service recovery may have respawned the old PE.
+  # Second pass -- service recovery may have respawned the old PE.
   Stop-AgentProcesses
   Start-Sleep -Milliseconds 500
   if (Test-Path -LiteralPath $exe) {
@@ -680,10 +690,11 @@ try {
     } else {
       Write-Log ("skip backup restore (swapped=$swapped exe_exists=$((Test-Path -LiteralPath $exe)))")
     }
-    # 只重启我们真正动过的东西。这里绝大多数失败发生在**碰服务之前**——暂存文件不见了、
-    # staging --version 跑不起来——此时 Agent 还好端端地在跑。无条件重启意味着每一次失败
-    # 的升级尝试都会把一个健康的服务停掉再 --install-service 装回去；一旦那一步失败（没有
-    # 管理员权限、SCM 被占），"下载失败"就升级成了"主机离线"。
+    # Only restart what we actually disturbed. Most failures here happen BEFORE
+    # the service is touched -- a missing staging file, a staging binary that will
+    # not run -- and the agent is still healthy. Restarting anyway would tear down
+    # a working service on every failed attempt, turning "download failed" into
+    # "host offline" the moment --install-service cannot put it back.
     if ($swapped -or -not (Test-AgentRunning)) {
       [void](Restart-AgentService -Exe $exe -Cfg $cfg -Dir $dir)
     } else {

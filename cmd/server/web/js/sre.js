@@ -2751,6 +2751,9 @@ safeAddEventListener("sloTrendBody","click",e=>{
 /* ---- 工单 ---- */
 let TK_KIND_FILTER="";
 let SR_CATALOG=[];
+// 工单是只增不减的业务流水，一年几千条。列表接口只回摘要（评论线程与附件由
+// /tickets/{id} 单独取），这里再做客户端分页，避免几千行一次性进 DOM。
+let TK_PAGE=1, TK_SIZE=20;
 async function loadTickets(){
   try {
     const q=TK_KIND_FILTER?`?kind=${encodeURIComponent(TK_KIND_FILTER)}`:"";
@@ -2762,13 +2765,33 @@ function renderTickets(list){
   const el=$("ticketList");
   if(!list.length){ el.innerHTML=`<div class="empty-line">${I18N.t("sre.no_tickets","暂无工单")}</div>`; return; }
   const kindLabel=k=>({incident:"事件",service_request:"服务请求",task:"任务"})[k]||k||"task";
-  el.innerHTML=list.map(t=>`<div class="sre-row" data-ticket="${t.id}">
+  const total=list.length;
+  TK_PAGE=tblClampPage(TK_PAGE,total,TK_SIZE);
+  const page=list.slice((TK_PAGE-1)*TK_SIZE, TK_PAGE*TK_SIZE);
+  el.innerHTML=page.map(t=>`<div class="sre-row" data-ticket="${t.id}">
     <span class="badge ${_prioCls(t.priority)}">${esc((t.priority||"p3").toUpperCase())}</span>
     <div class="sre-row-main"><div class="sre-row-title">${esc(t.title)}</div>
-      <div class="sre-row-sub">#${t.id} · ${esc(kindLabel(t.kind))}${t.catalog_item?" · "+esc(t.catalog_item):""}${t.assignee?" · @"+esc(t.assignee):""}${t.incident_id?" · 🔗"+I18N.t("sre.event","事件")+"#"+t.incident_id:""}${(t.links&&t.links.length)?" · 🔗×"+t.links.length:""} · ${fmtDateTime(t.updated_at)}</div></div>
-    <span class="badge ${_tkStatusCls(t.status)}">${esc(t.status)}</span></div>`).join("");
-  el.querySelectorAll("[data-ticket]").forEach(row=>row.onclick=()=>openTicketModal(SRE_TICKETS.find(x=>x.id==row.dataset.ticket)));
+      <div class="sre-row-sub">#${t.id} · ${esc(kindLabel(t.kind))}${t.catalog_item?" · "+esc(t.catalog_item):""}${t.assignee?" · @"+esc(t.assignee):""}${t.incident_id?" · 🔗"+I18N.t("sre.event","事件")+"#"+t.incident_id:""}${(t.links&&t.links.length)?" · 🔗×"+t.links.length:""}${t.comment_count?" · 💬"+t.comment_count:""} · ${fmtDateTime(t.updated_at)}</div></div>
+    <span class="badge ${_tkStatusCls(t.status)}">${esc(t.status)}</span></div>`).join("")
+    + (total>TK_SIZE ? tblPager(total,TK_PAGE,TK_SIZE) : "");
+  el.querySelectorAll("[data-ticket]").forEach(row=>row.onclick=()=>openTicketByID(row.dataset.ticket));
 }
+// 列表行只有摘要，详情（评论线程 + 附件）按需取——一次一条，而不是每次列表全量。
+async function openTicketByID(id){
+  try{
+    const tk=await fetch(`${API}/tickets/${id}`).then(r=>r.json());
+    if(!tk||tk.error) throw new Error((tk&&tk.error)||"not found");
+    openTicketModal(tk);
+  }catch(e){ toast(I18N.t("sre.load_failed","加载失败")+": "+e,"err"); }
+}
+safeAddEventListener("ticketList","click",e=>{
+  const pg=e.target.closest("[data-pg]"); if(!pg) return;
+  if(pg.dataset.pg==="prev") TK_PAGE--; else if(pg.dataset.pg==="next") TK_PAGE++;
+  renderTickets(SRE_TICKETS);
+});
+safeAddEventListener("ticketList","change",e=>{
+  if(e.target.dataset&&e.target.dataset.pg==="size"){ TK_SIZE=+e.target.value||20; TK_PAGE=1; renderTickets(SRE_TICKETS); }
+});
 function renderTkLinks(links){
   const el=$("tkLinksChips");
   if(!el) return;
@@ -2922,6 +2945,7 @@ document.querySelectorAll("#ticketKindFilter .chip-btn").forEach(b=>b.addEventLi
   document.querySelectorAll("#ticketKindFilter .chip-btn").forEach(x=>x.classList.remove("active"));
   b.classList.add("active");
   TK_KIND_FILTER=b.dataset.tkind||"";
+  TK_PAGE=1; // 换筛选后停在旧页码会看到空白页
   loadTickets();
 }));
 safeAddEventListener("tkAttachBtn","click",()=>{ const f=$("tkAttachFile"); if(f) f.click(); });
@@ -3042,6 +3066,8 @@ function openEscPolicyModal(pol){
 }
 
 /* ---- 变更窗 / 变更记录 ---- */
+// 变更记录同样只增不减，列表接口只回摘要（执行/回滚/测试方案由 /changes/{id} 取）。
+let CH_RECS=[], CH_PAGE=1, CH_SIZE=20;
 async function loadChanges(){
   try{
     const [wins, recs]=await Promise.all([
@@ -3079,13 +3105,31 @@ async function loadChanges(){
       }).join("");
     }
     wl.querySelectorAll("[data-ch]").forEach(b=>b.onclick=()=>changeAct(b.dataset.ch,b.dataset.id));
-    const rl=$("changeRecList");
-    if(!recs||!recs.length) rl.innerHTML=`<div class="empty-line">暂无变更记录</div>`;
-    else rl.innerHTML=recs.map(c=>`<div class="sre-row" data-ch="edit-rec" data-id="${c.id}"><div class="sre-row-main"><div class="sre-row-title">#${c.id} ${esc(c.title)}</div>
-      <div class="sre-row-sub">${esc(c.kind)} · <span class="badge">${esc(c.status)}</span> · ${esc(c.risk)} · ${fmtDateTime(c.started_at)}${(c.sql_change_ids||[]).length?" · SQL×"+(c.sql_change_ids||[]).length:""}${(c.host_ids||[]).length?" · "+esc((c.host_ids||[]).slice(0,3).join(",")):""}</div></div></div>`).join("");
-    rl.querySelectorAll("[data-ch]").forEach(b=>b.onclick=()=>changeAct(b.dataset.ch,b.dataset.id));
+    CH_RECS=recs||[];
+    renderChangeRecs();
   }catch(e){ toast("加载变更失败: "+e,"err"); }
 }
+function renderChangeRecs(){
+  const rl=$("changeRecList");
+  if(!rl) return;
+  const recs=CH_RECS;
+  if(!recs.length){ rl.innerHTML=`<div class="empty-line">暂无变更记录</div>`; return; }
+  const total=recs.length;
+  CH_PAGE=tblClampPage(CH_PAGE,total,CH_SIZE);
+  const page=recs.slice((CH_PAGE-1)*CH_SIZE, CH_PAGE*CH_SIZE);
+  rl.innerHTML=page.map(c=>`<div class="sre-row" data-ch="edit-rec" data-id="${c.id}"><div class="sre-row-main"><div class="sre-row-title">#${c.id} ${esc(c.title)}</div>
+    <div class="sre-row-sub">${esc(c.kind)} · <span class="badge">${esc(c.status)}</span> · ${esc(c.risk)} · ${fmtDateTime(c.started_at)}${c.has_rollback_plan?" · ↩︎":""}${(c.sql_change_ids||[]).length?" · SQL×"+(c.sql_change_ids||[]).length:""}${(c.host_ids||[]).length?" · "+esc((c.host_ids||[]).slice(0,3).join(",")):""}</div></div></div>`).join("")
+    + (total>CH_SIZE ? tblPager(total,CH_PAGE,CH_SIZE) : "");
+  rl.querySelectorAll("[data-ch]").forEach(b=>b.onclick=()=>changeAct(b.dataset.ch,b.dataset.id));
+}
+safeAddEventListener("changeRecList","click",e=>{
+  const pg=e.target.closest("[data-pg]"); if(!pg) return;
+  if(pg.dataset.pg==="prev") CH_PAGE--; else if(pg.dataset.pg==="next") CH_PAGE++;
+  renderChangeRecs();
+});
+safeAddEventListener("changeRecList","change",e=>{
+  if(e.target.dataset&&e.target.dataset.pg==="size"){ CH_SIZE=+e.target.value||20; CH_PAGE=1; renderChangeRecs(); }
+});
 async function changeAct(act,id){
   if(act==="del-win"){
     if(!confirm("删除变更窗？")) return;
@@ -3097,8 +3141,13 @@ async function changeAct(act,id){
     openChangeWinModal((list||[]).find(x=>x.id===id)||null); return;
   }
   if(act==="edit-rec"){
-    const list=await fetch(`${API}/changes`).then(r=>r.json());
-    openChangeRecModal((list||[]).find(x=>String(x.id)===String(id))||null); return;
+    // 列表行不含执行/回滚/测试方案，必须取详情——否则保存会把方案清空。
+    try{
+      const rec=await fetch(`${API}/changes/${encodeURIComponent(id)}`).then(r=>r.json());
+      if(!rec||rec.error) throw new Error((rec&&rec.error)||"not found");
+      openChangeRecModal(rec);
+    }catch(e){ toast("加载变更失败: "+e,"err"); }
+    return;
   }
 }
 function _dtLocal(ts){

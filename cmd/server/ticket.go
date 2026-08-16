@@ -321,6 +321,39 @@ func (m *ticketManager) List(kindFilter string) []Ticket {
 	return out
 }
 
+// TicketListRow is the list projection of a Ticket.
+//
+// A ticket inlines its whole comment thread, and every comment may carry up to
+// maxAttachmentsPerComment attachments of ~2MB base64 each — so returning full
+// tickets from the list endpoint makes one screen of work orders weigh tens or
+// hundreds of megabytes on an install that has been running a year. Work orders
+// are append-only business flow: nothing trims them, so the list can only get
+// heavier. The list never renders the thread; detail comes from
+// GET /api/v1/tickets/{id}.
+type TicketListRow struct {
+	Ticket
+	CommentCount    int `json:"comment_count"`
+	AttachmentCount int `json:"attachment_count"`
+}
+
+// ticketListRows drops the comment thread and attachments, keeping their counts
+// so a list row can still say "3 comments" without shipping them.
+func ticketListRows(list []Ticket) []TicketListRow {
+	out := make([]TicketListRow, 0, len(list))
+	for _, t := range list {
+		atts := len(t.Attachments)
+		for _, c := range t.Comments {
+			atts += len(c.Attachments)
+		}
+		row := TicketListRow{CommentCount: len(t.Comments), AttachmentCount: atts}
+		// t is a per-iteration copy; nil-ing here does not touch the manager.
+		t.Comments, t.Attachments = nil, nil
+		row.Ticket = t
+		out = append(out, row)
+	}
+	return out
+}
+
 // OpenCount returns tickets that are not resolved/closed (for nav badges).
 func (m *ticketManager) OpenCount() int {
 	m.mu.Lock()

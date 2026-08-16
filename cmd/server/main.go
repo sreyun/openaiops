@@ -6,6 +6,7 @@ import (
 	"flag"
 	"log"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -476,8 +477,13 @@ func main() {
 	}()
 
 	slog.Info(Tz("server.started"))
-	slog.Info(Tz("server.dashboard_url"), "url", "http://localhost"+*addr)
-	slog.Info(Tz("server.api_url"), "url", "http://localhost"+*addr+"/api/v1/")
+	// -addr 可以是 ":8529"（只有端口）也可以是 "127.0.0.1:8529"（含主机）。
+	// 直接拼 "http://localhost"+addr 在后一种写法下会印出
+	// http://localhost127.0.0.1:8529 这种点不开的地址——启动日志是新用户看到的
+	// 第一屏，一个拼错的链接很掉印象分。
+	base := "http://" + startupDisplayHost(*addr)
+	slog.Info(Tz("server.dashboard_url"), "url", base)
+	slog.Info(Tz("server.api_url"), "url", base+"/api/v1/")
 	slog.Info(Tz("server.config_file"), "path", *cfgPath)
 	slog.Info("存储后端", "relational", "PostgreSQL", "timeseries", "VictoriaMetrics", "note", "内置 aiops.db 已停用")
 	if hasAgentBinary(dist) {
@@ -509,4 +515,24 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
+}
+
+// startupDisplayHost turns a listen address into something clickable in the
+// startup banner. ":8529" → "localhost:8529"; "0.0.0.0:8529" → "localhost:8529"
+// (0.0.0.0 is not routable from a browser); anything else is already a host.
+func startupDisplayHost(addr string) string {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return "localhost"
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		// No port separator (e.g. "8529") — treat the whole thing as a port.
+		return "localhost:" + strings.TrimPrefix(addr, ":")
+	}
+	switch host {
+	case "", "0.0.0.0", "[::]", "::":
+		host = "localhost"
+	}
+	return net.JoinHostPort(host, port)
 }

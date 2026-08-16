@@ -991,7 +991,21 @@ func (s *Server) handleSLOTrend(w http.ResponseWriter, r *http.Request) {
 // ----------------------------------------------------------------------------
 
 func (s *Server) handleListTickets(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.tickets.List(r.URL.Query().Get("kind")))
+	rows := ticketListRows(s.tickets.List(r.URL.Query().Get("kind")))
+	limit, offset, paged := parsePageLimitOffset(r, 50, 500)
+	if !paged {
+		writeJSON(w, http.StatusOK, rows)
+		return
+	}
+	total := len(rows)
+	offset = normalizeListOffsetForTotal(offset, total)
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items": rows[offset:end], "total": total, "limit": limit, "offset": offset,
+	})
 }
 
 func (s *Server) handleServiceRequestCatalog(w http.ResponseWriter, r *http.Request) {

@@ -248,7 +248,21 @@ func (s *Server) handleDeleteChangeWindow(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleListChanges(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.changes.List())
+	rows := changeListRows(s.changes.List())
+	limit, offset, paged := parsePageLimitOffset(r, 50, 500)
+	if !paged {
+		writeJSON(w, http.StatusOK, rows)
+		return
+	}
+	total := len(rows)
+	offset = normalizeListOffsetForTotal(offset, total)
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items": rows[offset:end], "total": total, "limit": limit, "offset": offset,
+	})
 }
 func (s *Server) handleUpsertChange(w http.ResponseWriter, r *http.Request) {
 	var in ChangeRecord

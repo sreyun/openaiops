@@ -691,6 +691,55 @@ func (s *Server) markHostUpdateVerifyFailed(job *agentUpdateJob, hostID, target 
 	}
 }
 
+// windowsUpdateEvidenceCommand prints the tail of the update helper's own
+// log/result files, which is the ONLY record of what happened during the swap.
+//
+// 换版发生在 Agent 被杀之后的一个独立进程里，所以失败原因既不在服务端日志里，也不在
+// Agent 日志里，只落在主机本地的 ProgramData\aiops-agent-update\。没人会去几百台机器上
+// 逐台翻这个文件，于是「Windows 升不上去」长期只能靠猜——每一轮修复都是在没有证据的
+// 情况下押一个假设。这条命令把证据取回操作台。
+//
+// 必须走 -EncodedCommand：现网那批 Agent 把 exec 命令交给 cmd.exe 时会被 Go 的 CRT 式
+// `\"` 转义弄坏（见 cmd/agent 的 useRawCmdLine），任何带双引号的命令在**老 Agent 上**
+// 都会被改写。base64 正文里没有引号，因此是唯一在整个现网都能原样送达的形式。
+func windowsUpdateEvidenceCommand() string {
+	ps := `$ErrorActionPreference='SilentlyContinue'
+$p="$env:ProgramData\aiops-agent-update"
+foreach($f in @('aiops-agent-update.result','aiops-agent-update.log')){
+  $q=Join-Path $p $f
+  if(Test-Path -LiteralPath $q){ Write-Output ('--- '+$f); Get-Content -LiteralPath $q -Tail 25 }
+}`
+	return `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe ` +
+		`-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ` + psEncodedCommand(ps)
+}
+
+// windowsUpdateEvidence fetches that tail, best-effort. Returns "" when the host
+// is not Windows, is unreachable, or has nothing to say — never an error string,
+// because this only ever decorates a failure message that already exists.
+func (s *Server) windowsUpdateEvidence(h *Host) string {
+	if s == nil || h == nil {
+		return ""
+	}
+	if goos, _ := hostGOOSArch(h); goos != "windows" {
+		return ""
+	}
+	// A host that never came back after the swap cannot answer, and exec would
+	// sit on execPickupTimeout (90s) per host before admitting it. In a fleet-wide
+	// failure that is the difference between a slow verdict and a stuck one.
+	if cur := s.hostByID(h.ID); cur != nil && s.cfg != nil {
+		offlineSec := int64(s.cfg.Thresholds().OfflineAfter.Seconds())
+		if cur.LastSeen <= 0 || time.Now().Unix()-cur.LastSeen > offlineSec {
+			return " | host is offline after the swap; read " +
+				`ProgramData\aiops-agent-update\aiops-agent-update.log on it`
+		}
+	}
+	out, _, err := s.execCommandOnHost(h, windowsUpdateEvidenceCommand(), 60)
+	if err != nil || strings.TrimSpace(out) == "" {
+		return ""
+	}
+	return " | host evidence: " + truncateRun(out, 700)
+}
+
 // rescueWindowsAgentUpdate is the escape hatch for a Windows fleet that cannot
 // upgrade itself.
 //
@@ -763,10 +812,11 @@ func (s *Server) rescueWindowsAgentUpdate(job *agentUpdateJob, hostID, target st
 		"host", hostID, "hostname", h.Hostname, "from", h.AgentVersion, "target", target)
 	out, _, err := s.runLegacyAgentUpdateScriptKind(h, base, true)
 	if err != nil {
+		evidence := s.windowsUpdateEvidence(h)
 		s.agentUpdates.mu.Lock()
 		if hr.Status == "pending_verify" {
 			hr.Status = "failed"
-			hr.Message = truncateRun("legacy rescue failed: "+err.Error()+": "+out, 500)
+			hr.Message = truncateRun("legacy rescue failed: "+err.Error()+": "+out+evidence, 1200)
 			hr.Updated = time.Now().Unix()
 		}
 		s.agentUpdates.mu.Unlock()
@@ -788,11 +838,15 @@ func (s *Server) rescueWindowsAgentUpdate(job *agentUpdateJob, hostID, target st
 			return true
 		}
 	}
+	// Pull the helper's own log back before writing the verdict: this is the last
+	// moment the host is known to be reachable, and that file is the only place
+	// the real cause was ever written.
+	evidence := s.windowsUpdateEvidence(h)
 	s.agentUpdates.mu.Lock()
 	if hr.Status == "pending_verify" {
 		hr.Status = "failed"
 		hr.Message = truncateRun("both the agent helper and the legacy rescue failed to reach "+target+
-			" — inspect ProgramData\\aiops-agent-update\\aiops-agent-update.log on the host", 500)
+			evidence, 1200)
 		hr.Updated = time.Now().Unix()
 	}
 	s.agentUpdates.mu.Unlock()
@@ -935,12 +989,66 @@ func shouldLegacyAgentUpdateFallback(out string, err error) bool {
 		}
 	}
 	if strings.Contains(out, "agent_update:") {
-		return false
+		return moduleFailureIsRescuable(low)
 	}
 	return strings.Contains(low, "not found") ||
 		strings.Contains(low, "不是内部或外部命令") ||
 		strings.Contains(low, "command not found") ||
 		strings.Contains(low, "__aiops_module__")
+}
+
+// moduleFailureIsRescuable decides whether an explicit "agent_update: …" failure
+// is worth retrying through the server-generated legacy script.
+//
+// 这是「Windows 修了很多次还是升不上去」的结构性原因所在。
+//
+// 整套设计的逃生口是：Agent 侧的助手脚本由 Agent 自己的代码生成，一旦某个已发布版本
+// 的助手有缺陷，现网那批 Agent 会一遍遍生成同一段坏脚本，新版本的修复永远送不进去
+// ——所以另备了一条**正文由服务端生成**的 legacy 脚本，服务端一升级就能单方面救回所有
+// 老 Agent（见 rescueWindowsAgentUpdate）。
+//
+// 但这条逃生口此前只对两类情况开：模块不认识（"未知模块"）和助手拉不起来。凡是模块
+// **自己**报出来的失败——输出里带 "agent_update:" 前缀——一律 `return false` 直接判死。
+// 而现网最常见的失败恰恰在这一类里：下载被代理/防火墙掐断、老 Windows 根证书库连不上
+// 面板的证书链、暂存目录被 EDR 拦、os.Executable() 在非常规安装下解析不到。
+// 这些**每一条 legacy 脚本都有更强的处理**：它用服务端算好的 SHA-256 做 pin，因而允许
+// 在证书链断裂时降级重试；它从服务 ImagePath 解析安装路径而不是靠进程自省。
+// 于是出现了最糟的组合——主路径失败，唯一能修好它的兜底路径被判定为「不必再试」。
+//
+// 按失败的**性质**分流，而不是按是谁报的错：
+//   - 传输类（下载、解析、寻址）→ 换一条实现完全不同的路重试，有意义。
+//   - 完整性/兼容性类（校验和不符、二进制在本机跑不起来、平台不支持）→ legacy 脚本会
+//     去下同一个产物、得到同一个结果，重试只是把一次失败变成两次。
+//   - 并发类（本机已有一次升级在跑）→ 更不能再叠一次，两个助手抢同一次换版比不升级更糟。
+func moduleFailureIsRescuable(low string) bool {
+	for _, stop := range []string{
+		"sha-256 mismatch", "sha256 mismatch", // integrity: same artifact, same verdict
+		"not runnable",         // the staged binary does not start on this host
+		"unsupported platform", // no artifact exists for it at all
+		"already running",      // a swap is in flight; never launch a second one
+	} {
+		if strings.Contains(low, stop) {
+			return false
+		}
+	}
+	for _, retry := range []string{
+		"download failed",       // proxy / firewall / TLS chain / HTTP status
+		"missing server url",    // agent could not resolve a base; the script carries one
+		"resolve executable",    // script finds the install via the service ImagePath
+		"not allowed",           // agent rejected the base we passed (validateUpdateServerURL)
+		"disallowed",            //
+		"certificate",           // old root stores cannot chain to the panel cert
+		"x509",                  //
+		"tls",                   //
+		"timeout", "timed out",  //
+		"connection", "refused", //
+		"no such host", "dial ", //
+	} {
+		if strings.Contains(low, retry) {
+			return true
+		}
+	}
+	return false
 }
 
 func bool01(v bool) string {

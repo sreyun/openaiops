@@ -4,9 +4,35 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"unicode"
 )
+
+// parsePageLimitOffset reads ?limit=/?offset= for list endpoints that must keep
+// answering older callers in the legacy shape: paged is false when neither
+// parameter is present, and the caller then writes the bare array it always did.
+// Same contract as parseListLimitOffset (containers), minus that endpoint's
+// filter-specific triggers.
+func parsePageLimitOffset(r *http.Request, def, max int) (limit, offset int, paged bool) {
+	q := r.URL.Query()
+	rawLimit, rawOffset := q.Get("limit"), q.Get("offset")
+	if rawLimit == "" && rawOffset == "" {
+		return 0, 0, false
+	}
+	limit, _ = strconv.Atoi(rawLimit)
+	offset, _ = strconv.Atoi(rawOffset)
+	if limit <= 0 {
+		limit = def
+	}
+	if limit > max {
+		limit = max
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return limit, offset, true
+}
 
 // normalizeIPv6Loopback maps the IPv6 loopback "::1" to its IPv4 equivalent so
 // audit logs show a consistent "127.0.0.1" regardless of whether the local
