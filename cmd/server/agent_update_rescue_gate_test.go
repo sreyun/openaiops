@@ -61,11 +61,22 @@ func TestWindowsUpdateEvidenceCommandIsQuoteFree(t *testing.T) {
 	if !strings.Contains(cmd, "-EncodedCommand ") {
 		t.Fatal("evidence command must be sent as -EncodedCommand")
 	}
-	if len(cmd) > 2000 {
-		t.Fatalf("evidence command is %d chars; keep it far below the cmd.exe limit", len(cmd))
+	// 上限从 2000 放宽到 3000：取证脚本现在还要列目录、读 TEMP 兜底目录、查两个计划任务的
+	// 上次运行结果——「文件不在」和「任务被电池策略拒绝运行」都只能这样看出来。真正的硬限
+	// 是 cmd.exe 的 8191 减去 Agent 的 PATH/chcp 前缀（约 260），3000 仍留着 2.5 倍余量；
+	// 这条断言防的是"有人把整段脚本内联进来"，不是省那几百字节。
+	if len(cmd) > 3000 {
+		t.Fatalf("evidence command is %d chars; keep it far below the cmd.exe limit (8191)", len(cmd))
 	}
 	// It has to actually read the helper's own files, or it proves nothing.
 	body := decodeLegacyWindowsPS(t, cmd)
+	// 「这个日志文件我没看到」是现网问的第一个问题，所以取证必须能区分"文件不在"、
+	// "目录不在"和"助手根本没被调度器放行"——只 tail 文件回答不了其中任何一个。
+	for _, want := range []string{"MISSING", "Get-ChildItem", "schtasks.exe", "TEMP"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("evidence script cannot tell 'file missing' from 'never ran' (缺 %s):\n%s", want, body)
+		}
+	}
 	for _, want := range []string{"aiops-agent-update.log", "aiops-agent-update.result", "ProgramData"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("evidence script does not read %s:\n%s", want, body)

@@ -221,6 +221,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/agents/update", s.handleAgentUpdateStart)
 	mux.HandleFunc("GET /api/v1/agents/update/jobs", s.handleAgentUpdateJobs)
 	mux.HandleFunc("GET /api/v1/agents/update/jobs/{id}", s.handleAgentUpdateJob)
+	// 取证：在目标主机上跑一条只读命令，把升级助手的 result/log/计划任务结果取回来。
+	mux.HandleFunc("POST /api/v1/agents/update/evidence", s.handleAgentUpdateEvidence)
 	mux.HandleFunc("GET /api/v1/agents/auto-update-policy", s.handleAgentAutoUpdatePolicyGet)
 	mux.HandleFunc("POST /api/v1/agents/auto-update-policy", s.handleAgentAutoUpdatePolicySet)
 	mux.HandleFunc("GET /api/v1/agents/auto-update-status", s.handleAgentAutoUpdateStatusGet)

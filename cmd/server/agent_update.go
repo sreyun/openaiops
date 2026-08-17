@@ -802,12 +802,25 @@ func (s *Server) markHostUpdateVerifyFailed(job *agentUpdateJob, hostID, target 
 // `\"` 转义弄坏（见 cmd/agent 的 useRawCmdLine），任何带双引号的命令在**老 Agent 上**
 // 都会被改写。base64 正文里没有引号，因此是唯一在整个现网都能原样送达的形式。
 func windowsUpdateEvidenceCommand() string {
+	// 现网问的第一个问题就是「这个日志文件我没看到」。所以取证不能只在文件存在时才输出：
+	// **目录里有什么、以及目录本身在不在**，本身就是最有分量的那条证据——
+	//   - 目录不存在 → 助手从未落地（引导脚本没跑到写文件那一步）；
+	//   - 只有 .result 没有 .log → 助手起来了但写日志被挡（EDR / 权限），继续看 result 的 stage=；
+	//   - 两个都在但时间戳是上一轮的 → 这一轮压根没启动。
+	// 另外查一次计划任务：via=task 时它的"上次结果"能直接给出助手为什么没跑——
+	// 0x41325 就是"被电池策略拒绝运行"这类调度器自己的判定，主机上任何日志都不会有。
+	// ProgramData 之外还要看 TEMP：`md $W` 失败时引导脚本会整体退到那里。
 	ps := `$ErrorActionPreference='SilentlyContinue'
-$p="$env:ProgramData\aiops-agent-update"
-foreach($f in @('aiops-agent-update.result','aiops-agent-update.log')){
-  $q=Join-Path $p $f
-  if(Test-Path -LiteralPath $q){ Write-Output ('--- '+$f); Get-Content -LiteralPath $q -Tail 25 }
-}`
+foreach($d in @("$env:ProgramData\aiops-agent-update","$env:TEMP\aiops-agent-update")){
+if(-not(Test-Path -LiteralPath $d)){Write-Output "--- $d MISSING";continue}
+Write-Output "--- $d"
+Get-ChildItem -LiteralPath $d -Force|ForEach-Object{Write-Output ("  "+$_.Name+" "+$_.Length+"B "+$_.LastWriteTime)}
+foreach($f in @('aiops-agent-update.result','aiops-agent-update.log')){$q=Join-Path $d $f
+if(Test-Path -LiteralPath $q){Write-Output "--- $f";Get-Content -LiteralPath $q -Tail 25}}}
+foreach($t in @('AIOpsAgentLegacyUpdate','AIOpsAgentSelfUpdate')){
+$r=& "$env:SystemRoot\System32\schtasks.exe" /Query /TN $t /V /FO LIST 2>$null
+if($r){Write-Output "--- task $t"
+$r|Where-Object{$_ -match 'Result|Run Time|Status|结果|运行|状态'}|ForEach-Object{Write-Output ("  "+$_.Trim())}}}`
 	return `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe ` +
 		`-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ` + psEncodedCommand(ps)
 }
@@ -852,6 +865,54 @@ func helperEvidenceSummary(out string, err error) string {
 			" the helper never started — the spawn path was blocked, not the swap"
 	}
 	return " | host evidence: " + truncateRun(sanitizePowerShellOutput(out), 700)
+}
+
+// handleAgentUpdateEvidence pulls the update helper's own files from a host on
+// demand, so nobody has to log into the machine to answer "日志文件我没看到".
+//
+// 换版发生在 Agent 被杀之后的一个独立进程里，证据只落在主机本地。服务端一直有取这份
+// 证据的能力（windowsUpdateEvidence），但只在写失败判决时才用——于是主机还挂在
+// pending_verify 的那十几分钟里，唯一能回答"到底怎么了"的东西谁也拿不到，只能远程桌面
+// 上去翻。这个接口把同一条命令变成一次点击。
+//
+// POST 而不是 GET：它要在目标主机上真的执行一条命令（只读，但仍是执行），按 routeAllowed
+// 的规则落在 operator+，与"查看"区分开。
+func (s *Server) handleAgentUpdateEvidence(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		HostID string `json:"host_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "common.invalid_json")})
+		return
+	}
+	h := s.hostByID(strings.TrimSpace(req.HostID))
+	if h == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "host not found"})
+		return
+	}
+	if goos, _ := hostGOOSArch(h); goos != "windows" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "升级助手取证目前只适用于 Windows 主机（Linux/macOS 的换版由 shell 脚本内联完成，结果直接回在任务消息里）",
+		})
+		return
+	}
+	out, _, err := s.execCommandOnHost(h, windowsUpdateEvidenceCommand(), 90)
+	resp := map[string]any{
+		"host_id":  h.ID,
+		"hostname": h.Hostname,
+		"output":   sanitizePowerShellOutput(out),
+		"summary":  strings.TrimPrefix(helperEvidenceSummary(out, err), " | "),
+	}
+	if err != nil {
+		resp["error"] = err.Error()
+	}
+	if s.store != nil {
+		s.store.AddLog(LogEntry{
+			Kind: KindOperation, Level: "info", Actor: s.actorName(r), Host: h.ID,
+			Message: "读取 Agent 升级助手现场证据（ProgramData\\aiops-agent-update）",
+		})
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // rescueWindowsAgentUpdate is the escape hatch for a Windows fleet that cannot
@@ -978,6 +1039,26 @@ func (s *Server) rescueWindowsAgentUpdate(job *agentUpdateJob, hostID, target st
 	return true
 }
 
+// pendingVerifyNextStep spells out the deadline and the automatic next move for
+// a row that is about to sit in pending_verify.
+//
+// 这几分钟里，行上原本只有 Agent 回的那句 "restart scheduled"——它描述的是**过去**
+// （命令下发了），而读表的人要的是**未来**（还要等多久、等不到会怎样）。两者的差别就是
+// "系统正在按计划推进"和"这台是不是又卡死了"的差别，而后者会让人去做多余的手工干预。
+func pendingVerifyNextStep(goos, method string, job *agentUpdateJob) string {
+	mins := int(agentUpdateVerifyWindow / time.Minute)
+	base := fmt.Sprintf(" · 校验中：等它上报新版本，最多 %d 分钟", mins)
+	if goos != "windows" || job == nil || job.Rollback {
+		return base + "；超时后本行会转为 failed 并附上主机上的现场证据"
+	}
+	if method == "module" {
+		// 只有 module 路径能被救援（走过 script 的说明问题不在 Agent 侧助手上）。
+		return base + fmt.Sprintf("；超时后自动改用服务端下发的 legacy 脚本再救一次（method 会变成 script-rescue），"+
+			"再等 %d 分钟仍不动才判失败，并带回助手日志", mins)
+	}
+	return base + "；超时后本行会转为 failed，并带回主机上的助手日志"
+}
+
 func (s *Server) executeAgentUpdateHost(job *agentUpdateJob, hr *agentUpdateHostResult) {
 	// 这一段最长可以跑 3×600s，远超软重试窗口——不按住 in-flight，同一台主机会被
 	// 第二次入队，两次升级并发抢同一次换版。见 holdHostInFlight。
@@ -1071,7 +1152,12 @@ func (s *Server) executeAgentUpdateHost(job *agentUpdateJob, hr *agentUpdateHost
 				needsVerify = true
 			}
 			if needsVerify {
-				s.agentUpdates.setHostResult(hr, "pending_verify", method, msg)
+				// pending_verify 这一行在操作台上一停就是好几分钟，而它自己什么都不说：
+				// 看不出还要等多久，也看不出等完之后系统会不会自己再做点什么。于是读表的人
+				// 只能反复刷新去猜"是不是卡死了"——而下一步其实是确定的、写死在代码里的。
+				// 把它写进消息里：等待是有期限的，期限到了系统会自己换一条路再试一次。
+				s.agentUpdates.setHostResult(hr, "pending_verify", method,
+					truncateRun(msg+pendingVerifyNextStep(goos, method, job), 900))
 			} else {
 				s.agentUpdates.setHostResult(hr, "success", method, msg)
 			}

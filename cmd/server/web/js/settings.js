@@ -746,6 +746,10 @@ async function loadAgentAutoUpdateJobs() {
   list.forEach(j => {
     (j.hosts || []).forEach(h => {
       const bad = h.status === "failed" || h.status === "pending_verify";
+      // Windows 的换版发生在 Agent 被杀之后的独立进程里，证据只落在主机本地。给每一行一个
+      // 取证按钮，省掉"远程桌面上去翻 ProgramData"这一步——那一步在 pending_verify 的十几
+      // 分钟里恰恰是唯一能回答"到底怎么了"的动作。
+      const winRow = String(h.os || "").toLowerCase().indexOf("win") >= 0;
       // 每台主机的状态是各自演进的：一个 job 里，A 主机 30 秒就成功，B 主机 20 分钟后
       // 才判定失败。整列都印 job 的创建时间，会让「20 分钟前判的失败」看起来比「刚刚
       // 进入 pending 的另一台」还新，读表的人据此判断先后就是错的。
@@ -757,6 +761,7 @@ async function loadAgentAutoUpdateJobs() {
         <td class="mono">${esc(h.from_version || "-")}→${esc(j.target_version || "-")}</td>
         <td style="max-width:520px;word-break:break-all;white-space:pre-wrap">${esc(String(h.message || ""))}</td>
         <td class="mono">${ts ? esc(fmtDateTime(ts)) : "-"}</td>
+        <td>${winRow && h.host_id ? `<button type="button" class="chip-btn" data-agent-evidence="${esc(h.host_id)}" data-agent-evidence-name="${esc(h.hostname || "")}">现场取证</button>` : ""}</td>
       </tr>`);
     });
   });
@@ -769,9 +774,49 @@ async function loadAgentAutoUpdateJobs() {
     ? `<div class="hint">另有 ${rows.length - shown.length} 条更早的记录未显示</div>` : "";
   box.innerHTML = `<div class="agent-auto-skips-title">最近的升级任务（每台主机的真实结果）</div>
     <div style="overflow:auto;max-height:280px"><table class="agent-auto-skips-tbl">
-    <thead><tr><th>主机</th><th>状态</th><th>方式</th><th>版本</th><th>消息</th><th>时间</th></tr></thead>
+    <thead><tr><th>主机</th><th>状态</th><th>方式</th><th>版本</th><th>消息</th><th>时间</th><th></th></tr></thead>
     <tbody>${shown.join("")}</tbody></table></div>${more}`;
 }
+
+// 取证按钮：CSP 是 script-src 'self' 且无 unsafe-inline，所以只能走事件委托。
+document.addEventListener("click", async (e) => {
+  const btn = e.target && e.target.closest ? e.target.closest("[data-agent-evidence]") : null;
+  if (!btn) return;
+  e.preventDefault();
+  const hostId = btn.getAttribute("data-agent-evidence");
+  const name = btn.getAttribute("data-agent-evidence-name") || hostId;
+  const box = document.getElementById("agentAutoStatusJobs");
+  if (!hostId || !box) return;
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = "取证中…";
+  try {
+    const r = await fetch(`${API}/agents/update/evidence`, {
+      method: "POST", credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ host_id: hostId })
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || ("HTTP " + r.status));
+    let panel = document.getElementById("agentEvidencePanel");
+    if (!panel) {
+      panel = document.createElement("div");
+      panel.id = "agentEvidencePanel";
+      box.appendChild(panel);
+    }
+    // 空输出本身就是结论：目录/文件不在 = 助手根本没被拉起来，跟"起来了但换版失败"是两回事。
+    const body = String(d.output || "").trim() || String(d.summary || "").trim() || "（主机没有任何输出）";
+    panel.innerHTML = `<div class="agent-auto-skips-title" style="margin-top:10px">${esc(name)} · 升级助手现场证据</div>` +
+      (d.error ? `<div class="hint">取证命令返回错误：${esc(String(d.error))}</div>` : "") +
+      `<pre class="mono" style="white-space:pre-wrap;word-break:break-all;max-height:320px;overflow:auto;margin:6px 0 0">${esc(body)}</pre>`;
+    panel.scrollIntoView({ block: "nearest" });
+  } catch (err) {
+    toast("取证失败：" + (err.message || err), "err");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = old;
+  }
+});
 
 function normalizeInstallServerURL(u) {
   return String(u || "").trim().replace(/\/+$/, "").toLowerCase();
