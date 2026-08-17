@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"os"
 	"strconv"
@@ -156,14 +157,29 @@ func (v *vmWriter) doVMWithBreaker(req *http.Request, b *vmCircuitBreaker) (*htt
 	if !b.allow() {
 		return nil, errVMCircuitOpen
 	}
+	// cancel 必须跟随 **Body 的生命周期**，不能跟随本函数的返回。
+	//
+	// 这里原本是 `defer cancel()`：函数一返回就取消 context，而响应体是**调用方**在之后
+	// 才读的（http.Client.Do 只等到响应头，正文是流式的）。于是——
+	//   * 小响应侥幸成功：正文已经落在传输层缓冲里，一次读完，来不及受影响；
+	//   * 大响应必然失败：主机曲线那条 query_range 要拉约 50 个指标的整段 matrix，
+	//     读到一半 context 已被取消，报 "read body: context canceled"。
+	// 而写入路径只看状态码、正文读失败被忽略，所以写入看起来一切正常。
+	//
+	// 表现出来就是：VictoriaMetrics 健康、写入成功、count() 查得到，唯独主机曲线永远
+	// 拿不到数据 → 静默退回内存环。内存环的 5 分钟层有 30 天，进程活着时完全看不出来，
+	// 直到一次重启才暴露成「曲线只剩重启之后的数据」。
 	ctx, cancel := context.WithTimeout(req.Context(), vmQueryTimeout())
-	defer cancel()
 	req = req.WithContext(ctx)
 	resp, err := v.httpc.Do(req)
 	if err != nil {
+		cancel()
 		b.failure()
 		return nil, err
 	}
+	// 所有调用方都会 defer resp.Body.Close()，因此把 cancel 挂在 Close 上既能保证
+	// context 一定被释放（不泄漏），又不会在正文读完之前把它掐断。
+	resp.Body = &cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancel}
 	if resp.StatusCode >= 500 {
 		b.failure()
 		return resp, nil
@@ -177,3 +193,17 @@ type vmCircuitOpenError struct{}
 func (vmCircuitOpenError) Error() string { return "victoria metrics circuit open" }
 
 var errVMCircuitOpen = vmCircuitOpenError{}
+
+// cancelOnCloseBody releases the request context when the body is closed rather
+// than when the helper returns. 见 doVMWithBreaker 里的说明。
+type cancelOnCloseBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+	once   sync.Once
+}
+
+func (c *cancelOnCloseBody) Close() error {
+	err := c.ReadCloser.Close()
+	c.once.Do(c.cancel)
+	return err
+}

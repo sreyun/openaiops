@@ -253,9 +253,13 @@ func newMCPHTTPClient(c MCPClientConfig) *mcpHTTPClient {
 	}
 	return &mcpHTTPClient{
 		cfg: c,
-		httpClient: &http.Client{
-			Timeout: to + 5*time.Second,
-		},
+		// 必须用 guarded 客户端：这条出站的目标 URL 由用户在「AI 设置 → MCP 客户端」里
+		// 填写，而 /ai/mcp-clients/test 会把响应回显给调用方——裸客户端在这里就是一个
+		// SSRF 读取原语，可以探内网、可以读云元数据（169.254.169.254）。
+		// docs/ci-gate.md 的硬性规定：「AI / Embed / Models / WeKnora 一律走
+		// newGuardedHTTPClient」。同仓的飞书/钉钉 webhook（同样用户可配）一直是走
+		// guarded 的，唯独这条漏了。
+		httpClient: newGuardedHTTPClient(to + 5*time.Second),
 	}
 }
 
