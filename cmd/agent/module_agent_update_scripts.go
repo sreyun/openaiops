@@ -680,8 +680,13 @@ try {
   Write-Log ("update failed: " + $_.Exception.Message)
   Write-Result ("fail " + $_.Exception.Message)
   try {
-    $exe = '%s'
-    $cfg = '%s'
+    # try/catch share one scope, so $exe/$cfg are normally already set here. Only
+    # fill them in when a very early throw left them empty -- re-assigning $cfg
+    # unconditionally would DISCARD the config the try block discovered beside the
+    # exe, and Restart-AgentUserMode refuses to start an agent without one. That is
+    # a host left down by its own rollback path.
+    if (-not $exe) { $exe = '%s' }
+    if (-not $cfg) { $cfg = '%s' }
     $dir = Split-Path -Parent $exe
     $bak = $exe + '.bak'
     if ((Test-Path -LiteralPath $bak) -and ($swapped -or -not (Test-Path -LiteralPath $exe))) {
@@ -716,6 +721,28 @@ try {
 `, psSingleQuote(logPath), psSingleQuote(resultPath), psSingleQuote(altResult),
 		psSingleQuote(exe), psSingleQuote(staging), psSingleQuote(cfgPath),
 		psSingleQuote(exe), psSingleQuote(cfgPath))
+}
+
+// utf8BOM is what Windows PowerShell 5.1 puts in front of every file it writes
+// with -Encoding UTF8 (that encoding means "UTF-8 **with** BOM" there; the
+// BOM-less default only arrives in PowerShell Core 6+).
+const utf8BOM = "\uFEFF"
+
+// helperProgressMarker reports whether a helper log/result file already proves
+// the helper is running. These are the first things the helper writes.
+//
+// 必须先剥掉 BOM。助手正是用 `Set-Content -Encoding UTF8` 写 result 文件的，带着 BOM
+// 做 HasPrefix，"running" / "ok " / "fail " 这三个标记在**任何一台真实 Windows 主机上
+// 都永远匹配不到**：整套「助手起来了没有」的判定于是退化成只剩日志里的 "helper start"
+// 一条（那条用的是 Contains，BOM 伤不到它）。日志文件一旦写不进去——计划任务退到受限
+// 用户主体、EDR 锁住 ProgramData——就再没有任何东西能证明助手已经在跑，一次本来正常的
+// 升级会被判成「助手没起来」，白白多走一遍 legacy 脚本。
+//
+// 放在这个无 build tag 的文件里，是为了让 Linux CI 也能对它做断言（理由见文件头注释）。
+func helperProgressMarker(body string) bool {
+	body = strings.TrimSpace(strings.TrimPrefix(body, utf8BOM))
+	return strings.Contains(body, "helper start") || strings.HasPrefix(body, "running") ||
+		strings.HasPrefix(body, "ok ") || strings.HasPrefix(body, "fail ")
 }
 
 // ---- quoting helpers (shared by the builders above) ----

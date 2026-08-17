@@ -2145,7 +2145,7 @@ window.DICT_TW = {
   "agent_update.target_uncomparable": "當前服務端版本不可比較（需正式版本號）",
   "agent_update.no_outdated": "沒有檢測到落後的線上主機",
   "agent_update.done_with_fails": "Agent 更新結束：有 {0} 臺失敗",
-  "agent_update.poll_timeout": "更新任務輪詢超時，請稍後手動重新整理",
+  "agent_update.poll_timeout": "前端已停止輪詢；伺服器仍在校驗該任務，稍後重新整理或查看任務詳情即可",
   "agent_update.job_lost": "更新任務不存在或已過期",
   "settings.title": "告警設定",
   "settings.enable_push": "啟用告警推送",

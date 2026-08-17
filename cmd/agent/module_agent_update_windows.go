@@ -160,13 +160,6 @@ func windowsUpdateWorkDir() string {
 	return filepath.Join(os.TempDir(), "aiops-agent-update")
 }
 
-// helperProgressMarker reports whether a helper log/result file already proves
-// the helper is running. These are the first things the helper writes.
-func helperProgressMarker(body string) bool {
-	return strings.Contains(body, "helper start") || strings.HasPrefix(body, "running") ||
-		strings.HasPrefix(body, "ok ") || strings.HasPrefix(body, "fail ")
-}
-
 // waitWindowsUpdateHelperAlive polls the helper's own log/result files, which is
 // nearly free, and falls back to a process probe ONCE at the end of the window.
 //

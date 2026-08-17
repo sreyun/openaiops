@@ -2166,7 +2166,7 @@
   "agent_update.target_uncomparable": "当前服务端版本不可比较（需正式版本号）",
   "agent_update.no_outdated": "没有检测到落后的在线主机",
   "agent_update.done_with_fails": "Agent 更新结束：有 {0} 台失败",
-  "agent_update.poll_timeout": "更新任务轮询超时，请稍后手动刷新",
+  "agent_update.poll_timeout": "前端已停止轮询；服务端仍在校验该任务，稍后刷新或查看任务详情即可",
   "agent_update.job_lost": "更新任务不存在或已过期",
   /* --- 告警设置弹窗 --- */
   "settings.title": "告警设置",

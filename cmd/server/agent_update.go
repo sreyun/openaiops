@@ -222,6 +222,70 @@ func (m *agentUpdateManager) refreshInFlight(hostID string) {
 	m.inFlight[hostID] = time.Now().Unix()
 }
 
+// touchInFlightIfPresent refreshes an existing in-flight stamp without ever
+// creating one. A hold's heartbeat must not resurrect a host the caller already
+// released — that would freeze it for the full hard cooldown.
+func (m *agentUpdateManager) touchInFlightIfPresent(hostID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.inFlight[hostID]; ok {
+		m.inFlight[hostID] = time.Now().Unix()
+	}
+}
+
+// agentUpdateHoldInterval is how often a live hold re-stamps in-flight. Anything
+// below agentUpdateSoftRetrySec works; a third of it survives one missed tick.
+// 变量而非常量：测试要把它调小到毫秒级，否则「心跳是否真的挡住了软重试」只能靠读代码
+// 相信，而这条正是最需要被钉住的行为。
+var agentUpdateHoldInterval = agentUpdateSoftRetrySec / 3 * time.Second
+
+// holdHostInFlight keeps a host marked busy for as long as the caller is still
+// working on it, and returns a release func that stops the hold synchronously.
+//
+// 为什么必须有这个：inFlight 的时间戳只在**入队**和**进入 pending_verify** 时各打一次，
+// 而一台主机的完整升级阶梯远长于 agentUpdateSoftRetrySec(360s)：
+//
+//	module exec（最长 600s，最多 3 次）→ 5 分钟 verify
+//	  → legacy 救援 exec（最长 600s）  → 再 5 分钟 verify
+//
+// 软重试的判定是「时间戳超过 360s 且版本还落后就再来一次」——而升级进行中的主机版本
+// 当然还落后。于是**同一台主机上会并发跑第二次升级**：Linux 上顶多多下一遍二进制
+// （换版是 rename，systemd 还会把它拉起来）；Windows 上却是两个助手抢同一次换版——
+// 一个刚把服务停掉，另一个正在覆盖同一个 PE，主机最后停在「服务已停止」，版本永远不动。
+// 这正是「Linux 升得上去、Windows 升不上去」里最难复现的那一类。
+//
+// 心跳只刷新**已存在**的条目（touchInFlightIfPresent）。这一点很关键：调用方往往在
+// release 之前就 clearInFlight 了，若心跳能凭空写回条目，一次晚到的刷新就会把刚放行的
+// 主机重新冻结 agentUpdateInFlightSec(30 分钟)——把并发缺陷换成了拒绝升级的缺陷。
+// release 仍然是同步的（等心跳协程退出），只是正确性不再依赖调用顺序。
+func (s *Server) holdHostInFlight(hostID string) (release func()) {
+	if s == nil || s.agentUpdates == nil || strings.TrimSpace(hostID) == "" {
+		return func() {}
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		t := time.NewTicker(agentUpdateHoldInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				s.agentUpdates.touchInFlightIfPresent(hostID)
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			close(stop)
+			<-done
+		})
+	}
+}
+
 // recordSkip stores the latest "why not upgraded" cause for a host (capped).
 func (m *agentUpdateManager) recordSkip(hostID, reason, detail string) {
 	if m == nil || hostID == "" {
@@ -590,6 +654,10 @@ func (s *Server) finishHostInFlight(job *agentUpdateJob, hr *agentUpdateHostResu
 }
 
 func (s *Server) waitVersionAckOrExpire(job *agentUpdateJob, hostID, target string, rollback bool) {
+	// verify 窗口 + legacy 救援（exec + 第二个 verify 窗口）加起来最长 20 分钟，是整条
+	// 阶梯里最长的一段，也是最容易被软重试插进来的一段——救援脚本正在换版时再下发一次
+	// 升级，Windows 上就是两个助手抢同一个 PE。见 holdHostInFlight。
+	defer s.holdHostInFlight(hostID)()
 	if rollback || !isComparableAgentVer(target) {
 		// Rollback / uncomparable targets cannot be verified by agent_version —
 		// clear pending_verify so the job/UI do not stick, then release cooldown.
@@ -855,6 +923,9 @@ func (s *Server) rescueWindowsAgentUpdate(job *agentUpdateJob, hostID, target st
 }
 
 func (s *Server) executeAgentUpdateHost(job *agentUpdateJob, hr *agentUpdateHostResult) {
+	// 这一段最长可以跑 3×600s，远超软重试窗口——不按住 in-flight，同一台主机会被
+	// 第二次入队，两次升级并发抢同一次换版。见 holdHostInFlight。
+	defer s.holdHostInFlight(hr.HostID)()
 	s.agentUpdates.setHostResult(hr, "running", "", "")
 	h := s.hostByID(hr.HostID)
 	if h == nil {

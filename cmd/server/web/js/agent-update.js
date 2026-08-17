@@ -207,14 +207,34 @@ function stopAgentUpdatePoll() {
   AGENT_UPDATE_POLL_LEFT = 0;
 }
 
+// 轮询预算必须覆盖服务端的**整条阶梯**，而不是只覆盖第一段 verify：
+//
+//   module 助手 verify（5 分钟）→ legacy 救援 exec（最长 600s）→ 救援 verify（5 分钟）
+//
+// 服务端的 agentUpdateJobFinalizeWindow 就是按这条链路算的，22 分钟。原值 200 次 ×
+// 2s ≈ 6.5 分钟，只够走完第一段的一半。
+//
+// 后果只落在 Windows 上，原因是两边进 pending_verify 的**含义不同**：
+//   - Linux：模块返回时二进制**已经换好了**（rename 允许覆盖运行中的 ELF），剩下的
+//     只是拉起服务，版本号通常几十秒内就追上，第一段 verify 就收摊；
+//   - Windows：运行中的 PE 改不了，模块返回时**一个字节都还没换**，换版要等助手在
+//     Agent 被杀之后的独立进程里做完；一旦助手没做成，就要走 legacy 救援——而救援
+//     阶梯（5 分钟 verify + 最长 600s exec + 再 5 分钟 verify）按构造只对 Windows 开
+//     （rescueWindowsAgentUpdate 对非 Windows 直接返回 false）。
+// 也就是说：超出 6.5 分钟的那一段，永远只有 Windows 主机会走到。操作台上看到的
+// 「Windows Agent 升不上去」，有很大一部分其实是这条上限提前弹出来的红字。
+const AGENT_UPDATE_POLL_TICKS = 720; // 24 min at 2s，覆盖服务端 22 分钟的完整阶梯
 function pollAgentUpdateJob(id) {
   stopAgentUpdatePoll();
-  AGENT_UPDATE_POLL_LEFT = 200; // ~6.5 min at 2s (covers pending_verify)
+  AGENT_UPDATE_POLL_LEFT = AGENT_UPDATE_POLL_TICKS;
   AGENT_UPDATE_TIMER = setInterval(async () => {
     AGENT_UPDATE_POLL_LEFT -= 1;
     if (AGENT_UPDATE_POLL_LEFT <= 0) {
       stopAgentUpdatePoll();
-      toast(I18N.t("agent_update.poll_timeout", "更新任务轮询超时，请稍后手动刷新"), "err");
+      // 中性色，不是 "err"：前端不看了 ≠ 升级失败了，服务端仍在跑校验/救援。
+      // 红字会把一次正常的长校验直接读成「Windows 又没升上去」。
+      toast(I18N.t("agent_update.poll_timeout",
+        "前端已停止轮询；服务端仍在校验该任务，稍后刷新或查看任务详情即可"));
       return;
     }
     try {
@@ -266,9 +286,17 @@ async function rollbackFailedAgentHosts() {
 function showAgentUpdateJobDetail() {
   const j = AGENT_UPDATE_JOB;
   if (!j) return;
-  const lines = (j.hosts || []).map(h =>
-    `${h.hostname || h.host_id}\t${h.status}\t${h.method || ""}\t${h.from_version || ""}\t${(h.message || "").replace(/\s+/g, " ").slice(0, 160)}`
-  );
+  // 消息**不能**压成一行再截 160 字：Windows 失败信息里真正有用的部分全在结尾——
+  // 服务端拼上去的 " | host evidence: …"（助手日志尾巴）和 Agent 捎回来的
+  // "--- 上一轮升级助手留下的记录 ---"。截断恰好把唯一能解释原因的那一段丢掉，
+  // 留下的是一句谁都看得懂但什么也没说的英文。「Windows 升不上去查不出原因」
+  // 有一半是这么来的：证据一路运到了操作台，最后一步被前端切掉了。
+  const lines = (j.hosts || []).map(h => {
+    const head = `${h.hostname || h.host_id}\t${h.status}\t${h.method || ""}\t${h.from_version || ""}`;
+    const msg = String(h.message || "").trim();
+    if (!msg) return head;
+    return head + "\n    " + msg.replace(/\r/g, "").replace(/\n/g, "\n    ");
+  });
   const box = document.getElementById("agentUpdateDetailPre");
   const mask = document.getElementById("agentUpdateDetailMask");
   if (box && mask) {

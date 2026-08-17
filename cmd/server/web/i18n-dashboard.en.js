@@ -2145,7 +2145,7 @@ window.DICT_EN = {
   "agent_update.target_uncomparable": "Server version is not comparable (need a release version)",
   "agent_update.no_outdated": "No outdated online hosts found",
   "agent_update.done_with_fails": "Agent update finished with {0} failure(s)",
-  "agent_update.poll_timeout": "Update job polling timed out; refresh later",
+  "agent_update.poll_timeout": "Stopped polling here; the server is still verifying this job — refresh later or open the job detail",
   "agent_update.job_lost": "Update job not found or expired",
   "settings.title": "Alert settings",
   "settings.enable_push": "Enable alert push",

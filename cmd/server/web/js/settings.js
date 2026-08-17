@@ -718,6 +718,10 @@ async function loadAgentAutoUpdateStatus() {
 // 最近的自动升级任务：把「后台跑了、失败了、没人看见」变成看得见。
 // 每台主机带 method（module / script / script-rescue）与 message —— 后者在 Windows
 // 换版失败时会捎回主机本地助手日志的尾巴（服务端 windowsUpdateEvidence 取回）。
+//
+// message 不再截断：服务端已经按 1200 字封顶，而 Windows 失败信息里真正解释原因的
+// 那一段（" | host evidence: …"、「上一轮升级助手留下的记录」）全在**结尾**——前端
+// 再切一刀，剩下的就只有一句什么也没说的开场白。
 async function loadAgentAutoUpdateJobs() {
   const box = $("agentAutoStatusJobs");
   if (!box) return;
@@ -742,7 +746,7 @@ async function loadAgentAutoUpdateJobs() {
         <td>${esc(h.status || "-")}</td>
         <td>${esc(h.method || "-")}</td>
         <td class="mono">${esc(h.from_version || "-")}→${esc(j.target_version || "-")}</td>
-        <td style="max-width:520px;word-break:break-all">${esc(String(h.message || "").slice(0, 400))}</td>
+        <td style="max-width:520px;word-break:break-all;white-space:pre-wrap">${esc(String(h.message || ""))}</td>
         <td class="mono">${j.created_at ? esc(fmtDateTime(j.created_at)) : "-"}</td>
       </tr>`);
     });

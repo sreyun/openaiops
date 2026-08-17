@@ -230,7 +230,9 @@ func tailFileForDiagnostics(path string, max int64) string {
 	if _, err := f.ReadAt(buf, off); err != nil && err != io.EOF {
 		return ""
 	}
-	return strings.TrimSpace(string(buf))
+	// 助手用 PowerShell 5.1 的 -Encoding UTF8 写这些文件，正文前面带 BOM。捎回服务端
+	// 之前剥掉，免得操作台上每条证据都以一串乱码开头——这段文字的全部价值就是给人读。
+	return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(buf)), utf8BOM))
 }
 
 func moduleAgentRollback() ([]byte, int) {
