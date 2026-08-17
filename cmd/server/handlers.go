@@ -507,6 +507,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/ai/assist", s.handleAIAssist)                     // 全站「AI 辅助」按钮统一入口（任务化 SSE）
 	mux.HandleFunc("POST /api/v1/ai/assist/feedback", s.handleAIAssistFeedback)    // 采纳/评价 AI 辅助结果 → 学习闭环强化
 	mux.HandleFunc("POST /api/v1/ai/write-approval", s.handleIssueAIWriteApproval) // 写工具 per-action 审批令牌
+	mux.HandleFunc("POST /api/v1/ai/followup", s.handleAIFollowup)                 // AI 结论一键转动作（建工单/记时间线/关联变更）
 	mux.HandleFunc("GET /api/v1/ai/runs", s.handleListAIRuns)                      // Wave2 AI Run 列表
 	mux.HandleFunc("GET /api/v1/ai/runs/{id}", s.handleGetAIRun)                   // Wave2 AI Run 详情
 	mux.HandleFunc("GET /api/v1/ai/duty-context", s.handleDutyContext)             // 值班晨报态势汇总（供前端流式生成）

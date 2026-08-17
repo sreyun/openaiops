@@ -14,6 +14,7 @@ import (
 // Feedback must reference AssistID so clients cannot inject arbitrary RAG text.
 type assistRecord struct {
 	ID        string
+	Kind      string
 	Task      string
 	Input     string
 	Answer    string
@@ -53,19 +54,23 @@ func newOpaqueID(prefix string) string {
 }
 
 func (st *assistStore) put(task, input, answer, actor string) assistRecord {
-	return st.putWithID(newOpaqueID("ast_"), task, input, answer, actor)
+	return st.putWithID(newOpaqueID("ast_"), "assist", task, input, answer, actor)
 }
 
-func (st *assistStore) putWithID(id, task, input, answer, actor string) assistRecord {
+func (st *assistStore) putWithID(id, kind, task, input, answer, actor string) assistRecord {
 	if st == nil {
 		return assistRecord{}
 	}
 	if strings.TrimSpace(id) == "" {
 		id = newOpaqueID("ast_")
 	}
+	if strings.TrimSpace(kind) == "" {
+		kind = "assist"
+	}
 	now := time.Now().Unix()
 	rec := assistRecord{
 		ID:        id,
+		Kind:      strings.TrimSpace(kind),
 		Task:      strings.TrimSpace(task),
 		Input:     input,
 		Answer:    answer,

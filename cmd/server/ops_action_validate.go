@@ -28,6 +28,10 @@ var (
 	opsAllowedUI   = map[string]bool{
 		"open_dashboard": true, "navigate_view": true, "export_report": true,
 		"drill_down": true, "show_chart": true, "show_stat": true, "show_table": true, "show_logs": true,
+		// 闭环动作（ai_followup.go）：把 AI 结论转成运维动作。放行的只是「按钮」，
+		// 真正的写入仍由 /api/v1/ai/followup 用服务端原文执行，模型伪造 run_id 无效。
+		aiActCreateTicket: true, aiActAddIncidentNote: true,
+		aiActLinkChange: true, aiActProposeRemediation: true,
 	}
 )
 

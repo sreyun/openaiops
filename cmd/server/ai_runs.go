@@ -44,8 +44,12 @@ func (s *Server) persistAIRun(run AIRun) {
 		run.ContentHash = memoryContentHash(run.Input + "\n" + run.Answer)
 	}
 	// Always keep hot cache for feedback binding.
-	if s.assistStore != nil && (run.Kind == "assist" || run.Kind == "") {
-		s.assistStore.putWithID(run.ID, run.Task, run.Input, run.Answer, run.Actor)
+	//
+	// 所有 kind 都进热缓存，不只是 assist：PG 落库是 go 异步的，而反馈按钮和闭环
+	// 动作按钮就挂在刚吐完的那条回答下面，用户点得比 upsert 快。只缓存 assist 时，
+	// Hermes 会话的反馈与「建工单」会随机撞上「run 无效或已过期」。
+	if s.assistStore != nil {
+		s.assistStore.putWithID(run.ID, run.Kind, run.Task, run.Input, run.Answer, run.Actor)
 	}
 	if s.pg == nil {
 		return
@@ -61,7 +65,7 @@ func (s *Server) lookupAIRun(id string) (AIRun, bool) {
 	if s.assistStore != nil {
 		if rec, ok := s.assistStore.get(id); ok {
 			return AIRun{
-				ID: rec.ID, Kind: "assist", Task: rec.Task, Actor: rec.Actor,
+				ID: rec.ID, Kind: rec.Kind, Task: rec.Task, Actor: rec.Actor,
 				Input: rec.Input, Answer: rec.Answer, ContentHash: rec.Hash,
 				CreatedAt: rec.CreatedAt, UpdatedAt: rec.CreatedAt,
 			}, true

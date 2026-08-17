@@ -42,6 +42,12 @@ type Ticket struct {
 	ChangeID     int64           `json:"change_id,omitempty"`
 	SQLChangeID  string          `json:"sql_change_id,omitempty"`
 	Source       string          `json:"source,omitempty"` // manual|incident|alert|dashboard|sql|api
+	// AIRunID ties the ticket back to the AI answer it was created from
+	// (/api/v1/ai/followup). Resolving such a ticket is an objective verdict on
+	// that answer, so it feeds the learning loop — see learnFromAIFollowupTicket.
+	// Server-set only: Create clears whatever a client sends, or anyone could
+	// claim AI provenance and get arbitrary conclusions marked "verified".
+	AIRunID      string          `json:"ai_run_id,omitempty"`
 	DueAt        int64           `json:"due_at,omitempty"`
 	Links        []OpsLink       `json:"links,omitempty"`
 	Attachments  []Attachment    `json:"attachments,omitempty"`
@@ -145,6 +151,7 @@ func (m *ticketManager) Create(t Ticket, reporter string) (Ticket, error) {
 	}
 	t.Links = mergeOpsLinks(nil, t.Links...)
 	syncTicketLinkIndexes(&t)
+	t.AIRunID = "" // provenance is server-set; see AttachAIRun
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.nextID++

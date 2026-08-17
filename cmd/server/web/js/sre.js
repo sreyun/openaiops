@@ -1526,6 +1526,7 @@ async function openIncidentDetail(id){
     const acts=[];
     // AI 能力收入单一下拉，避免底栏「🤖」按钮连排
     let aiItems=`<button type="button" role="menuitem" data-iact="diagnose">${I18N.t("sre.ai_diagnose","AI 诊断")}</button>
+      <button type="button" role="menuitem" data-iact="ai-chat" title="${I18N.t("sre.ai_chat_incident_title","带着这个事件的上下文开对话，结论可一键转成工单/自愈/变更关联")}">${I18N.t("sre.ai_chat_incident","AI 对话（本事件）")}</button>
       <button type="button" role="menuitem" data-iact="analysis-board" title="${I18N.t("sre.gen_analysis_board_title","AI 按此事件生成排障分析看板")}">${I18N.t("sre.gen_analysis_board","AI 分析看板")}</button>`;
     if ((inc.timeline||[]).some(e=>e.kind==="ai_diagnosis" && e.text)) {
       aiItems+=`<div class="act-menu-sep"></div>
@@ -1783,6 +1784,7 @@ async function incidentAction(id, act){
     else if (act==="draft-rule"){ draftRemediationFromIncident(window._curIncident); return; } // 不走末尾刷新
     else if (act==="propose-fix"){ proposeRemediationFromIncident(window._curIncident); return; }
     else if (act==="topo-rca"){ showIncidentTopoRCA(window._curIncident); return; }
+    else if (act==="ai-chat"){ openAIChatForIncident(window._curIncident); return; }
     else if (act==="analysis-board"){
       toast(I18N.t("sre.gen_board_ing","AI 生成分析看板中，请稍候…"),"ok");
       const r=await fetch(`${API}/dashboards/ai-from-incident`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({incident_id:+id})});
@@ -1957,12 +1959,16 @@ function draftRemediationFromIncident(inc){
 }
 
 // L4：本事件一次性修复提案 → 待审批 → 批准执行
-function proposeRemediationFromIncident(inc){
+// diagOverride：从 AI 对话直接提自愈时，用对话结论当诊断上下文——否则会因为事件
+// 时间线上还没有 ai_diagnosis 条目而被挡在门外，闭环第一步就断了。
+function proposeRemediationFromIncident(inc, diagOverride){
   if(!inc){ toast(I18N.t("sre.reopen_incident","请重新打开事件详情后再试"),"err"); return; }
   if(!inc.host_id){ toast(I18N.t("sre.propose_need_host","事件未关联主机，无法挂修复提案"),"err"); return; }
-  let diag="";
-  const tl=inc.timeline||[];
-  for(let i=tl.length-1;i>=0;i--){ if(tl[i].kind==="ai_diagnosis" && tl[i].text){ diag=tl[i].text; break; } }
+  let diag=String(diagOverride||"").trim();
+  if(!diag){
+    const tl=inc.timeline||[];
+    for(let i=tl.length-1;i>=0;i--){ if(tl[i].kind==="ai_diagnosis" && tl[i].text){ diag=tl[i].text; break; } }
+  }
   if(!diag){ toast(I18N.t("sre.need_diag_first","请先运行「🤖 AI 诊断」，有诊断结论后再生成提案"),"err"); return; }
   const pbs=(SRE_PLAYBOOKS||[]).map(p=>`- id=${p.id} 名称=${p.name}${p.description?" 用途="+p.description:""}`).join("\n")||"（暂无已保存剧本，请新建）";
   const ctx=`事件ID：${inc.id}\n事件：${inc.title}\n告警类型：${inc.type||"(未知)"}\n级别：${inc.severity}\n主机：${(typeof HostPicker!=="undefined"&&HostPicker.hostTitle)?HostPicker.hostTitle({hostname:inc.hostname,ip:inc.ip,id:inc.host_id}):(inc.hostname||"未知主机")}\n\nAI 诊断结论：\n${diag}\n\n【可用剧本】\n${pbs}`;
@@ -5176,6 +5182,7 @@ function aiChatToBottom(){ const log=$("aiChatLog"); if(log) log.scrollTop=log.s
 // 统一「AI 对话」——单窗口,后端走 Sreyun 自主运维 Agent（能对话 + 自动调用工具,
 // 不需要工具时自动退化成纯对话）。模型与 AI 设置共用同一套配置。
 let AI_CHAT_SESSION=0;   // Sreyun 服务端会话 id（0=新会话）
+let AI_CHAT_INCIDENT=0;  // 本轮对话关联的事件 id（0=未关联）：决定回答下方给哪些闭环动作
 let AI_CHAT_HISTORY=[];  // 前端侧会话历史 {role,content,actions?}：兜底传后端 + 本地记忆
 const AI_CHAT_INTRO=`<div class="ai-welcome"><div class="ai-welcome-icon">🤖</div><div class="ai-welcome-title">${I18N.t("sre.chat_intro_title","AI 运维助手已就绪")}</div><div class="ai-welcome-sub">${I18N.t("sre.chat_intro_sub","全局 AI 入口：看板组件调用、任意界面调度、趋势图表与指标下钻、安全自动防御、自我进化与记忆优化、诊断加固、报告导出——一句话即可调度。也可上传 📄 文档 / 🔗 网页辅助分析。")}</div><div class="ai-cap-chips"><span class="ai-cap-chip">看板组件</span><span class="ai-cap-chip">界面调度</span><span class="ai-cap-chip">安全防御</span><span class="ai-cap-chip">自我进化</span><span class="ai-cap-chip">趋势图表</span><span class="ai-cap-chip">导出报告</span></div></div><div id="aiChatSuggest" class="ai-suggest"></div>`;
 
@@ -5297,9 +5304,22 @@ function renderAIChatActions(actions){
   }
   if(!items.length) return "";
   return `<div class="ai-action-cards">`+items.map((a,i)=>{
-    const label=esc(a.label||a.type);
+    const label=esc(aiChatActionLabel(a));
     return `<button type="button" class="ai-action-card" data-ai-act="${i}">${label}</button>`;
   }).join("")+`</div>`;
+}
+// 闭环动作的文案在服务端是中文硬编码（与既有 open_dashboard 等一致）；按 type 就地
+// 翻译，三语才不用改服务端的动作契约。未知类型仍回退服务端 label。
+const AI_FOLLOWUP_LABELS={
+  create_ticket:["sre.followup_act_ticket","建工单"],
+  add_incident_note:["sre.followup_act_note","记入事件时间线"],
+  propose_remediation:["sre.followup_act_propose","提自愈"],
+  link_change:["sre.followup_act_link","关联变更"]
+};
+function aiChatActionLabel(a){
+  const m=AI_FOLLOWUP_LABELS[a&&a.type];
+  if(m) return I18N.t(m[0],m[1]);
+  return (a&&a.label)||(a&&a.type)||"";
 }
 function normalizeAIChatSeries(raw){
   return (Array.isArray(raw)?raw:[]).map(s=>({
@@ -5484,8 +5504,100 @@ document.addEventListener("click",(e)=>{
   };
   open().catch(()=>{});
 });
-async function handleAIChatAction(a){
+// ===== AI 对话闭环：把「只能被读」的结论一键转成运维动作 =====
+//
+// 按钮只回传服务端签发的 run_id；工单正文与时间线内容由服务端从 AIRun 取原文写入，
+// 前端这里拿到的文本只用来预填标题和提案上下文，不作为写入内容。
+// 服务端契约见 cmd/server/ai_followup.go。
+async function postAIFollowup(body){
+  const r=await fetch(`${API}/ai/followup`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok||!j.ok) throw new Error(j.error||I18N.t("sre.followup_failed","动作执行失败"));
+  return j;
+}
+// 动作按钮就挂在回答气泡里，优先取当前这条回答；取不到再退回最后一条 assistant。
+function aiFollowupAnswerText(el){
+  const host=(el&&el.closest)?el.closest(".ai-chat-msg"):null;
+  if(host){ const t=(host.innerText||"").trim(); if(t) return t; }
+  const last=[...(AI_CHAT_HISTORY||[])].reverse().find(m=>m&&m.role==="assistant"&&String(m.content||"").trim());
+  return last?String(last.content):"";
+}
+function aiFollowupTitleFrom(text){
+  return String(text||"").replace(/[#*`>_\-]/g," ").replace(/\s+/g," ").trim().slice(0,48);
+}
+// 单选器：与 pickAIExportFormat 同款轻量弹层，避免为一次选择再引一套组件。
+function pickAIFollowupOption(title, options){
+  return new Promise(resolve=>{
+    const wrap=document.createElement("div");
+    wrap.className="mask show";
+    wrap.style.zIndex="13000";
+    wrap.innerHTML=`<div class="modal" style="max-width:520px;width:92vw"><div class="modal-head"><h3>${esc(title)}</h3><button class="btn ghost close" type="button">✕</button></div>`+
+      `<div class="modal-body" style="display:flex;flex-direction:column;gap:8px;max-height:60vh;overflow:auto">`+
+      options.map(o=>`<button type="button" class="btn" data-opt="${esc(o.id)}" style="justify-content:flex-start;text-align:left">${esc(o.label)}</button>`).join("")+
+      `</div></div>`;
+    const done=(v)=>{ try{wrap.remove();}catch(e){} resolve(v); };
+    wrap.querySelector(".close").onclick=()=>done(null);
+    wrap.addEventListener("click",e=>{ if(e.target===wrap) done(null); });
+    wrap.querySelectorAll("[data-opt]").forEach(b=>b.onclick=()=>done(b.getAttribute("data-opt")));
+    document.body.appendChild(wrap);
+  });
+}
+async function handleAIFollowupAction(a, el){
+  const runId=a.run_id||"";
+  const incId=Number(a.incident_id||0);
+  if(!runId){ toast(I18N.t("sre.followup_no_run","这条回答没有可追溯的来源，无法转成动作"),"err"); return; }
+  try{
+    if(a.type==="create_ticket"){
+      const title=await requestAITextInput({
+        singleLine:true, required:false, danger:false, maxLength:120,
+        title:I18N.t("sre.followup_ticket_head","把 AI 结论转成工单"),
+        message:I18N.t("sre.followup_ticket_msg","工单正文使用服务端保存的 AI 原文，这里只需要一个标题。"),
+        label:I18N.t("sre.followup_ticket_label","工单标题"),
+        placeholder:I18N.t("sre.followup_ticket_ph","例如：核实磁盘写入放大并清理归档"),
+        defaultValue:aiFollowupTitleFrom(aiFollowupAnswerText(el)),
+        submitLabel:I18N.t("sre.followup_create_ticket","建工单")
+      });
+      if(title===null) return;
+      const j=await postAIFollowup({run_id:runId,action:"create_ticket",incident_id:incId,title:title||""});
+      const tid=(j.ticket&&j.ticket.id)||"";
+      toast("✅ "+I18N.t("sre.followup_ticket_ok","已建工单")+(tid?" #"+tid:""),"ok");
+      return;
+    }
+    if(a.type==="add_incident_note"){
+      if(!incId){ toast(I18N.t("sre.followup_need_incident","该会话未关联事件"),"err"); return; }
+      if(!confirm(I18N.t("sre.followup_note_confirm","将这条 AI 结论记入事件时间线？"))) return;
+      await postAIFollowup({run_id:runId,action:"add_incident_note",incident_id:incId});
+      toast("✅ "+I18N.t("sre.followup_note_ok","已记入事件时间线"),"ok");
+      return;
+    }
+    if(a.type==="link_change"){
+      if(!incId){ toast(I18N.t("sre.followup_need_incident","该会话未关联事件"),"err"); return; }
+      const list=await fetch(`${API}/incidents/${incId}/related-changes`).then(r=>r.json()).catch(()=>[]);
+      if(!list||!list.length){ toast(I18N.t("sre.followup_no_changes","近 14 天没有可关联的变更"),"err"); return; }
+      const cid=await pickAIFollowupOption(I18N.t("sre.followup_pick_change","选择要关联的变更"),
+        list.map(c=>({id:String(c.id), label:`#${c.id} ${c.title||""} · ${c.status||""} · ${typeof fmtDateTime==="function"?fmtDateTime(c.started_at):""}`})));
+      if(!cid) return;
+      await postAIFollowup({run_id:runId,action:"link_change",incident_id:incId,change_id:Number(cid)});
+      toast("✅ "+I18N.t("sre.followup_link_ok","已关联变更")+" #"+cid,"ok");
+      return;
+    }
+    if(a.type==="propose_remediation"){
+      if(!incId){ toast(I18N.t("sre.followup_need_incident","该会话未关联事件"),"err"); return; }
+      // 纯导航：把人送进既有的修复提案流程，最终仍落 pending_approval 由人批准。
+      // 对话结论直接作为诊断上下文传入，免得因为时间线上没有 ai_diagnosis 就走不下去。
+      const inc=await fetch(`${API}/incidents/${incId}`).then(r=>r.json());
+      const mask=$("aiChatMask"); if(mask) mask.classList.remove("show");
+      proposeRemediationFromIncident(inc, aiFollowupAnswerText(el));
+      return;
+    }
+  }catch(e){ toast(String((e&&e.message)||e),"err"); }
+}
+async function handleAIChatAction(a, el){
   if(!a||!a.type) return;
+  if(a.type==="create_ticket"||a.type==="add_incident_note"||a.type==="link_change"||a.type==="propose_remediation"){
+    await handleAIFollowupAction(a, el);
+    return;
+  }
   if(a.type==="open_dashboard"&&a.id){
     try{
       if(typeof switchView==="function") switchView("dashboards");
@@ -5550,7 +5662,7 @@ function bindAIChatActions(root,actions){
     btn.onclick=async()=>{
       const a=clickable[Number(btn.dataset.aiAct)];
       if(!a) return;
-      await handleAIChatAction(a);
+      await handleAIChatAction(a, btn);
     };
   });
   bindAIDashLinks(root);
@@ -5682,10 +5794,35 @@ function openAIChat(){
   loadAISessions();
   setTimeout(()=>{ const i=$("aiChatInput"); if(i) i.focus(); },80);
 }
+// 带事件上下文开对话：会话绑定 incident_id，回答下方才会出现「记入时间线 / 提自愈 /
+// 关联变更」这三个事件级闭环动作（不绑事件时只有「建工单」）。
+function openAIChatForIncident(inc){
+  if(!inc||!inc.id){ openAIChat(); return; }
+  const mask=$("incidentDetailMask"); if(mask) mask.classList.remove("show");
+  openAIChat();
+  AI_CHAT_INCIDENT=Number(inc.id)||0;
+  renderAIChatScope(inc);
+  const i=$("aiChatInput");
+  if(i){
+    i.value=`${I18N.t("sre.ai_chat_incident_seed","请分析这个事件并给出处置建议")}：#${inc.id} ${inc.title||""}`;
+    if(typeof autoGrowAIInput==="function") autoGrowAIInput({target:i});
+  }
+}
+// 会话作用域提示：让人一眼看到「这轮对话挂在哪个事件上」，否则动作按钮的效果没有着落。
+function renderAIChatScope(inc){
+  const log=$("aiChatLog"); if(!log) return;
+  const old=log.querySelector(".ai-chat-scope"); if(old) old.remove();
+  if(!AI_CHAT_INCIDENT) return;
+  const chip=document.createElement("div");
+  chip.className="ai-chat-scope hint";
+  chip.style.margin="0 0 8px";
+  chip.textContent=`🔗 ${I18N.t("sre.ai_chat_scope","本轮对话已关联事件")} #${AI_CHAT_INCIDENT}${inc&&inc.title?" · "+inc.title:""}`;
+  log.insertBefore(chip, log.firstChild);
+}
 // 开新会话：清空会话 id / 历史 / 消息区
 function newAIChat(){
   if(_aiChatBusy) stopAIChat(); // 开新会话前终止在途
-  AI_CHAT_SESSION=0; AI_CHAT_HISTORY=[]; AI_ATTACHMENTS=[]; AI_CHAT_QUEUE=[];
+  AI_CHAT_SESSION=0; AI_CHAT_INCIDENT=0; AI_CHAT_HISTORY=[]; AI_ATTACHMENTS=[]; AI_CHAT_QUEUE=[];
   const log=$("aiChatLog"); if(log) log.innerHTML=AI_CHAT_INTRO;
   const sel=$("aiSessionSelect"); if(sel) sel.value="";
   renderAttachments(); renderQueueHint(); setAIChatBusyUI(false);
@@ -5739,6 +5876,7 @@ async function switchAISession(id){
     const j=await r.json();
     const msgs=(j.messages||[]).filter(m=>m&&(m.role==="user"||m.role==="assistant"));
     AI_CHAT_SESSION=Number(id);
+    AI_CHAT_INCIDENT=0; // 切到历史会话时事件绑定未知，宁可不绑，也不误挂到别的事件上
     AI_CHAT_HISTORY=msgs.map(m=>({role:m.role,content:m.content,actions:parseAIChatActions(m.actions)}));
     const log=$("aiChatLog");
     if(log){
@@ -5834,7 +5972,7 @@ async function sendAIChat(){
     const files=atts.filter(a=>a.kind==="file").map(a=>({name:a.name,text:a.text}));
     const r=await fetch(`${API}/hermes/chat`,{method:"POST",headers:{"Content-Type":"application/json"},
       signal:_aiChatAbort?_aiChatAbort.signal:undefined,
-      body:JSON.stringify({message:msg,session_id:AI_CHAT_SESSION,history:historyForAIChatAPI(AI_CHAT_HISTORY.slice(0,-1)),images,files,stream:true})});
+      body:JSON.stringify({message:msg,session_id:AI_CHAT_SESSION,incident_id:AI_CHAT_INCIDENT,history:historyForAIChatAPI(AI_CHAT_HISTORY.slice(0,-1)),images,files,stream:true})});
     if(!r.ok){ throw new Error("HTTP "+r.status); }
     let streamed=false;
     let reasoning=""; // 推理模型思维链（独立于 answer，渲染到「思考过程」折叠区）

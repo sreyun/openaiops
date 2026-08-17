@@ -33,6 +33,8 @@ func (s *Server) wireSRE() {
 	s.remediation.onIncident = s.incidents.AddEvent
 	// 闭环的「观察」半边：剧本跑完之后回看告警是否真的消失（见 scheduleVerify）。
 	s.remediation.alertActive = s.notifier.AlertActive
+	// 回验结论回流记忆：告警真的消除 → 这套处置标记为已验证；仍在触发 → 在检索中下沉。
+	s.remediation.onVerify = func(run RemediationRun) { go s.learnFromRemediationVerify(run) }
 	s.remediation.onPersist = func(run RemediationRun) {
 		if s.pg != nil {
 			s.pg.upsertRemediationRun(run)
@@ -1139,6 +1141,7 @@ func (s *Server) handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "common.invalid_json")})
 		return
 	}
+	prev, _ := s.tickets.Get(id)
 	tk, err := s.tickets.Update(id, in, s.actorName(r))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -1153,6 +1156,12 @@ func (s *Server) handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 			label = "已关闭"
 		}
 		s.messages.push("ticket", "success", "工单"+label+"："+tk.Title, "", "sre", strconv.FormatInt(tk.ID, 10))
+		// 由 AI 结论建出的工单被解决 = 那条结论的客观回验，回流为已验证记忆。
+		// 只在**状态真的翻转**的那一次回流：这个分支在工单已是终态时的任何一次编辑
+		// 都会走到，重复回流会把同一条结论反复加权。
+		if prev.Status != tk.Status {
+			go s.learnFromAIFollowupTicket(tk, label)
+		}
 		// Auto-resolve the linked incident when the ticket is resolved/closed.
 		if tk.IncidentID > 0 {
 			if inc, found := s.incidents.Get(tk.IncidentID); found && inc.Status != "resolved" {
@@ -3998,6 +4007,8 @@ func (s *Server) handleSreyunChat(w http.ResponseWriter, r *http.Request) {
 		Input: msg, Answer: reply, OK: chatErr == nil && strings.TrimSpace(reply) != "",
 		LatencyMs: lat, IncidentID: req.IncidentID, MetaJSON: agentMetaJSON(loopMeta),
 	})
+	// 闭环动作区：结论落库拿到 run_id 之后才发，按钮回传的 run_id 才指得到服务端原文。
+	s.emitAIFollowupActions(w, r, runID, reply, req.IncidentID)
 	toolsJSON, _ := json.Marshal(loopMeta.Tools)
 	if len(toolsJSON) == 0 {
 		toolsJSON = []byte("[]")

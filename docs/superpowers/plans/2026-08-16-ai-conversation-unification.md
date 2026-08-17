@@ -88,15 +88,51 @@ AI 决策与分析能力」。
 
 ## 四、分阶段
 
-| 阶段 | 内容 | 风险 |
-|---|---|---|
-| A | SreView 的 AI 标签改为唤起 dock + 预置上下文；删掉自建对话实现 | 低，可单独发 |
-| B | 回答下方的动作区（建工单 / 提自愈 / 关联变更），全部复用既有接口 + 审批 | 中 |
-| C | 提示模板与上下文构建归一；两侧 run 追踪落同一张表 | 中，纯后端 |
-| D | 客观回验回流记忆（工单解决 / 自愈 Verify → memory.verified） | 中 |
+| 阶段 | 内容 | 风险 | 状态 |
+|---|---|---|---|
+| A | SreView 的 AI 标签改为唤起 dock + 预置上下文；删掉自建对话实现 | 低，可单独发 | 部分 |
+| B | 回答下方的动作区（建工单 / 提自愈 / 关联变更），全部复用既有接口 + 审批 | 中 | ✅ 完成 |
+| C | 提示模板与上下文构建归一；两侧 run 追踪落同一张表 | 中，纯后端 | 部分 |
+| D | 客观回验回流记忆（工单解决 / 自愈 Verify → memory.verified） | 中 | ✅ 完成 |
 
 建议顺序 A → B → D → C：A 立刻消除「该用哪个」的困惑，B 让闭环第一次真正闭上，
 D 让它自我改进，C 是内部整洁度，收益最慢。
+
+### 落地记录（2026-08-16）
+
+**B 已完成**——两侧控制台都能把结论一键转成动作：
+
+- 后端 `cmd/server/ai_followup.go`：`POST /api/v1/ai/followup` 执行 create_ticket /
+  add_incident_note / link_change；propose_remediation 是纯导航，仍进既有审批流。
+  正文一律取 `AIRun.Answer` 服务端原文，客户端只能给标题这类短标签。
+- 动作区由 `emitAIFollowupActions` 以 SSE `action` 帧下发，格式与工具产出的
+  `_ui_actions` 一致，前端不需要第二套解析；`opsAllowedUI` 白名单同步放行。
+- 门控：只读角色不给按钮，无 run_id 不给，回答短于 80 字不给（避免寒暄挂满按钮）。
+- `persistAIRun` 改为所有 kind 都进热缓存——PG 落库是异步的，而按钮就挂在刚吐完的
+  回答下面，只缓存 assist 会让 Hermes 的动作随机撞上「run 已过期」。
+- 前端：经典控制台 `web/js/sre.js`（出厂 UI）+ Vue 侧 `ai-chat-actions.ts` /
+  `AiChatWidgets.vue`；会话可绑定 `incident_id`，绑了才出现事件级三个动作。三语齐备。
+
+**D 已完成**——`cmd/server/ai_followup_learn.go`，接的是两个不需要人表态的客观信号：
+
+| 信号 | 触发点 | 回流 |
+|---|---|---|
+| 由 AI 结论建出的工单被解决/关闭 | `handleUpdateTicket` | 结论作为 **verified** `resolution` 记忆入库（source `ai_run:<id>`）并强化 |
+| 自愈回验 `Verify == "cleared"` | `remediationManager.onVerify` | 剧本经验升格 verified + 强化；事件诊断记忆标记 verified |
+| 自愈回验 `still_firing` | 同上 | 剧本经验与事件诊断按 `penalizeUnhelpful` 下沉——跑得完但修不好的剧本必须在检索里降权 |
+
+- 工单靠新增的 `Ticket.AIRunID` 找回来源；该字段**服务端专用**，`Create` 会清掉客户端
+  传来的值，否则任何人都能声称 AI 出处，把任意结论刷成 verified。
+- 记忆只在**回验之后**才写，不在建工单那一刻写：那时还没有任何证据说明结论是对的。
+  采纳本身另记为 `applied` 反馈（`recordAIFollowupAdoption`），只强化、不入库。
+
+**C 的一半已经是现状**：`/ai/assist`（`ai_orchestrator.go`）与 `/hermes/chat`
+（`sre_api.go`）都已 `persistAIRun` 落同一张 `ai_runs`，成本与调用统计本就对得齐。
+剩下的只有「提示模板与上下文构建归一」（`/ai/assist` 没用上 `sreyun.go` 的热加载模板）。
+
+**A 的剩余部分**：Vue `SreView` 的「AI 助手」标签仍是自建对话实现。注意 Vue 控制台
+自 v0.19.61 起已不随产品发布（见 CLAUDE.md），这一条只影响仓库整洁度，不影响用户所见。
+经典控制台侧本就只有一个 AI 对话入口，已通过事件详情的「AI 对话（本事件）」带上下文唤起。
 
 ## 五、明确不做
 

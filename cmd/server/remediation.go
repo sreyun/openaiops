@@ -114,6 +114,11 @@ type remediationManager struct {
 	// alertActive answers "is that alert still firing?" — the observation half of
 	// the loop. Nil disables verification (runs simply carry no Verify value).
 	alertActive func(alertKey string) bool
+	// onVerify fires once the verification window closes, carrying the run with its
+	// final Verify verdict. This is the only **objective** outcome the platform has
+	// about a remediation, so it is what feeds the learning loop — see
+	// Server.learnFromRemediationVerify.
+	onVerify func(run RemediationRun)
 	// verifyAfter overrides remediationVerifyDelay in tests.
 	verifyAfter time.Duration
 }
@@ -459,6 +464,10 @@ func (m *remediationManager) verifyRun(runID int64) {
 	if verdict == "still_firing" && m.onNotify != nil {
 		m.onNotify("critical", "自动修复未生效："+name,
 			"主机 "+hostname+" 的告警在修复剧本执行后仍在触发，需要人工介入。", incID)
+	}
+	// 回验结论回流学习闭环：这是「这条自愈到底有没有用」唯一不靠人点赞的答案。
+	if m.onVerify != nil {
+		m.onVerify(cp)
 	}
 }
 
