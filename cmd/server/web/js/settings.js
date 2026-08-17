@@ -727,18 +727,23 @@ async function loadAgentAutoUpdateJobs() {
   if (!box) return;
   let jobs;
   try {
-    jobs = await fetch(`${API}/agents/update/jobs?limit=5`, { credentials: "same-origin" }).then(r => r.json());
+    // limit 必须远大于「几条任务」：自动升级是**一台主机一个 job**，limit=5 时这张表
+    // 只装得下 5 台机器，一支二十台的机队里剩下的十五台连行都不会有——而那正是「谁没升上去」
+    // 唯一的答案所在。
+    jobs = await fetch(`${API}/agents/update/jobs?limit=60`, { credentials: "same-origin" }).then(r => r.json());
   } catch (e) {
     box.innerHTML = `<div class="hint" style="margin-top:8px">最近任务不可用（${esc(String(e.message || e))}）</div>`;
     return;
   }
-  const list = Array.isArray(jobs) ? jobs : [];
+  // 服务端返回的是 {"jobs": [...]}，不是裸数组。把它当数组读，这张表就永远是空的——
+  // 恰好又长得跟「最近没有升级任务」一模一样，于是升级失败与从未升级在屏幕上无从分辨。
+  const list = Array.isArray(jobs) ? jobs : (Array.isArray(jobs && jobs.jobs) ? jobs.jobs : []);
   if (!list.length) {
     box.innerHTML = `<div class="hint" style="margin-top:8px">最近没有升级任务（自动升级未触发，或所有主机已是目标版本）</div>`;
     return;
   }
   const rows = [];
-  list.slice(0, 5).forEach(j => {
+  list.forEach(j => {
     (j.hosts || []).forEach(h => {
       const bad = h.status === "failed" || h.status === "pending_verify";
       rows.push(`<tr class="${bad ? "agent-job-row-bad" : ""}">
@@ -755,10 +760,13 @@ async function loadAgentAutoUpdateJobs() {
     box.innerHTML = `<div class="hint" style="margin-top:8px">最近任务里没有主机记录</div>`;
     return;
   }
+  const shown = rows.slice(0, 200);
+  const more = rows.length > shown.length
+    ? `<div class="hint">另有 ${rows.length - shown.length} 条更早的记录未显示</div>` : "";
   box.innerHTML = `<div class="agent-auto-skips-title">最近的升级任务（每台主机的真实结果）</div>
     <div style="overflow:auto;max-height:280px"><table class="agent-auto-skips-tbl">
     <thead><tr><th>主机</th><th>状态</th><th>方式</th><th>版本</th><th>消息</th><th>时间</th></tr></thead>
-    <tbody>${rows.join("")}</tbody></table></div>`;
+    <tbody>${shown.join("")}</tbody></table></div>${more}`;
 }
 
 function normalizeInstallServerURL(u) {

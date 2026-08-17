@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -12,7 +13,9 @@ import (
 )
 
 const (
-	agentUpdateMaxJobs     = 50
+	// 自动升级是一台主机一个 job：50 个槽位在二十台的机队上只够两三轮，历史刚好在
+	// 「昨晚到底怎么了」还没被问出口之前就被冲掉。单个 job 只有几百字节，放宽很便宜。
+	agentUpdateMaxJobs     = 400
 	agentUpdateConcurrency = 3
 	agentUpdateTimeoutSec  = 600
 	agentUpdateMaxRetries  = 2
@@ -92,22 +95,41 @@ func newAgentUpdateManager() *agentUpdateManager {
 	}
 }
 
+// put stores a job, evicting the oldest **finished** one when over cap.
+//
+// 「按 CreatedAt 淘汰最老的一个」在自动升级下是个陷阱：自动路径是**一台主机一个 job**，
+// 一支二十台的机队几轮就能把 50 个槽位填满，于是**还在跑的 job 被挤掉**。后果不是少一条
+// 历史记录，而是三件事同时发生：
+//
+//   - hostPendingAgentUpdate 再也看不见它 → 跳过原因从 pending_job 退化成 cooldown，
+//     操作台上写着「冷却期内」，可实际上那台机器正躺在一个没人看得见的 job 里换版；
+//   - markHostUpdateVerified / markHostUpdateVerifyFailed 按 job.ID 回表，查不到就静默
+//     什么都不做 → 这台主机的真实结果（含 Windows 助手日志尾巴）永远不会出现在
+//     「最近的升级任务」表里；
+//   - finalizeAgentUpdateJobWhenVerified 查到 nil 当作「没有待校验主机」，立刻收摊。
+//
+// 也就是说，机队越大、越需要看清楚的时候，证据丢得越干净。所以：只淘汰已经收摊（done）
+// 的 job；若一个 done 的都没有，宁可暂时超出上限，也不能让一个活着的 job 凭空消失。
 func (m *agentUpdateManager) put(job *agentUpdateJob) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.jobs[job.ID] = job
-	if len(m.jobs) > agentUpdateMaxJobs {
+	for len(m.jobs) > agentUpdateMaxJobs {
 		var oldest string
 		var oldestTS int64 = 1<<63 - 1
 		for id, j := range m.jobs {
+			if j == nil || j.Status != "done" || id == job.ID {
+				continue
+			}
 			if j.CreatedAt < oldestTS {
 				oldestTS = j.CreatedAt
 				oldest = id
 			}
 		}
-		if oldest != "" && oldest != job.ID {
-			delete(m.jobs, oldest)
+		if oldest == "" {
+			return // 全都还活着：超出上限也不动它们
 		}
+		delete(m.jobs, oldest)
 	}
 }
 
@@ -142,13 +164,8 @@ func (m *agentUpdateManager) list(limit int) []*agentUpdateJob {
 	for _, j := range m.jobs {
 		out = append(out, cloneAgentUpdateJob(j))
 	}
-	for i := 0; i < len(out); i++ {
-		for j := i + 1; j < len(out); j++ {
-			if out[j].CreatedAt > out[i].CreatedAt {
-				out[i], out[j] = out[j], out[i]
-			}
-		}
-	}
+	// 冒泡换成 sort：槽位从 50 放宽到 400 之后，每次轮询都跑一遍 O(n²) 没有道理。
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt > out[j].CreatedAt })
 	if limit > 0 && len(out) > limit {
 		out = out[:limit]
 	}
@@ -189,25 +206,30 @@ func (m *agentUpdateManager) tryMarkInFlight(hostID string) bool {
 // tryMarkInFlightOrSoftRetry allows a second enqueue when the host is still
 // version-behind after a soft window (previous "restart scheduled" often failed
 // silently on Windows). Within softRetrySec it still blocks duplicates.
-func (m *agentUpdateManager) tryMarkInFlightOrSoftRetry(hostID string, stillBehind bool) bool {
+//
+// 第二个返回值是**还要等多少秒**，给跳过原因用。原来那条理由写死「入队后 1800s 内不
+// 重复触发」，而一台版本还落后的主机走的是 360s 的软重试窗——屏幕上的数字比现实大五倍，
+// 于是「等一会儿就好」和「这台已经躺了半小时」看起来一模一样。数字要么是真的，要么
+// 不如不写。
+func (m *agentUpdateManager) tryMarkInFlightOrSoftRetry(hostID string, stillBehind bool) (bool, int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := time.Now().Unix()
 	if ts, ok := m.inFlight[hostID]; ok {
 		age := now - ts
 		if age < agentUpdateSoftRetrySec {
-			return false
+			return false, agentUpdateSoftRetrySec - age
 		}
 		if stillBehind {
 			m.inFlight[hostID] = now
-			return true
+			return true, 0
 		}
 		if age < agentUpdateInFlightSec {
-			return false
+			return false, agentUpdateInFlightSec - age
 		}
 	}
 	m.inFlight[hostID] = now
-	return true
+	return true, 0
 }
 
 func (m *agentUpdateManager) clearInFlight(hostID string) {
@@ -341,13 +363,7 @@ func (m *agentUpdateManager) skipSnapshot(s *Server) []agentUpdateSkipView {
 		}
 		out = append(out, v)
 	}
-	for i := 0; i < len(out); i++ {
-		for j := i + 1; j < len(out); j++ {
-			if out[j].At > out[i].At {
-				out[i], out[j] = out[j], out[i]
-			}
-		}
-	}
+	sort.Slice(out, func(i, j int) bool { return out[i].At > out[j].At })
 	return out
 }
 
@@ -1359,8 +1375,10 @@ func (s *Server) decideAutoUpdate(h *Host) (bool, string, string) {
 	}
 	// Soft-retry: if still behind after softRetrySec, re-queue (Windows helper
 	// historically died with the service Job before swap completed).
-	if !s.agentUpdates.tryMarkInFlightOrSoftRetry(h.ID, true) {
-		return false, "cooldown", fmt.Sprintf("升级冷却期内（入队后 %ds 内不重复触发）", agentUpdateInFlightSec)
+	if ok, waitSec := s.agentUpdates.tryMarkInFlightOrSoftRetry(h.ID, true); !ok {
+		return false, "cooldown", fmt.Sprintf(
+			"上一次升级动作还在生效期内：还要 %s 才会重试（版本仍落后的主机走 %ds 软重试窗，"+
+				"升级过程中这个窗口会被持续续期）", (time.Duration(waitSec) * time.Second).String(), agentUpdateSoftRetrySec)
 	}
 	return true, "", base
 }

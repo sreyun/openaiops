@@ -40,7 +40,7 @@ func TestHoldHostInFlightBlocksSoftRetryWhileWorking(t *testing.T) {
 
 	release := s.holdHostInFlight(host)
 	time.Sleep(80 * time.Millisecond) // 足够跑过好几个心跳
-	if s.agentUpdates.tryMarkInFlightOrSoftRetry(host, true) {
+	if ok, _ := s.agentUpdates.tryMarkInFlightOrSoftRetry(host, true); ok {
 		t.Fatal("升级仍在进行中却被软重试放行了：同一台主机会并发跑两次换版")
 	}
 	if ts, ok := inFlightStamp(t, s.agentUpdates, host); !ok || ts <= stale {
@@ -51,7 +51,7 @@ func TestHoldHostInFlightBlocksSoftRetryWhileWorking(t *testing.T) {
 	// 松手之后，同样陈旧的时间戳必须重新允许软重试——否则修好并发反而变成拒绝升级。
 	setInFlightStamp(s.agentUpdates, host, stale)
 	time.Sleep(30 * time.Millisecond)
-	if !s.agentUpdates.tryMarkInFlightOrSoftRetry(host, true) {
+	if ok, _ := s.agentUpdates.tryMarkInFlightOrSoftRetry(host, true); !ok {
 		t.Fatal("hold 释放后仍在挡软重试：主机会被白白冻结")
 	}
 }
