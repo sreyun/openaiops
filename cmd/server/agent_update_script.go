@@ -388,13 +388,48 @@ echo "legacy agent update ok sha=$ACTUAL"
 // 它自己就是该任务的运行实例，`schtasks /End` 会连整个任务进程树一起终止——而历史上
 // 那行调用恰好落在停服务、换二进制之前，于是每一次救援都死在那里：主机停在旧版本，
 // 助手日志停在 "staging --version"，与「Windows 无法自动升级」的症状完全一致。清理上
-// 一轮吊死的实例只能由引导脚本在 Start-ScheduledTask 之前做。
+// 一轮吊死的实例只能由引导脚本在 schtasks /Run 之前做。
 const windowsUpdateHelperPS = `param([string]$Server,[string]$Bin,[string]$Sha)
 $ErrorActionPreference='Stop'
+$ProgressPreference='SilentlyContinue'
 $helperPid = $PID
+$Started = Get-Date
 $Work = Split-Path -Parent $PSCommandPath
 $Log = Join-Path $Work 'aiops-agent-update.log'
 function Write-Log($m){ try{ Add-Content -LiteralPath $Log -Value ("[{0}] {1}" -f (Get-Date -Format o), $m) -Encoding UTF8 }catch{} }
+# The result file is this helper's only channel back to the panel, so it is
+# written before anything that can fail. $Dir is unknown until the install is
+# resolved -- the copy beside the exe is added once it is.
+$Dir = $null
+function Write-Result($m){
+  $targets = @(Join-Path $Work 'aiops-agent-update.result')
+  if($Dir){ $targets += (Join-Path $Dir 'aiops-agent-update.result') }
+  foreach($p in $targets){ try{ Set-Content -LiteralPath $p -Value $m -Encoding UTF8 }catch{} }
+}
+# One swap at a time, fleet-wide-proof: the bootstrap tries WMI, then a scheduled
+# task, then cmd, and moves on to the next one when the previous did not produce
+# a result marker within 12s. On a slow host that check can time out while the
+# first helper is merely starting up, and two helpers fighting over the same
+# locked PE is worse than no update at all. A named global mutex makes the loser
+# exit at once; the winner still writes the marker the bootstrap is waiting for,
+# so the retry costs nothing. An abandoned mutex (previous helper killed
+# mid-swap) grants ownership -- that is exactly when a retry SHOULD proceed.
+$Mutex = $null
+$owned = $true
+try {
+  $Mutex = New-Object Threading.Mutex($false,'Global\AIOpsAgentUpdateHelper')
+  try { $owned = $Mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $owned = $true }
+} catch { $owned = $true }
+if(-not $owned){
+  # Still write the marker: the bootstrap wiped it and is now waiting for one, and
+  # "a swap is already in progress" is a perfectly good answer to give it. Staying
+  # silent here would make the bootstrap declare "helper never started" and fail an
+  # update that is in fact running.
+  Write-Log 'another update helper holds the lock; this instance exits'
+  Write-Result ("running " + (Get-Date -Format o) + " stage=locked another helper is mid-swap")
+  exit 0
+}
+Write-Result ("running " + (Get-Date -Format o) + " stage=start pid=" + $helperPid)
 # Panels published on a real domain are served over HTTPS, so every download in
 # this helper is a TLS handshake that has to succeed on hosts nobody has touched
 # in years. Two things break there and neither is a server problem:
@@ -635,15 +670,13 @@ function Restart-Agent {
   for($i=0;$i -lt 20;$i++){ if(Test-Running){ return $true }; Start-Sleep -Seconds 2 }
   return $false
 }
-function Write-Result($m){
-  foreach($p in @((Join-Path $Work 'aiops-agent-update.result'), (Join-Path $Dir 'aiops-agent-update.result'))){
-    if(-not $p){ continue }
-    try{ Set-Content -LiteralPath $p -Value $m -Encoding UTF8 }catch{}
-  }
-}
 $SvcCmd = Get-AgentServiceCommandLine
 $Exe = Resolve-AgentExe
-if(-not $Exe){ Write-Log 'FATAL: agent exe not found (service ImagePath and known dirs)'; exit 1 }
+if(-not $Exe){
+  Write-Log 'FATAL: agent exe not found (service ImagePath and known dirs)'
+  Write-Result 'fail agent exe not found (no aiops service ImagePath, and none of the known install dirs has the binary)'
+  exit 1
+}
 $Dir = Split-Path -Parent $Exe
 $Bak = $Exe + '.bak'
 $New = Join-Path $Dir '.aiops-agent.update.exe'
@@ -654,10 +687,7 @@ if(-not $Cfg){
 $swapped = $false
 try {
   Write-Log ("helper start pid=$helperPid exe=$Exe cfg=$Cfg bin=$Bin")
-  Write-Result ("running " + (Get-Date -Format o))
-  # Give the exec channel time to hand the bootstrap's output back to the server
-  # before the agent that carries that channel is stopped.
-  Start-Sleep -Seconds 3
+  Write-Result ("running " + (Get-Date -Format o) + " stage=resolved exe=" + $Exe)
   Enable-ModernTls
   # Keep only what a hex digest can contain, so a malformed argument degrades to
   # "unpinned" (strict TLS, digest fetched over the wire) instead of pinning the
@@ -678,6 +708,15 @@ try {
   $probe = Invoke-VersionProbe $New
   if($probe.ExitCode -ne 0){ Remove-Item $New -Force -ErrorAction SilentlyContinue; throw ("staging not runnable (exit="+$probe.ExitCode+"): "+$probe.Output) }
   Write-Log ("staging --version: " + $probe.Output)
+  Write-Result ("running " + (Get-Date -Format o) + " stage=staged sha=" + $Actual)
+  # Everything above is harmless; everything below stops the agent -- and the
+  # agent is what carries the exec channel the bootstrap is still writing its
+  # result on. Killing it early loses the bootstrap's output, which is the only
+  # thing that tells the panel WHICH spawn path brought this helper up. Hold off
+  # until the bootstrap has had its full marker window (12s) plus slack. The wait
+  # is measured from helper start, so a slow download has already paid for it.
+  $quiet = 20 - ((Get-Date) - $Started).TotalSeconds
+  if($quiet -gt 0){ Start-Sleep -Seconds ([int][Math]::Ceiling($quiet)) }
   Clear-StuckSelfUpdateTask
   foreach($name in $svcNames){
     if(Get-Service $name -ErrorAction SilentlyContinue){
@@ -690,6 +729,7 @@ try {
   Start-Sleep -Seconds 1
   Stop-AgentProcesses
   if(Test-Path -LiteralPath $Exe){ Copy-Item -LiteralPath $Exe -Destination $Bak -Force -ErrorAction SilentlyContinue }
+  Write-Result ("running " + (Get-Date -Format o) + " stage=swap")
   $moved=$false
   for($i=0;$i -lt 15;$i++){
     try{ Move-Item -Force -LiteralPath $New -Destination $Exe; $moved=$true; break }catch{
@@ -804,7 +844,7 @@ func legacyWindowsAgentUpdateScript(server, bin, sha string) string {
 	// 它还负责一件助手自己做不了的事：`schtasks /End /TN AIOpsAgentLegacyUpdate`。
 	// 助手正是以该任务实例的身份运行的，在助手内部调用 /End 等于自杀（历史上就死在
 	// 换二进制之前）；而计划任务默认 MultipleInstances=IgnoreNew，上一轮吊死的实例不
-	// 清掉，Start-ScheduledTask 会静默地什么都不做。所以陈旧实例只能在这里、在拉起新
+	// 清掉，schtasks /Run 会静默地什么都不做。所以陈旧实例只能在这里、在拉起新
 	// 实例之前清理。
 	//
 	// 长度：本文经 base64(UTF-16LE) 膨胀 8/3 倍后要塞进 cmd.exe 的 8191 字符硬上限，所以
@@ -813,6 +853,13 @@ func legacyWindowsAgentUpdateScript(server, bin, sha string) string {
 	// `[wmiclass]` 而不是 Invoke-CimMethod（短 67 字符，且 PowerShell 2.0 上也有；本文始终
 	// 由绝对路径的 Windows PowerShell 执行，不会落到没有 [wmiclass] 的 pwsh 上）。预算见
 	// windowsUpdateBootstrapMaxLen；新增逻辑请优先放进服务端下发的助手正文。
+	//
+	// 压缩成单字母变量名要付一个代价，这里踩过：**PowerShell 的变量名不区分大小写**。
+	// 原来的 `$a` 存助手摘要、`$A` 存助手启动参数，是同一个变量；后写的参数把摘要冲掉，
+	// 于是成功那行打出来的是 `helper=-nop -noni -`（参数串的前 12 个字符），而不是摘要。
+	// 校验早在赋值之前完成，所以没有安全问题，但唯一能证明"下发的是哪一份助手"的字段
+	// 变成了噪声。函数参数同理：`function Sp($m,$b)` 里的 `$m`/`$b` 会在函数体内遮蔽外面的
+	// `$M`/`$B`。凡在本文里新起变量，先通读全文确认没有同名（忽略大小写）的。
 	//
 	// 拉起助手的顺序是 WMI → 计划任务 → cmd start，**WMI 必须排在计划任务前面**。
 	//
@@ -828,35 +875,52 @@ func legacyWindowsAgentUpdateScript(server, bin, sha string) string {
 	// 等于**从结构上**绕开电池策略，而不是靠加参数去补，一个字符的预算都不用花。
 	// 计划任务与 cmd start 保留为 WMI 被安全基线禁用时的退路。
 	//
+	// **但「拉起来了」不等于「跑起来了」，而这条区别正是现网那条 pending_verify 的成因。**
+	// 三条路都会「成功」得毫无意义：Win32_Process.Create 返回 0 只说明创建了进程，
+	// 计划任务被电池策略挡住时 /Run 照样返回成功，cmd start 更是拉起就走。原来的引导
+	// 只要有一条路没抛异常就打印 "legacy agent update ok"，于是服务端把它当成"已下发、
+	// 等版本号"，5 分钟后超时，操作台上写的是「重启已排程但版本没跟上」——一句既不知道
+	// 助手到底有没有起来、也不知道是哪条路把它拉起来的空话。
+	//
+	// 现在每拉起一次就等助手自己写下 result 标记（助手一进主流程就写 "running"，见
+	// windowsUpdateHelperPS），最多等 12 秒；等不到就换下一条路。三条都等不到就 throw，
+	// 让这次升级**当场以真实原因失败**，而不是伪装成 ok 再让服务端去猜。成功时把
+	// via=wmi|task|cmd 一并打出来——哪条路在这台机器上可用，是下一次排障的起点。
+	//
+	// 计划任务这一路改用 schtasks.exe /Create /Run（而不是 Register-ScheduledTask 系列
+	// cmdlet）有三个理由：ScheduledTasks 模块在 Server 2008 R2/2012 上根本不存在，那批机器
+	// 过去等于只有 WMI 一条路；模块首次加载会往 stderr 吐一大段 CLIXML 进度记录，把
+	// exec 输出里真正有用的那一行挤出可视范围（现网原样撞上过）；而且 CLI 写法更短。
+	// 任务动作指向一个一次性生成的 .cmd，从而绕开 /TR 的嵌套引号地狱。
+	//
 	// TLS：这段引导只下载助手脚本一个文件，而它的 SHA-256（$H）在服务端生成时就写死在
 	// 本文里，经 Agent 已鉴权、已验证证书的 exec 通道送达。因此严格校验失败时降级重试
 	// 一次是安全的——摘要对不上照样 throw。老 Windows 的根证书库里没有 ISRG Root X1
 	// 这类新根，HTTPS 域名部署下这一步曾是整条兜底链路的第一个死点。回调只影响本进程，
 	// 而本进程紧接着就退出了；真正下载二进制的助手在另一个进程里，自行判断是否降级。
-	ps := fmt.Sprintf(`$ErrorActionPreference='Stop'
+	ps := fmt.Sprintf(`$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'
 foreach($v in @(3072,12288)){try{[Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor $v}catch{}}
 $S='%s';$B='%s';$D='%s';$H='%s';$T='AIOpsAgentLegacyUpdate';$N='aiops-agent-update'
 $R="$env:SystemRoot\System32"
 $W="$env:ProgramData\$N"
 try{md $W -Force|Out-Null}catch{$W="$env:TEMP\$N";md $W -Force|Out-Null}
-$F="$W\$N.ps1";$U="$S%s"
-rm $F -Force -EA 0
+$F="$W\$N.ps1";$U="$S%s";$Mk="$W\$N.result";$Cm="$W\$N.cmd"
+rm $F,$Mk -Force -EA 0
 try{(New-Object Net.WebClient).DownloadFile($U,$F)}catch{[Net.ServicePointManager]::ServerCertificateValidationCallback={$true};(New-Object Net.WebClient).DownloadFile($U,$F)}
 $sha=[Security.Cryptography.SHA256]::Create();$fs=[IO.File]::OpenRead($F)
-try{$a=([BitConverter]::ToString($sha.ComputeHash($fs))).Replace('-','').ToLowerInvariant()}finally{$fs.Dispose();$sha.Dispose()}
-if($a -ne $H){rm $F -Force -EA 0;throw "update helper sha256 mismatch (want $H got $a)"}
+try{$hx=([BitConverter]::ToString($sha.ComputeHash($fs))).Replace('-','').ToLowerInvariant()}finally{$fs.Dispose();$sha.Dispose()}
+if($hx -ne $H){rm $F -Force -EA 0;throw "update helper sha256 mismatch (want $H got $hx)"}
 $P="$R\WindowsPowerShell\v1.0\powershell.exe"
-$A='-nop -noni -ep Bypass -File "'+$F+'" -Server "'+$S+'" -Bin "'+$B+'" -Sha "'+$D+'"'
+$Ar='-nop -noni -ep Bypass -File "'+$F+'" -Server "'+$S+'" -Bin "'+$B+'" -Sha "'+$D+'"'
+Set-Content $Cm ('"'+$P+'" '+$Ar)
 try{[void](& "$R\schtasks.exe" /End /TN $T 2>$null)}catch{}
-$k=$false
-try{if(([wmiclass]'Win32_Process').Create('"'+$P+'" '+$A).ReturnValue -eq 0){$k=$true}}catch{}
-if(-not $k){try{
- $q=@{TaskName=$T;Action=(New-ScheduledTaskAction -Execute $P -Argument $A);Trigger=(New-ScheduledTaskTrigger -Once -At ((Get-Date).AddYears(10)));Force=$true}
- try{Register-ScheduledTask @q -Principal (New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest)|Out-Null}catch{Register-ScheduledTask @q|Out-Null}
- Start-ScheduledTask -TaskName $T -EA Stop;$k=$true
-}catch{}}
-if(-not $k){Start-Process -FilePath "$R\cmd.exe" -ArgumentList ('/c start "" /b "'+$P+'" '+$A) -WindowStyle Hidden}
-Write-Output "legacy agent update ok helper=$($a.Substring(0,12)) log=$W\$N.log"
+$k=''
+function Sp($tg,$bk){if($k){return};try{&$bk}catch{return};for($i=0;$i -lt 12;$i++){if(Test-Path $Mk){$script:k=$tg;return};sleep 1}}
+Sp 'wmi' {if(([wmiclass]'Win32_Process').Create('"'+$P+'" '+$Ar).ReturnValue){throw 'x'}}
+Sp 'task' {[void](& "$R\schtasks.exe" /Create /TN $T /TR $Cm /SC ONCE /ST 23:59 /RU SYSTEM /F);if($LASTEXITCODE){throw 'x'};[void](& "$R\schtasks.exe" /Run /TN $T)}
+Sp 'cmd' {Start-Process $Cm -WindowStyle Hidden}
+if(-not $k){throw "helper never started (wmi/task/cmd); see $W\$N.log"}
+Write-Output "legacy agent update ok helper=$($hx.Substring(0,12)) via=$k log=$W\$N.log"
 `,
 		strings.ReplaceAll(server, "'", "''"),
 		strings.ReplaceAll(bin, "'", "''"),

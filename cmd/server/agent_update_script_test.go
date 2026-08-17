@@ -159,11 +159,25 @@ func TestLegacyWindowsBootstrapDetachesBeforeTouchingTheAgent(t *testing.T) {
 			t.Fatalf("detached helper missing %q", want)
 		}
 	}
-	// Detach ladder: SYSTEM scheduled task → WMI create → cmd start /b.
-	for _, want := range []string{"Register-ScheduledTask", "AIOpsAgentLegacyUpdate", "Win32_Process", "start \"\" /b"} {
+	// Detach ladder: WMI create → SYSTEM scheduled task → launcher .cmd.
+	//
+	// schtasks.exe replaced the ScheduledTasks cmdlets on purpose: that module does
+	// not exist on Server 2008 R2 / 2012 (leaving those hosts with WMI as their only
+	// path), and importing it writes a CLIXML progress blob to stderr that buries the
+	// one line of this script anybody reads.
+	for _, want := range []string{"Win32_Process", "schtasks.exe", "/Create", "/Run", "AIOpsAgentLegacyUpdate"} {
 		if !strings.Contains(inline, want) {
 			t.Fatalf("bootstrap missing detach mechanism %q", want)
 		}
+	}
+	if strings.Contains(inline, "Register-ScheduledTask") || strings.Contains(inline, "New-ScheduledTaskAction") {
+		t.Fatal("ScheduledTasks cmdlets are back: they are absent on 2008R2/2012 and their module import pollutes stderr with CLIXML")
+	}
+	// WMI must stay ahead of the scheduled task: task scheduler policy defaults
+	// (DisallowStartIfOnBatteries) make /Run a silent no-op on battery-backed hosts,
+	// and Win32_Process.Create has no such layer.
+	if wmiAt, taskAt := strings.Index(inline, "Win32_Process"), strings.Index(inline, "/Create"); wmiAt < 0 || taskAt < 0 || wmiAt > taskAt {
+		t.Fatal("WMI must be tried before the scheduled task")
 	}
 	// The server keys pending_verify off this exact phrase.
 	if !strings.Contains(inline, "legacy agent update ok") {
@@ -191,15 +205,15 @@ func TestWindowsUpdateHelperNeverEndsItsOwnScheduledTask(t *testing.T) {
 		}
 	}
 	// Scheduled tasks default to MultipleInstances=IgnoreNew, so a previous run
-	// left hanging would make Start-ScheduledTask a silent no-op.
+	// left hanging would make the /Run a silent no-op.
 	inline := decodeLegacyWindowsPS(t, legacyWindowsAgentUpdateScript("https://mon.example", "aiops-agent.exe", testPinSHA))
 	if !strings.Contains(inline, "/End") || !strings.Contains(inline, "$T") {
 		t.Fatal("bootstrap must end a stale instance of its own task before starting a new one")
 	}
 	endAt := strings.Index(inline, "/End")
-	startAt := strings.Index(inline, "Start-ScheduledTask")
+	startAt := strings.Index(inline, "/Run /TN")
 	if startAt < 0 || endAt > startAt {
-		t.Fatal("the stale-instance /End must come before Start-ScheduledTask, not after")
+		t.Fatal("the stale-instance /End must come before the /Run, not after")
 	}
 }
 

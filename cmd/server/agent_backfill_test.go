@@ -68,8 +68,8 @@ func TestLegacyWindowsBootstrapPrefersWMIOverScheduledTask(t *testing.T) {
 		strings.Repeat("ab", 32))
 	ps := decodeLegacyWindowsPS(t, cmd)
 	wmi := strings.Index(ps, "Win32_Process")
-	task := strings.Index(ps, "Register-ScheduledTask")
-	cmdStart := strings.Index(ps, "cmd.exe")
+	task := strings.Index(ps, "/Create /TN")
+	cmdStart := strings.Index(ps, "Start-Process $Cm")
 	if wmi < 0 || task < 0 || cmdStart < 0 {
 		t.Fatalf("bootstrap lost one of its three launchers:\n%s", ps)
 	}

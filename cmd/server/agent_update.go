@@ -755,10 +755,24 @@ func (s *Server) markHostUpdateVerified(job *agentUpdateJob, hostID, ver string)
 	}
 }
 
+// markHostUpdateVerifyFailed writes the verdict for "we dispatched an update and
+// the version never moved".
+//
+// 这条路径是 Windows 上最常走到的终点，而它长期是**整张表里唯一不带证据的一条**：
+// legacy 救援分支（rescueWindowsAgentUpdate）会在下判决前把助手日志拉回来，可救援只对
+// method=module 的主机开；凡是已经走过 script 的主机直接落到这里，得到的只有一句
+// 「restart scheduled but agent_version still behind vX（helper may have failed）」——
+// 「可能失败了」正是操作员已经知道的那部分，而真正写着原因的
+// ProgramData\aiops-agent-update\aiops-agent-update.log 就在那台机器上，没人去取。
+// 判决前取一次：此刻主机通常还活着（换版没做成，Agent 还是旧的那个在跑），是最后一个
+// 能问它的时机。
 func (s *Server) markHostUpdateVerifyFailed(job *agentUpdateJob, hostID, target string) {
 	if s.agentUpdates == nil || job == nil {
 		return
 	}
+	// Fetch evidence BEFORE taking the lock: this exec can sit for up to 60s and
+	// every job read (console polling included) goes through the same mutex.
+	evidence := s.windowsUpdateEvidence(s.hostByID(hostID))
 	s.agentUpdates.mu.Lock()
 	defer s.agentUpdates.mu.Unlock()
 	j := s.agentUpdates.jobs[job.ID]
@@ -768,7 +782,8 @@ func (s *Server) markHostUpdateVerifyFailed(job *agentUpdateJob, hostID, target 
 	for _, hr := range j.Hosts {
 		if hr != nil && hr.HostID == hostID && hr.Status == "pending_verify" {
 			hr.Status = "failed"
-			hr.Message = truncateRun("restart scheduled but agent_version still behind "+target+" (helper may have failed; will soft-retry)", 500)
+			hr.Message = truncateRun("restart scheduled but agent_version still behind "+target+
+				" (the update helper never completed the swap; will soft-retry)"+evidence, 1200)
 			hr.Updated = time.Now().Unix()
 			return
 		}
@@ -818,10 +833,25 @@ func (s *Server) windowsUpdateEvidence(h *Host) string {
 		}
 	}
 	out, _, err := s.execCommandOnHost(h, windowsUpdateEvidenceCommand(), 60)
-	if err != nil || strings.TrimSpace(out) == "" {
-		return ""
+	return helperEvidenceSummary(out, err)
+}
+
+// helperEvidenceSummary turns the evidence exec's raw result into the clause
+// appended to a failure verdict.
+//
+// 空输出不是「没有证据」，它本身就是最强的一条证据：助手把 result/log 写在主流程的第一
+// 步，两个文件都不存在就意味着**助手根本没跑起来**——拉起它的那条路（WMI / 计划任务 /
+// cmd）静默失败了。这跟「跑起来了但换版失败」是两种完全不同的故障，需要查的东西也完全
+// 不同，而从前它们都被一句 `return ""` 抹成同样的沉默。
+func helperEvidenceSummary(out string, err error) string {
+	if err != nil {
+		return " | could not read the helper log on the host: " + truncateRun(err.Error(), 120)
 	}
-	return " | host evidence: " + truncateRun(out, 700)
+	if strings.TrimSpace(out) == "" {
+		return ` | no helper log on the host (ProgramData\aiops-agent-update has neither .result nor .log):` +
+			" the helper never started — the spawn path was blocked, not the swap"
+	}
+	return " | host evidence: " + truncateRun(sanitizePowerShellOutput(out), 700)
 }
 
 // rescueWindowsAgentUpdate is the escape hatch for a Windows fleet that cannot
@@ -895,6 +925,7 @@ func (s *Server) rescueWindowsAgentUpdate(job *agentUpdateJob, hostID, target st
 	slog.Warn("Windows Agent 升级助手未完成换版，改用服务端 legacy 脚本救援",
 		"host", hostID, "hostname", h.Hostname, "from", h.AgentVersion, "target", target)
 	out, _, err := s.runLegacyAgentUpdateScriptKind(h, base, true)
+	out = sanitizePowerShellOutput(out)
 	if err != nil {
 		evidence := s.windowsUpdateEvidence(h)
 		s.agentUpdates.mu.Lock()
@@ -907,6 +938,15 @@ func (s *Server) rescueWindowsAgentUpdate(job *agentUpdateJob, hostID, target st
 		s.agentUpdates.clearInFlight(hostID)
 		return true
 	}
+	// 救援脚本已经下发成功，接下来是最长 5 分钟的静默等待。把引导脚本说了什么写回行里
+	// （现在它会带上 via=wmi|task|cmd 与助手日志路径），否则这几分钟里操作台上停留的仍是
+	// 「正在改用 legacy 脚本重试」——一句读不出进展的话。
+	s.agentUpdates.mu.Lock()
+	if hr.Status == "pending_verify" {
+		hr.Message = truncateRun("legacy rescue dispatched, waiting for the version to move: "+out, 700)
+		hr.Updated = time.Now().Unix()
+	}
+	s.agentUpdates.mu.Unlock()
 
 	// The legacy helper is detached too, so verify the same way: by version ack.
 	deadline := time.Now().Add(agentUpdateVerifyWindow)
@@ -1015,6 +1055,10 @@ func (s *Server) executeAgentUpdateHost(job *agentUpdateJob, hr *agentUpdateHost
 			out, lastKind, lastErr = s.runLegacyAgentUpdateScriptKind(h, scriptBase, job.Force)
 		}
 		if lastErr == nil {
+			// Windows helpers run under PowerShell, whose non-stdout records arrive as
+			// a CLIXML blob on stderr. Left alone it eats the whole message budget and
+			// the one useful line never reaches the console. See sanitizePowerShellOutput.
+			out = sanitizePowerShellOutput(out)
 			msg := truncateRun(out, 500)
 			// Windows helpers (module + legacy script) often report success before the
 			// new binary is running — keep pending_verify until agent_version catches up.
@@ -1043,7 +1087,7 @@ func (s *Server) executeAgentUpdateHost(job *agentUpdateJob, hr *agentUpdateHost
 	if lastErr != nil {
 		msg = lastErr.Error()
 	}
-	if out != "" {
+	if out = sanitizePowerShellOutput(out); out != "" {
 		msg = truncateRun(msg+": "+out, 500)
 	}
 	s.agentUpdates.setHostResult(hr, "failed", method, msg)

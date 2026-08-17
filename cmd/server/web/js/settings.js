@@ -746,13 +746,17 @@ async function loadAgentAutoUpdateJobs() {
   list.forEach(j => {
     (j.hosts || []).forEach(h => {
       const bad = h.status === "failed" || h.status === "pending_verify";
+      // 每台主机的状态是各自演进的：一个 job 里，A 主机 30 秒就成功，B 主机 20 分钟后
+      // 才判定失败。整列都印 job 的创建时间，会让「20 分钟前判的失败」看起来比「刚刚
+      // 进入 pending 的另一台」还新，读表的人据此判断先后就是错的。
+      const ts = h.updated_at || j.created_at;
       rows.push(`<tr class="${bad ? "agent-job-row-bad" : ""}">
         <td class="mono">${esc(h.hostname || (h.host_id || "").slice(0, 8))}</td>
         <td>${esc(h.status || "-")}</td>
         <td>${esc(h.method || "-")}</td>
         <td class="mono">${esc(h.from_version || "-")}→${esc(j.target_version || "-")}</td>
         <td style="max-width:520px;word-break:break-all;white-space:pre-wrap">${esc(String(h.message || ""))}</td>
-        <td class="mono">${j.created_at ? esc(fmtDateTime(j.created_at)) : "-"}</td>
+        <td class="mono">${ts ? esc(fmtDateTime(ts)) : "-"}</td>
       </tr>`);
     });
   });
