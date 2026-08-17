@@ -291,10 +291,15 @@ async function enrichSharedForecast(samples, allSeriesDefs, opts) {
  */
 function sliceForecastForChart(enriched, chartSeriesDefs, originalSamples) {
   if (!enriched || enriched.stale) return null;
-  const histDefs = (chartSeriesDefs || []).filter(s => !s.kind || s.kind === "history");
-  const keys = new Set(histDefs.map(s => String(s.key)));
+  // 阈值线（kind:'threshold'）要一起留下，而且**必须保持它自己的 kind**：改写成 history
+  // 会让它变成实线并被当作可预测序列。留下之后它会横跨历史段与预测段——于是"预测曲线
+  // 什么时候越过告警线"直接画在了同一张图上，这正是预测这个功能想回答的问题。
+  const histDefs = (chartSeriesDefs || []).filter(s => !s.kind || s.kind === "history" || s.kind === "threshold");
+  const keys = new Set(histDefs.filter(s => s.kind !== "threshold").map(s => String(s.key)));
   const outSeries = [];
-  for (const s of histDefs) outSeries.push(Object.assign({}, s, { kind: "history" }));
+  for (const s of histDefs) {
+    outSeries.push(s.kind === "threshold" ? Object.assign({}, s) : Object.assign({}, s, { kind: "history" }));
+  }
   const fcSeries = [];
   for (const s of (enriched.series || [])) {
     if (s.kind !== "forecast") continue;

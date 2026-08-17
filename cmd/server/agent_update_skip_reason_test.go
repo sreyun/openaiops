@@ -27,12 +27,22 @@ func putTestHost(srv *Server, h *Host) {
 
 // writeFakeAgentDist drops a Windows artifact into the server's dist dir so the
 // gate gets past no_artifact and reaches the check under test.
+//
+// 内容必须带上 appVersion：真实产物是用 `-X main.appVersion=<ver>` 构建的，版本串就在
+// 二进制里，而 stale_artifact 闸门查的正是这个（见 agentDistCarriesVersion）。写 "fake"
+// 会撞在那道闸门上，测试就再也走不到它真正想测的检查。
 func writeFakeAgentDist(t *testing.T, srv *Server) {
+	t.Helper()
+	writeFakeAgentDistVersion(t, srv, appVersion)
+}
+
+func writeFakeAgentDistVersion(t *testing.T, srv *Server, ver string) {
 	t.Helper()
 	if srv.distDir == "" {
 		t.Fatal("test server has no dist dir")
 	}
-	if err := os.WriteFile(filepath.Join(srv.distDir, "aiops-agent.exe"), []byte("fake"), 0o600); err != nil {
+	body := []byte("MZ fake agent binary built as " + ver + "\n")
+	if err := os.WriteFile(filepath.Join(srv.distDir, "aiops-agent.exe"), body, 0o600); err != nil {
 		t.Fatal(err)
 	}
 }

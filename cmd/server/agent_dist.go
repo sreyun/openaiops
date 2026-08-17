@@ -21,7 +21,11 @@ type agentDistArtifact struct {
 	Size    int64  `json:"size"`
 	SHA256  string `json:"sha256"`
 	Version string `json:"version"`
-	Path    string `json:"-"`
+	// VersionMatch 是「这个文件里真的能找到 Version 这个版本串吗」的答案。
+	// 以前 Version 直接抄 appVersion，等于服务端替产物作证——而 dist 落后一格正是
+	// Windows 机队无限升级循环的成因（见 agentDistCarriesVersion）。
+	VersionMatch bool   `json:"version_match"`
+	Path         string `json:"-"`
 }
 
 var agentDistCatalog = []struct {
@@ -131,6 +135,7 @@ func (s *Server) listAgentDistManifest() []agentDistArtifact {
 		out = append(out, agentDistArtifact{
 			Name: a.Name, GOOS: a.GOOS, GOARCH: a.GOARCH,
 			Size: fi.Size(), SHA256: sum, Version: ver, Path: p,
+			VersionMatch: agentDistCarriesVersion(p, ver),
 		})
 	}
 	return out

@@ -854,6 +854,17 @@ func legacyWindowsAgentUpdateScript(server, bin, sha string) string {
 	// 由绝对路径的 Windows PowerShell 执行，不会落到没有 [wmiclass] 的 pwsh 上）。预算见
 	// windowsUpdateBootstrapMaxLen；新增逻辑请优先放进服务端下发的助手正文。
 	//
+	// 拉起助手的那三次尝试写成 `&$Try 'wmi' {…}`（脚本块存进变量再 & 调用），而不是
+	// 定义一个函数直接按名字调，是被现网教的：**PowerShell 的命令解析顺序是
+	// 别名 → 函数 → cmdlet → 可执行文件，别名排在函数前面**。原来那个函数叫 `Sp`，而
+	// `sp` 是 Set-ItemProperty 的内置别名，于是 `Sp 'wmi' {…}` 被解析成
+	// `Set-ItemProperty -Path 'wmi' -Name {脚本块}`，报
+	// 「Cannot evaluate parameter 'Name' because its argument is specified as a script
+	// block and there is no input」——整条引导在拉起助手之前就终止了。短名字（本文因为
+	// 命令行预算全是短名字）撞上内置别名的概率相当高：sp/gc/sc/ls/cp/mv/ni/gi/si/gm/gp…
+	// 变量名没有这套解析规则，`&$Try` 只可能是我们自己定义的那个脚本块。
+	// 同类约束由 TestBootstrapCommandsDoNotCollideWithBuiltinAliases 守着。
+	//
 	// 压缩成单字母变量名要付一个代价，这里踩过：**PowerShell 的变量名不区分大小写**。
 	// 原来的 `$a` 存助手摘要、`$A` 存助手启动参数，是同一个变量；后写的参数把摘要冲掉，
 	// 于是成功那行打出来的是 `helper=-nop -noni -`（参数串的前 12 个字符），而不是摘要。
@@ -915,10 +926,10 @@ $Ar='-nop -noni -ep Bypass -File "'+$F+'" -Server "'+$S+'" -Bin "'+$B+'" -Sha "'
 Set-Content $Cm ('"'+$P+'" '+$Ar)
 try{[void](& "$R\schtasks.exe" /End /TN $T 2>$null)}catch{}
 $k=''
-function Sp($tg,$bk){if($k){return};try{&$bk}catch{return};for($i=0;$i -lt 12;$i++){if(Test-Path $Mk){$script:k=$tg;return};sleep 1}}
-Sp 'wmi' {if(([wmiclass]'Win32_Process').Create('"'+$P+'" '+$Ar).ReturnValue){throw 'x'}}
-Sp 'task' {[void](& "$R\schtasks.exe" /Create /TN $T /TR $Cm /SC ONCE /ST 23:59 /RU SYSTEM /F);if($LASTEXITCODE){throw 'x'};[void](& "$R\schtasks.exe" /Run /TN $T)}
-Sp 'cmd' {Start-Process $Cm -WindowStyle Hidden}
+$Try={param($tg,$bk)if($k){return};try{&$bk}catch{return};for($i=0;$i -lt 12;$i++){if(Test-Path $Mk){$script:k=$tg;return};sleep 1}}
+&$Try 'wmi' {if(([wmiclass]'Win32_Process').Create('"'+$P+'" '+$Ar).ReturnValue){throw 'x'}}
+&$Try 'task' {[void](& "$R\schtasks.exe" /Create /TN $T /TR $Cm /SC ONCE /ST 23:59 /RU SYSTEM /F);if($LASTEXITCODE){throw 'x'};[void](& "$R\schtasks.exe" /Run /TN $T)}
+&$Try 'cmd' {Start-Process $Cm -WindowStyle Hidden}
 if(-not $k){throw "helper never started (wmi/task/cmd); see $W\$N.log"}
 Write-Output "legacy agent update ok helper=$($hx.Substring(0,12)) via=$k log=$W\$N.log"
 `,

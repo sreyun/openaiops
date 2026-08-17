@@ -1852,6 +1852,22 @@ svg.sparkline{width:100%; height:46px; display:block}
 .chart-container canvas{width:100%; display:block; background:var(--bg2); border-radius:var(--r); border:1px solid var(--line); transition:border-color .2s; overflow:hidden}
 .chart-container.ai-usage-chart{display:block; min-height:0}
 .chart-container.ai-usage-chart canvas{min-height:240px}
+/* 窗口概览：曲线之上的一排数字（当前/均值/P95/峰值 + 告警线）。峰值越过告警线的格子
+   直接染色——"刚才炸过一次"和"一直很稳"必须一眼分得开。 */
+.trend-stats{display:grid; grid-template-columns:repeat(auto-fit, minmax(min(180px,100%), 1fr)); gap:10px; margin:12px 0 4px}
+.tstat{background:var(--bg2); border:1px solid var(--line); border-radius:var(--r); padding:8px 10px; min-width:0}
+.tstat-k{font-size:11.5px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+.tstat-v{font-size:19px; font-weight:600; line-height:1.25; margin-top:2px; font-variant-numeric:tabular-nums}
+.tstat-sub{font-size:11px; color:var(--muted); margin-top:2px; font-variant-numeric:tabular-nums}
+.tstat-lim{font-size:10.5px; color:var(--muted); opacity:.8; margin-top:1px}
+.tstat.is-warn{border-color:#f7b23b; box-shadow:inset 3px 0 0 #f7b23b}
+.tstat.is-warn .tstat-v{color:#f7b23b}
+.tstat.is-crit{border-color:#f2545b; box-shadow:inset 3px 0 0 #f2545b}
+.tstat.is-crit .tstat-v{color:#f2545b}
+/* 分组标题：主机趋势一屏二十多张图，没有分组只能靠滚动碰运气。占满整行（grid-column
+   1/-1），否则它会被当成一张图挤进网格的一格里。 */
+.chart-group-title{grid-column:1/-1; display:flex; align-items:center; gap:10px; margin:10px 0 -4px; font-weight:600; font-size:13px; color:var(--muted); letter-spacing:.02em}
+.chart-group-title::after{content:""; flex:1; height:1px; background:var(--line2, var(--line))}
 .chart-wrap{position:relative; border-radius:var(--r); overflow:hidden; box-shadow:0 1px 3px rgba(0,0,0,.08), 0 0 0 1px rgba(0,0,0,.03)}
 .chart-wrap canvas{cursor:crosshair; border:none; border-radius:0; max-width:100%; min-height:200px}
 .chart-enlarge{position:absolute; top:10px; right:12px; z-index:3; width:28px; height:28px; border-radius:var(--r-sm);

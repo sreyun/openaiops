@@ -1398,6 +1398,15 @@ func (s *Server) decideAutoUpdate(h *Host) (bool, string, string) {
 	if _, ok := s.agentDistResolveForHost(h); !ok {
 		return false, "no_artifact", fmt.Sprintf("服务端没有 %s/%s 的 Agent 安装包（dist 目录缺失对应二进制）", goos, goarch)
 	}
+	// 产物在，但它是不是**这一版**的产物？见 agentDistCarriesVersion：dist 落后一格时，
+	// 每一轮升级都会"成功"而版本纹丝不动，整支机队进入每半小时停一次服务的无限循环，
+	// 且屏幕上永远只有「重启已排程但版本没跟上」。这类故障不修就永远不会自愈，所以它
+	// 必须挡在自动升级前面（手工推送不受影响，那是人在明确承担后果）。
+	if stale := s.agentDistVersionMismatch(h, appVersion); stale != "" {
+		return false, "stale_artifact", fmt.Sprintf(
+			"dist/%s 里找不到目标版本号 %s，它多半不是这一版构建出来的产物——"+
+				"照常升级只会「成功换版但版本不动」，每轮都白停一次服务。请用与服务端同版本的产物替换它", stale, appVersion)
+	}
 	// Module-capable hosts can update with an empty job base (agent uses report URL).
 	// Legacy script hosts still need a concrete download base.
 	base := agentReportedDownloadBase(h)

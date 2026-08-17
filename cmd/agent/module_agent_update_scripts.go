@@ -571,6 +571,12 @@ function Restart-AgentService {
     $p = Start-Process -FilePath $Exe -ArgumentList @('--install-service','--config', $Cfg) -WorkingDirectory $Dir -Wait -PassThru -WindowStyle Hidden
     if ($p -and $p.ExitCode -eq 0) {
       foreach ($name in (Get-AgentServiceNames)) {
+        # Only wait on a service that EXISTS. Wait-ServiceState sleeps its full
+        # budget on a name Get-Service cannot even find, so walking the whole
+        # candidate list burned 45s per absent name -- up to 90s of extra downtime
+        # for an install registered under the last name in the list, spent while
+        # the agent is stopped and the panel is counting down its verify window.
+        if (-not (Get-Service -Name $name -ErrorAction SilentlyContinue)) { continue }
         if (Wait-ServiceState $name 'Running' 45) {
           Write-Log ("service running: " + $name)
           Write-Log ("post-restart version: " + (Invoke-VersionProbe $Exe).Output)

@@ -1089,6 +1089,26 @@ let DETAIL_LOAD_SEQ = 0;
 let DETAIL_ANCHOR = null; // { hostId, rangeH, from, to } | null
 let DETAIL_SHARED_FC = null; // shared enrich result for current load
 
+// 告警阈值：趋势图上的虚线就是这些值。取一次缓存整页，失败（例如 viewer 角色拿不到
+// /config）就退回"不画阈值线"，绝不因为拿不到阈值而让整张图不出来。
+//
+// 为什么值得多一次请求：一条曲线告诉你"现在是 78%"，只有把 80/90 的线画在同一张图上，
+// 它才同时回答了"离触发还有多远"。否则读表的人得记住阈值页面里的数字，或者干脆等告警
+// 自己响——那就不是趋势图该有的用法。
+let DETAIL_THRESHOLDS = null;
+let DETAIL_THRESHOLDS_TRIED = false;
+async function loadDetailThresholds(signal) {
+  if (DETAIL_THRESHOLDS_TRIED) return DETAIL_THRESHOLDS;
+  DETAIL_THRESHOLDS_TRIED = true;
+  try {
+    const r = await fetch(`${API}/config`, signal ? { credentials: "same-origin", signal } : { credentials: "same-origin" });
+    if (!r.ok) return DETAIL_THRESHOLDS;
+    const cfg = await r.json();
+    DETAIL_THRESHOLDS = (cfg && cfg.thresholds) || null;
+  } catch (_) { /* 阈值线是锦上添花，拿不到就不画 */ }
+  return DETAIL_THRESHOLDS;
+}
+
 // 统一的时间跨度控件渲染函数（主机图表和监控图表共用）
 // 快捷时间跨度（小时）：1/3/6/12 小时 + 1/3/7/14 天（+ 自定义，由各视图单独渲染）
 const CHART_SPANS = [1, 3, 6, 12, 24, 72, 168, 336];
@@ -1227,12 +1247,18 @@ function alignUnixFloor(ts, step) {
  * partial JSON / older API payloads.
  */
 function alignHistoryGaugeSamples(samples) {
+  // 每加一条曲线就要在这里加一个键：缺席的键不会被 LOCF 补齐，于是那条线会在任何一个
+  // 字段缺失的采样点上断开——图上看起来像"指标没了"，实际只是这一帧的 JSON 少了个字段。
   const keys = [
-    "cpu_percent", "mem_percent", "disk_percent", "swap_percent",
+    "cpu_percent", "cpu_cores", "mem_percent", "disk_percent", "swap_percent",
+    "mem_used", "mem_total", "swap_used", "swap_total", "disk_used", "disk_total",
     "load1", "load5", "load15", "proc_count", "net_conns",
     "net_recv_rate", "net_sent_rate",
     "disk_io_util_percent", "disk_read_rate", "disk_write_rate",
-    "disk_read_iops", "disk_write_iops"
+    "disk_read_iops", "disk_write_iops",
+    "uptime",
+    "api_avail_percent", "api_avg_resp_ms", "api_p95_resp_ms", "api_throughput_rps",
+    "task_fail_count", "task_timeout_sec"
   ];
   const last = Object.create(null);
   const out = [];
@@ -1350,6 +1376,55 @@ function resolveDetailWindow() {
   return { from, to };
 }
 
+// 窗口概览：把当前值、均值、P95、峰值和告警线摆在一起。
+//
+// 二十多张曲线回答的是"怎么变的"，但排障的第一个问题往往是"现在到底什么水平、离触发
+// 还有多远、这段时间最坏到过哪里"。这三个数从曲线上只能靠眼睛估，而它们恰恰是写进
+// 工单和复盘里的那几个数字。P95 而不是均值做主判据：均值会把一段 5 分钟的打满摊平到
+// 看不见，而那 5 分钟正是用户感知到的全部。
+function trendStat(samples, get) {
+  let cur = null, sum = 0, n = 0, max = -Infinity;
+  const vals = [];
+  for (const sm of samples || []) {
+    const v = get(sm);
+    if (v == null || !isFinite(v)) continue;
+    cur = v; sum += v; n++;
+    if (v > max) max = v;
+    vals.push(v);
+  }
+  if (!n) return null;
+  vals.sort((a, b) => a - b);
+  const p95 = vals[Math.min(vals.length - 1, Math.floor(vals.length * 0.95))];
+  return { cur, avg: sum / n, p95, max };
+}
+
+/** 阈值状态取自**峰值**：窗口里越过过告警线，就算此刻回落了也必须显示出来——
+ *  "刚才炸过一次"和"一直很稳"是两件完全不同的事。 */
+function trendStatClass(st, warn, crit) {
+  if (!st) return "";
+  const c = +crit, w = +warn;
+  if (isFinite(c) && c > 0 && st.max >= c) return " is-crit";
+  if (isFinite(w) && w > 0 && st.max >= w) return " is-warn";
+  return "";
+}
+
+function renderTrendStats(items) {
+  const cells = items.filter(Boolean).map(it => {
+    const st = it.st;
+    const lim = [];
+    if (+it.warn > 0) lim.push(`${I18N.t("chart.warn_line", "告警线")} ${it.fmt(+it.warn)}`);
+    if (+it.crit > 0) lim.push(`${I18N.t("chart.crit_line", "严重线")} ${it.fmt(+it.crit)}`);
+    return `<div class="tstat${trendStatClass(st, it.warn, it.crit)}">
+      <div class="tstat-k">${esc(it.label)}</div>
+      <div class="tstat-v">${esc(it.fmt(st.cur))}</div>
+      <div class="tstat-sub">${I18N.t("section.stat_avg", "均值")} ${esc(it.fmt(st.avg))} · P95 ${esc(it.fmt(st.p95))} · ${I18N.t("section.stat_max", "峰值")} ${esc(it.fmt(st.max))}</div>
+      ${lim.length ? `<div class="tstat-lim">${esc(lim.join(" · "))}</div>` : ""}
+    </div>`;
+  });
+  if (!cells.length) return "";
+  return `<div class="trend-stats">${cells.join("")}</div>`;
+}
+
 async function loadAndRenderCharts() {
   const body = $("detailBody");
   const win = resolveDetailWindow();
@@ -1382,6 +1457,9 @@ async function loadAndRenderCharts() {
     const rawSamples = await r.json().catch(() => []);
     if (!load.isCurrent()) return;
     const samples = alignHistoryGaugeSamples(Array.isArray(rawSamples) ? rawSamples : []);
+    // best-effort，不阻塞出图：只有第一次真的发请求，之后走缓存。
+    try { await loadDetailThresholds(load.signal); } catch (_) {}
+    if (!load.isCurrent()) return;
     if (!samples.length) {
       DETAIL_SAMPLES = [];
       const src = (r.headers && r.headers.get) ? (r.headers.get("X-AIOps-History-Source") || "") : "";
@@ -1393,7 +1471,19 @@ async function loadAndRenderCharts() {
     DETAIL_SAMPLES = samples;
 
     // 组织图表：每个图表包裹在 .chart-wrap 内，右上角提供放大按钮；真正绘制延后到可见时（懒加载）。
-    DETAIL_CHARTS = {};
+    //
+    // 编排原则（这一版重写的依据）：
+    //   1. 采到的指标要全部画出来。swap / 磁盘 IO 饱和度 / 运行时长 / 内存与磁盘的绝对
+    //      用量 / 接口与任务指标，采集端一直在报、时序库一直在存（见 vm.go 的 push），
+    //      但页面上一条都没有——排障时只能去查 PromQL，等于把面板的价值让了出去。
+    //   2. 能同图对比的就不要拆图。SRE 看趋势看的是**关系**：内存涨的同时 swap 有没有
+    //      跟着涨（真内存压力 vs 缓存）、负载升高时 CPU 是不是也升高（跑满 vs 阻塞在
+    //      IO）、进程数和连接数是不是同步冲高（连接泄漏 vs 业务量）。分成两张图各看各的，
+    //      这些关系就得靠人脑对齐时间轴。
+    //   3. 每条曲线都要能接回告警。阈值（cpu_warn/mem_crit/load_warn×核数/…）以虚线画在
+    //      同一张图上，"现在离触发还有多远"变成一眼可见，而不是记在另一个页面里。
+    //      这是"数据支撑 → 闭环"的最后一公里。
+    DETAIL_CHART_PENDING = {};
     const gran = spanH <= 2 ? I18N.t("time.raw") : spanH <= 48 ? I18N.t("time.1m_agg") : I18N.t("time.5m_agg");
     const dataSpan = samples.length > 1 ? (samples[samples.length - 1].timestamp - samples[0].timestamp) : 0;
     const reqSpan = Math.max(0, to - from);
@@ -1406,63 +1496,225 @@ async function loadAndRenderCharts() {
       : "";
     const hasGPU = samples.some(s => Array.isArray(s.gpus) && s.gpus.length);
     const hasConns = samples.some(s => Array.isArray(s.conns) && s.conns.length);
-    const pct = v => v.toFixed(1) + '%';
-    const wrap = id => `<div class="chart-wrap" data-lazy-chart="${id}"><canvas id="${id}" width="1000" height="240"></canvas>` +
-      `<button class="chart-enlarge" data-chart="${id}" title="${I18N.t('ui.zoom_preview')}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg></button></div>`;
-    body.innerHTML = `
-      ${renderDetailToolbar(from, to)}
-      ${historySourceBanner(src, srcReason)}
-      <div class="chart-container">
-        ${wrap('chartCombo')}${wrap('chartCPU')}${wrap('chartMem')}${wrap('chartLoad')}${wrap('chartDisk')}${hasGPU ? wrap('chartGPU') + wrap('chartGPUTemp') + wrap('chartGPUMemPct') + wrap('chartGPUMem') : ''}${wrap('chartNet')}${hasConns ? wrap('chartConns') + wrap('chartConnStates') : ''}${wrap('chartDiskIO')}${wrap('chartIOPS')}${wrap('chartProc')}
-      </div>
-      <div class="hint">${I18N.t("section.sample_points")}: ${samples.length} · ${I18N.t("section.granularity")}: ${gran}${coverHint}${srcHint}</div>
-    `;
+    const anyPositive = (key) => samples.some(s => +s[key] > 0);
+    const hasAPI = ["api_avail_percent", "api_avg_resp_ms", "api_p95_resp_ms", "api_throughput_rps"].some(anyPositive);
+    const hasTask = ["task_fail_count", "task_timeout_sec"].some(anyPositive);
+    const hasSwap = samples.some(s => +s.swap_total > 0 || +s.swap_percent > 0);
+    const hasIOUtil = anyPositive("disk_io_util_percent");
+    const hasUptime = anyPositive("uptime");
+    const cores = (() => {
+      for (let i = samples.length - 1; i >= 0; i--) { const c = +samples[i].cpu_cores; if (c > 0) return c; }
+      return 0;
+    })();
 
-    // 先只登记「如何画」；进入视口后再 createChart，避免一次同步创建十多张 Canvas 卡顿。
-    const lazy = (id, series, yMin, yMax, title) => {
-      DETAIL_CHART_PENDING[id] = { samples, series, yMin, yMax, title, axisFrom: from, axisTo: to };
+    const pct = v => v.toFixed(1) + '%';
+    const gbUnit = I18N.t("unit.gb", "G");
+    const gib = v => v / 1073741824;
+    const fmtGB = v => (v >= 100 ? v.toFixed(0) : v.toFixed(1)) + gbUnit;
+    const fmtMs = v => (v >= 1000 ? (v / 1000).toFixed(2) + 's' : v.toFixed(0) + 'ms');
+    const fmtCount = v => v.toFixed(0);
+    const fmtHours = v => (v >= 48 ? (v / 24).toFixed(1) + I18N.t("time.day", "天") : v.toFixed(1) + I18N.t("time.hour", "小时"));
+
+    // 阈值虚线：值 ≤0 视为未配置，直接不画（画一条 0 的线只会误导）。
+    const TH = DETAIL_THRESHOLDS || {};
+    const thLine = (key, label, value, crit, fmt) => {
+      const v = +value;
+      if (!isFinite(v) || v <= 0) return null;
+      const tag = crit ? I18N.t("chart.crit_line", "严重线") : I18N.t("chart.warn_line", "告警线");
+      return {
+        key, label: `${label} · ${tag}`, color: crit ? '#f2545b' : '#f7b23b',
+        // kind:'threshold' 让放大预览留住这条线：那里会把 dashed 一律当成预测线剔掉，
+        // 而恰恰是放大看细节的时候最需要知道"离触发还有多远"。
+        dashed: true, kind: 'threshold', fmt: fmt || (x => x.toFixed(0)), transform: () => v
+      };
     };
-    // 资源组合：磁盘用聚合 disk_percent（与分盘图语义不同，标题注明）
-    lazy('chartCombo', [
+    // 自动缩放的图上，一条远高于真实数据的阈值线会把真实曲线压成贴底的直线：IOPS 实际
+    // 200、告警线 5000，画上去之后 Y 轴顶到 10000，两条真曲线彻底看不出形状。所以只有
+    // 阈值离实测范围不远（≤1.6×）时才画线；被略过的阈值仍然写在上方的窗口概览里，信息
+    // 不丢。固定 0–100 的百分比图没有这个问题，直接画。
+    const withTh = (series, lines, fixedScale) => {
+      const keep = (lines || []).filter(Boolean);
+      if (!keep.length) return series;
+      if (fixedScale) return series.concat(keep);
+      let obs = -Infinity;
+      for (const s of series) {
+        for (const sm of samples) {
+          const v = s.transform ? s.transform(sm) : sm[s.key];
+          if (v != null && isFinite(+v) && +v > obs) obs = +v;
+        }
+      }
+      if (!isFinite(obs) || obs <= 0) return series;
+      return series.concat(keep.filter(l => {
+        const v = l.transform ? +l.transform(samples[0]) : NaN;
+        return isFinite(v) && v <= obs * 1.6;
+      }));
+    };
+
+    // 分组：一屏二十多张图，没有分组就只能靠滚动碰运气。
+    const groups = [];
+    const group = (title) => { const g = { title, ids: [] }; groups.push(g); return g; };
+    const put = (g, id, series, yMin, yMax, title) => {
+      if (!g || !series || !series.length) return;
+      DETAIL_CHART_PENDING[id] = { samples, series, yMin, yMax, title, axisFrom: from, axisTo: to };
+      g.ids.push(id);
+    };
+
+    // ---------- 总览 ----------
+    const gOverview = group(I18N.t("group.overview", "总览"));
+    put(gOverview, 'chartCombo', [
       { key: 'cpu_percent', label: I18N.t("section.cpu_usage"), color: '#4c8dff', fmt: pct },
       { key: 'mem_percent', label: I18N.t("section.mem_usage"), color: '#8b5cf6', fmt: pct },
+      ...(hasSwap ? [{ key: 'swap_percent', label: I18N.t("section.swap_usage", "交换分区使用率"), color: '#e06c9a', fmt: pct }] : []),
       { key: 'disk_percent', label: I18N.t("section.disk_usage") + " · " + I18N.t("section.disk_agg", "聚合"), color: '#f7b23b', fmt: pct },
-    ], 0, 100, I18N.t("section.resource_combo", "资源组合 · CPU / 内存 / 磁盘(聚合)"));
-    lazy('chartCPU',
-      [{ key: 'cpu_percent', label: I18N.t("section.cpu_usage"), color: '#4c8dff', fmt: pct }], 0, 100, I18N.t("section.cpu_usage"));
-    lazy('chartMem',
-      [{ key: 'mem_percent', label: I18N.t("section.mem_usage"), color: '#8b5cf6', fmt: pct }], 0, 100, I18N.t("section.mem_usage"));
-    lazy('chartLoad', [
-      { key: 'load1', label: I18N.t("section.load_1m_label"), color: '#4c8dff', fmt: v => v.toFixed(1) },
-      { key: 'load5', label: I18N.t("section.load_5m_label"), color: '#f7b23b', fmt: v => v.toFixed(1) },
-      { key: 'load15', label: I18N.t("section.load_15m_label"), color: '#f2545b', fmt: v => v.toFixed(1) },
-    ], null, null, I18N.t("section.load_avg"));
+      ...(hasIOUtil ? [{ key: 'disk_io_util_percent', label: I18N.t("section.disk_io_util", "磁盘 IO 饱和度"), color: '#2fd07a', fmt: pct }] : []),
+    ], 0, 100, I18N.t("section.saturation_overview", "饱和度总览 · CPU / 内存 / 交换 / 磁盘 / IO"));
 
+    // ---------- CPU 与负载 ----------
+    const gCPU = group(I18N.t("group.cpu", "CPU 与负载"));
+    put(gCPU, 'chartCPU', withTh(
+      [{ key: 'cpu_percent', label: I18N.t("section.cpu_usage"), color: '#4c8dff', fmt: pct }],
+      [thLine('th_cpu_w', I18N.t("section.cpu_usage"), TH.cpu_warn, false, pct),
+       thLine('th_cpu_c', I18N.t("section.cpu_usage"), TH.cpu_crit, true, pct)], true
+    ), 0, 100, I18N.t("section.cpu_usage"));
+    // 负载与「核数」画在一起：load1 越过核数线 = 运行队列开始排队，这是负载唯一有意义的
+    // 读法；只看绝对值，4 核机器的 8 和 64 核机器的 8 在图上一模一样。
+    put(gCPU, 'chartLoad', withTh([
+      { key: 'load1', label: I18N.t("section.load_1m_label"), color: '#4c8dff', fmt: v => v.toFixed(2) },
+      { key: 'load5', label: I18N.t("section.load_5m_label"), color: '#f7b23b', fmt: v => v.toFixed(2) },
+      { key: 'load15', label: I18N.t("section.load_15m_label"), color: '#f2545b', fmt: v => v.toFixed(2) },
+    ], [
+      // 告警线本身就是「核数 × 倍率」，配了阈值就不再画裸核数线——三条虚线会把三条真曲线
+      // 淹掉，而 tooltip 里每一次悬停都要多读三行常量。没配阈值时核数线是唯一的饱和参照。
+      (cores > 0 && !(+TH.load_warn > 0 || +TH.load_crit > 0))
+        ? { key: 'th_cores', label: I18N.t("section.cpu_cores_line", "CPU 核数（饱和线）") + ` · ${cores}`, color: '#8a95a8', dashed: true, kind: 'threshold', fmt: v => v.toFixed(0), transform: () => cores }
+        : null,
+      cores > 0 ? thLine('th_load_w', I18N.t("section.load_avg_short", "负载"), cores * (+TH.load_warn || 0), false, v => v.toFixed(1)) : null,
+      cores > 0 ? thLine('th_load_c', I18N.t("section.load_avg_short", "负载"), cores * (+TH.load_crit || 0), true, v => v.toFixed(1)) : null
+    ], false), 0, null, I18N.t("section.load_avg"));
+
+    // ---------- 内存 ----------
+    const gMem = group(I18N.t("group.memory", "内存"));
+    put(gMem, 'chartMem', withTh([
+      { key: 'mem_percent', label: I18N.t("section.mem_usage"), color: '#8b5cf6', fmt: pct },
+      ...(hasSwap ? [{ key: 'swap_percent', label: I18N.t("section.swap_usage", "交换分区使用率"), color: '#e06c9a', fmt: pct }] : []),
+    ], [
+      thLine('th_mem_w', I18N.t("section.mem_usage"), TH.mem_warn, false, pct),
+      thLine('th_mem_c', I18N.t("section.mem_usage"), TH.mem_crit, true, pct)
+    ], true), 0, 100, hasSwap ? I18N.t("section.mem_and_swap", "内存与交换使用率") : I18N.t("section.mem_usage"));
+    // 绝对用量：百分比回答「还剩多少余量」，字节数回答「够不够再放一个实例」。两个问题
+    // 都要有人回答，而且 total 线让"总量变了"（扩容 / 缩容 / 被别的容器吃掉）无处可藏。
+    put(gMem, 'chartMemBytes', [
+      { key: 'mem_used_gb', label: I18N.t("section.mem_used_label", "内存已用"), color: '#8b5cf6', fmt: fmtGB, transform: s => s.mem_used != null ? gib(+s.mem_used) : null },
+      { key: 'mem_total_gb', label: I18N.t("section.mem_total_label", "内存总量"), color: '#8a95a8', dashed: true, fmt: fmtGB, transform: s => s.mem_total != null ? gib(+s.mem_total) : null },
+      ...(hasSwap ? [{ key: 'swap_used_gb', label: I18N.t("section.swap_used_label", "交换已用"), color: '#e06c9a', fmt: fmtGB, transform: s => s.swap_used != null ? gib(+s.swap_used) : null }] : []),
+    ], 0, null, I18N.t("section.mem_bytes", "内存与交换用量"));
+
+    // ---------- 磁盘 ----------
+    const gDisk = group(I18N.t("group.disk", "磁盘"));
     const diskKeys = stableDiskPaths(samples, 12);
     const latestDisk = {};
     for (let i = samples.length - 1; i >= 0 && Object.keys(latestDisk).length < diskKeys.length; i--) {
       (samples[i].disks || []).forEach(d => { if (d && d.path && !(d.path in latestDisk)) latestDisk[d.path] = d; });
     }
-    const _gb = b => b / 1073741824;
+    const diskColor = idx => ['#f7b23b', '#2fd07a', '#f2545b', '#43b6f0', '#8b5cf6', '#e06c9a'][idx % 6];
     const diskLabel = (path) => {
       const d = latestDisk[path];
       const shortPath = shortenMountPath(path);
-      if (!d || !d.total) return '磁盘 ' + shortPath;
-      const used = _gb(d.used), tot = _gb(d.total);
-      return `磁盘 ${shortPath} · 已用 ${used.toFixed(0)}/${tot.toFixed(0)}GB · 剩 ${(tot - used).toFixed(0)}GB`;
+      if (!d || !d.total) return I18N.t("ui.disk_label", "磁盘") + ' ' + shortPath;
+      const used = gib(d.used), tot = gib(d.total);
+      return `${I18N.t("ui.disk_label", "磁盘")} ${shortPath} · ${I18N.t("ui.used", "已用")} ${used.toFixed(0)}/${tot.toFixed(0)}${gbUnit} · ${I18N.t("ui.free", "剩")} ${(tot - used).toFixed(0)}${gbUnit}`;
     };
     const diskSeries = diskKeys.map((path, idx) => ({
-      key: `disk_${path}`, label: diskLabel(path),
-      color: ['#f7b23b', '#2fd07a', '#f2545b', '#43b6f0', '#8b5cf6', '#e06c9a'][idx % 6], fmt: pct,
+      key: `disk_${path}`, label: diskLabel(path), color: diskColor(idx), fmt: pct,
       transform: (s) => { const d = (s.disks || []).find(x => x.path === path); return d ? d.percent : null; }
     }));
-    lazy('chartDisk',
+    put(gDisk, 'chartDisk', withTh(
       diskSeries.length
         ? diskSeries
         : [{ key: 'disk_percent', label: (I18N.t("section.root_partition") || "根分区") + " · " + I18N.t("section.disk_agg", "聚合"), color: '#f7b23b', fmt: pct }],
-      0, 100, I18N.t("section.disk_usage"));
+      [thLine('th_disk_w', I18N.t("section.disk_usage"), TH.disk_warn, false, pct),
+       thLine('th_disk_c', I18N.t("section.disk_usage"), TH.disk_crit, true, pct)], true
+    ), 0, 100, I18N.t("section.disk_usage"));
+    // 剩余空间（GB）是容量规划唯一能直接用的量纲，配上工具栏的「预测」就是"还有几天写满"。
+    // 百分比在 4TB 盘上从 80% 到 90% 是 400GB，在 40GB 盘上是 4GB——同一条曲线，两种紧迫度。
+    const diskFreeSeries = diskKeys.map((path, idx) => ({
+      key: `diskfree_${path}`, label: `${I18N.t("ui.disk_label", "磁盘")} ${shortenMountPath(path)}`, color: diskColor(idx), fmt: fmtGB,
+      transform: (s) => {
+        const d = (s.disks || []).find(x => x.path === path);
+        if (!d || !d.total) return null;
+        return gib(Math.max(0, (+d.total || 0) - (+d.used || 0)));
+      }
+    }));
+    put(gDisk, 'chartDiskFree', diskFreeSeries.length ? diskFreeSeries : [
+      { key: 'disk_free_gb', label: I18N.t("section.disk_free", "磁盘剩余空间"), color: '#2fd07a', fmt: fmtGB,
+        transform: s => (s.disk_total != null && s.disk_used != null) ? gib(Math.max(0, (+s.disk_total) - (+s.disk_used))) : null },
+    ], 0, null, I18N.t("section.disk_free", "磁盘剩余空间"));
+    if (hasIOUtil) {
+      put(gDisk, 'chartDiskUtil', withTh(
+        [{ key: 'disk_io_util_percent', label: I18N.t("section.disk_io_util", "磁盘 IO 饱和度"), color: '#2fd07a', fmt: pct }],
+        [thLine('th_io_w', I18N.t("section.disk_io_util", "磁盘 IO 饱和度"), TH.diskio_warn, false, pct),
+         thLine('th_io_c', I18N.t("section.disk_io_util", "磁盘 IO 饱和度"), TH.diskio_crit, true, pct)], true
+      ), 0, 100, I18N.t("section.disk_io_util", "磁盘 IO 饱和度"));
+    }
+    put(gDisk, 'chartDiskIO', [
+      { key: 'disk_read_rate', label: I18N.t("ui.disk_read"), color: '#2fd07a', fmt: fmtIORate },
+      { key: 'disk_write_rate', label: I18N.t("ui.disk_write"), color: '#f7b23b', fmt: fmtIORate },
+    ], 0, null, I18N.t("ui.disk_io"));
+    put(gDisk, 'chartIOPS', withTh([
+      { key: 'disk_read_iops', label: I18N.t("ui.disk_read_iops"), color: '#2fd07a', fmt: fmtIOPS },
+      { key: 'disk_write_iops', label: I18N.t("ui.disk_write_iops"), color: '#f7b23b', fmt: fmtIOPS },
+    ], [
+      thLine('th_iops_w', 'IOPS', TH.iops_warn, false, fmtIOPS),
+      thLine('th_iops_c', 'IOPS', TH.iops_crit, true, fmtIOPS)
+    ], false), 0, null, I18N.t("ui.disk_iops_title"));
 
+    // ---------- 网络 ----------
+    const gNet = group(I18N.t("group.network", "网络"));
+    put(gNet, 'chartNet', [
+      { key: 'net_recv_rate', label: I18N.t("section.net_recv"), color: '#2fd07a', fmt: fmtRate },
+      { key: 'net_sent_rate', label: I18N.t("section.net_send"), color: '#43b6f0', fmt: fmtRate },
+    ], 0, null, I18N.t("section.net_throughput"));
+    if (hasConns) {
+      const sumProto = (s, proto) => Array.isArray(s.conns) ? s.conns.reduce((a, c) => c.proto === proto ? a + (c.count || 0) : a, 0) : null;
+      const sumAll = (s) => Array.isArray(s.conns) ? s.conns.reduce((a, c) => a + (c.count || 0), 0) : null;
+      // 告警看的是 TCP+UDP 总数，所以总数必须是图上的一条线——否则阈值线和曲线不是一回事。
+      put(gNet, 'chartConns', withTh([
+        { key: 'conn_all', label: I18N.t("section.conn_total", "连接总数"), color: '#8b5cf6', fmt: fmtCount, transform: sumAll },
+        { key: 'conn_tcp', label: 'TCP', color: '#43b6f0', fmt: fmtCount, transform: (s) => sumProto(s, 'tcp') },
+        { key: 'conn_udp', label: 'UDP', color: '#2fd07a', fmt: fmtCount, transform: (s) => sumProto(s, 'udp') },
+      ], [
+        thLine('th_conn_w', I18N.t("section.conn_total", "连接总数"), TH.conn_warn, false, fmtCount),
+        thLine('th_conn_c', I18N.t("section.conn_total", "连接总数"), TH.conn_crit, true, fmtCount)
+      ], false), 0, null, I18N.t("section.conn_count"));
+      const KEY_STATES = ['ESTABLISHED', 'TIME_WAIT', 'LISTEN', 'CLOSE_WAIT', 'SYN_SENT', 'FIN_WAIT1', 'FIN_WAIT2'];
+      const stateSet = KEY_STATES.filter(st => samples.some(s => (s.conns || []).some(c => c.proto === 'tcp' && c.state === st)));
+      const stateColors = { ESTABLISHED: '#4c8dff', TIME_WAIT: '#f7b23b', LISTEN: '#2fd07a', CLOSE_WAIT: '#f2545b', SYN_SENT: '#e06c9a', FIN_WAIT1: '#8b5cf6', FIN_WAIT2: '#43b6f0' };
+      const stateSeries = stateSet.map((st, idx) => ({
+        key: `cst_${idx}`, label: st, color: stateColors[st] || '#8b5cf6', fmt: fmtCount,
+        transform: (s) => { if (!Array.isArray(s.conns)) return null; const c = s.conns.find(x => x.proto === 'tcp' && x.state === st); return c ? c.count : 0; }
+      }));
+      put(gNet, 'chartConnStates', stateSeries, 0, null, I18N.t("section.conn_states"));
+    }
+
+    // ---------- 系统 ----------
+    const gSys = group(I18N.t("group.system", "系统"));
+    // 进程数与连接数同图：一起冲高通常是业务量，只有连接冲高多半是连接泄漏或对端不收，
+    // 只有进程冲高多半是 fork 失控。分开画就只剩两条各自无解释力的曲线。
+    put(gSys, 'chartProc', [
+      { key: 'proc_count', label: I18N.t("section.proc_count_label", "进程数"), color: '#8b5cf6', fmt: fmtCount },
+      { key: 'net_conns', label: I18N.t("section.conn_established", "已建立连接"), color: '#43b6f0', fmt: fmtCount },
+    ], 0, null, I18N.t("section.proc_and_conns", "进程数与连接数"));
+    if (hasUptime) {
+      // 运行时长掉回 0 = 主机重启过。这是最便宜也最常被漏掉的一条线索：故障时间点旁边
+      // 的一次重启，能直接解释掉一整段"指标为什么全断了"。
+      put(gSys, 'chartUptime', [
+        { key: 'uptime_h', label: I18N.t("section.uptime_label", "已运行"), color: '#2fd07a', fmt: fmtHours, transform: s => s.uptime != null ? (+s.uptime) / 3600 : null },
+      ], 0, null, I18N.t("section.uptime_trend", "运行时长（掉回 0 即为重启）"));
+    }
+
+    // ---------- GPU ----------
     if (hasGPU) {
+      const gGPU = group(I18N.t("group.gpu", "GPU"));
       const latestGpus = ((samples[samples.length - 1] || {}).gpus) || [];
       const gpuNameSet = new Set();
       latestGpus.forEach(g => {
@@ -1482,60 +1734,94 @@ async function loadAndRenderCharts() {
         const g = (s.gpus || []).find(x => x && x.name === nm);
         return g ? (g[field] || 0) : null;
       };
-      const gbUnit = I18N.t("unit.gb");
       const gpuBytesGB = (nm, field) => (s) => {
         const g = (s.gpus || []).find(x => x && x.name === nm);
-        return g ? (g[field] || 0) / 1073741824 : null;
+        return g ? gib(g[field] || 0) : null;
       };
-      lazy('chartGPU', gpuNames.map((nm, idx) => ({
+      put(gGPU, 'chartGPU', withTh(gpuNames.map((nm, idx) => ({
         key: `gpu_${nm}`, label: nm, color: gcolor(idx), fmt: v => v.toFixed(0) + '%', transform: gpuByName(nm, 'util_percent')
-      })), 0, 100, I18N.t("section.gpu_usage"));
-      lazy('chartGPUTemp', gpuNames.map((nm, idx) => ({
+      })),
+        [thLine('th_gpu_w', 'GPU', TH.gpu_warn, false, pct),
+         thLine('th_gpu_c', 'GPU', TH.gpu_crit, true, pct)], true
+      ), 0, 100, I18N.t("section.gpu_usage"));
+      put(gGPU, 'chartGPUTemp', withTh(gpuNames.map((nm, idx) => ({
         key: `gput_${nm}`, label: nm, color: gcolor(idx), fmt: v => v.toFixed(0) + '℃', transform: gpuByName(nm, 'temp')
-      })), null, null, I18N.t("section.gpu_temp"));
-      lazy('chartGPUMemPct', gpuNames.map((nm, idx) => ({
+      })),
+        [thLine('th_gput_w', I18N.t("section.gpu_temp"), TH.gpu_temp_warn, false, v => v.toFixed(0) + '℃'),
+         thLine('th_gput_c', I18N.t("section.gpu_temp"), TH.gpu_temp_crit, true, v => v.toFixed(0) + '℃')], false
+      ), null, null, I18N.t("section.gpu_temp"));
+      put(gGPU, 'chartGPUMemPct', withTh(gpuNames.map((nm, idx) => ({
         key: `gpump_${nm}`, label: nm, color: gcolor(idx), fmt: v => v.toFixed(0) + '%', transform: gpuByName(nm, 'mem_percent')
-      })), 0, 100, I18N.t("section.gpu_mem_pct"));
+      })),
+        [thLine('th_gpum_w', I18N.t("section.gpu_mem_pct"), TH.gpu_mem_warn, false, pct),
+         thLine('th_gpum_c', I18N.t("section.gpu_mem_pct"), TH.gpu_mem_crit, true, pct)], true
+      ), 0, 100, I18N.t("section.gpu_mem_pct"));
       const gpuMemSeries = [];
       gpuNames.forEach((nm, idx) => {
-        gpuMemSeries.push({ key: `gpumu_${nm}`, label: `${nm} · ${I18N.t("section.gpu_mem_used")}`, color: gcolor(idx * 2), fmt: v => v.toFixed(1) + gbUnit, transform: gpuBytesGB(nm, 'mem_used') });
-        gpuMemSeries.push({ key: `gpumf_${nm}`, label: `${nm} · ${I18N.t("section.gpu_mem_free")}`, color: gcolor(idx * 2 + 1), fmt: v => v.toFixed(1) + gbUnit, transform: gpuBytesGB(nm, 'mem_free') });
+        gpuMemSeries.push({ key: `gpumu_${nm}`, label: `${nm} · ${I18N.t("section.gpu_mem_used")}`, color: gcolor(idx * 2), fmt: fmtGB, transform: gpuBytesGB(nm, 'mem_used') });
+        gpuMemSeries.push({ key: `gpumf_${nm}`, label: `${nm} · ${I18N.t("section.gpu_mem_free")}`, color: gcolor(idx * 2 + 1), fmt: fmtGB, transform: gpuBytesGB(nm, 'mem_free') });
       });
-      lazy('chartGPUMem', gpuMemSeries, null, null, I18N.t("section.gpu_vram"));
+      put(gGPU, 'chartGPUMem', gpuMemSeries, 0, null, I18N.t("section.gpu_vram"));
     }
 
-    lazy('chartNet', [
-      { key: 'net_recv_rate', label: I18N.t("section.net_recv"), color: '#2fd07a', fmt: fmtRate },
-      { key: 'net_sent_rate', label: I18N.t("section.net_send"), color: '#43b6f0', fmt: fmtRate },
-    ], null, null, I18N.t("section.net_throughput"));
-
-    if (hasConns) {
-      const sumProto = (s, proto) => Array.isArray(s.conns) ? s.conns.reduce((a, c) => c.proto === proto ? a + (c.count || 0) : a, 0) : null;
-      lazy('chartConns', [
-        { key: 'conn_tcp', label: 'TCP', color: '#43b6f0', fmt: v => v.toFixed(0), transform: (s) => sumProto(s, 'tcp') },
-        { key: 'conn_udp', label: 'UDP', color: '#2fd07a', fmt: v => v.toFixed(0), transform: (s) => sumProto(s, 'udp') },
-      ], null, null, I18N.t("section.conn_count"));
-      const KEY_STATES = ['ESTABLISHED', 'TIME_WAIT', 'LISTEN', 'CLOSE_WAIT'];
-      const stateSet = KEY_STATES.filter(st => samples.some(s => (s.conns || []).some(c => c.proto === 'tcp' && c.state === st)));
-      const stateColors = { ESTABLISHED: '#4c8dff', TIME_WAIT: '#f7b23b', LISTEN: '#2fd07a', CLOSE_WAIT: '#f2545b' };
-      const stateSeries = stateSet.map((st, idx) => ({
-        key: `cst_${idx}`, label: st, color: stateColors[st] || '#8b5cf6', fmt: v => v.toFixed(0),
-        transform: (s) => { if (!Array.isArray(s.conns)) return null; const c = s.conns.find(x => x.proto === 'tcp' && x.state === st); return c ? c.count : 0; }
-      }));
-      if (stateSeries.length) lazy('chartConnStates', stateSeries, null, null, I18N.t("section.conn_states"));
+    // ---------- 业务与任务 ----------
+    // 这两组指标由插件/外部系统上报（api_* / task_*），采集端一直在传、时序库一直在存，
+    // 页面上却从来没有过。没有数据的主机不画空图。
+    if (hasAPI || hasTask) {
+      const gBiz = group(I18N.t("group.business", "业务与任务"));
+      if (hasAPI) {
+        put(gBiz, 'chartAPIAvail', [
+          { key: 'api_avail_percent', label: I18N.t("section.api_avail", "接口可用率"), color: '#2fd07a', fmt: pct },
+        ], 0, 100, I18N.t("section.api_avail", "接口可用率"));
+        put(gBiz, 'chartAPILatency', [
+          { key: 'api_avg_resp_ms', label: I18N.t("section.api_avg_label", "平均"), color: '#43b6f0', fmt: fmtMs },
+          { key: 'api_p95_resp_ms', label: I18N.t("section.api_p95_label", "P95"), color: '#f2545b', fmt: fmtMs },
+        ], 0, null, I18N.t("section.api_latency", "接口响应时间 · 平均 / P95"));
+        put(gBiz, 'chartAPIThroughput', [
+          { key: 'api_throughput_rps', label: I18N.t("section.api_throughput", "接口吞吐"), color: '#8b5cf6', fmt: v => v.toFixed(1) + ' req/s' },
+        ], 0, null, I18N.t("section.api_throughput", "接口吞吐"));
+      }
+      if (hasTask) {
+        put(gBiz, 'chartTask', [
+          { key: 'task_fail_count', label: I18N.t("section.task_fail_label", "失败次数"), color: '#f2545b', fmt: fmtCount },
+          { key: 'task_timeout_sec', label: I18N.t("section.task_timeout_label", "超时时长"), color: '#f7b23b', fmt: v => v.toFixed(1) + 's' },
+        ], 0, null, I18N.t("section.task_health", "定时任务 · 失败次数 / 超时时长"));
+      }
     }
 
-    lazy('chartDiskIO', [
-      { key: 'disk_read_rate', label: I18N.t("ui.disk_read"), color: '#2fd07a', fmt: fmtIORate },
-      { key: 'disk_write_rate', label: I18N.t("ui.disk_write"), color: '#f7b23b', fmt: fmtIORate },
-    ], null, null, I18N.t("ui.disk_io"));
-    lazy('chartIOPS', [
-      { key: 'disk_read_iops', label: I18N.t("ui.disk_read_iops"), color: '#2fd07a', fmt: fmtIOPS },
-      { key: 'disk_write_iops', label: I18N.t("ui.disk_write_iops"), color: '#f7b23b', fmt: fmtIOPS },
-    ], null, null, I18N.t("ui.disk_iops_title"));
-    lazy('chartProc', [
-      { key: 'proc_count', label: '进程数', color: '#8b5cf6', fmt: v => v.toFixed(0) },
-    ], null, null, '进程数趋势');
+    // 窗口概览：曲线之上先给一排数字——当前 / 均值 / P95 / 峰值 / 告警线。
+    const sumConns = (sm) => Array.isArray(sm.conns) ? sm.conns.reduce((a, c) => a + (c.count || 0), 0) : null;
+    const statsHTML = renderTrendStats([
+      { label: I18N.t("section.cpu_usage"), st: trendStat(samples, sm => +sm.cpu_percent), fmt: pct, warn: TH.cpu_warn, crit: TH.cpu_crit },
+      { label: I18N.t("section.mem_usage"), st: trendStat(samples, sm => +sm.mem_percent), fmt: pct, warn: TH.mem_warn, crit: TH.mem_crit },
+      hasSwap ? { label: I18N.t("section.swap_usage", "交换分区使用率"), st: trendStat(samples, sm => +sm.swap_percent), fmt: pct, warn: 0, crit: 0 } : null,
+      { label: I18N.t("section.disk_usage") + " · " + I18N.t("section.disk_agg", "聚合"), st: trendStat(samples, sm => +sm.disk_percent), fmt: pct, warn: TH.disk_warn, crit: TH.disk_crit },
+      hasIOUtil ? { label: I18N.t("section.disk_io_util", "磁盘 IO 饱和度"), st: trendStat(samples, sm => +sm.disk_io_util_percent), fmt: pct, warn: TH.diskio_warn, crit: TH.diskio_crit } : null,
+      { label: I18N.t("section.load_1m_label"), st: trendStat(samples, sm => +sm.load1), fmt: v => v.toFixed(2),
+        warn: cores > 0 ? cores * (+TH.load_warn || 0) : 0, crit: cores > 0 ? cores * (+TH.load_crit || 0) : 0 },
+      { label: I18N.t("section.net_recv"), st: trendStat(samples, sm => +sm.net_recv_rate), fmt: fmtRate, warn: 0, crit: 0 },
+      { label: I18N.t("section.net_send"), st: trendStat(samples, sm => +sm.net_sent_rate), fmt: fmtRate, warn: 0, crit: 0 },
+      hasConns ? { label: I18N.t("section.conn_total", "连接总数"), st: trendStat(samples, sumConns), fmt: fmtCount, warn: TH.conn_warn, crit: TH.conn_crit } : null,
+      { label: I18N.t("section.proc_count_label", "进程数"), st: trendStat(samples, sm => +sm.proc_count), fmt: fmtCount, warn: 0, crit: 0 },
+      hasUptime ? { label: I18N.t("section.uptime_label", "已运行"), st: trendStat(samples, sm => sm.uptime != null ? (+sm.uptime) / 3600 : null), fmt: fmtHours, warn: 0, crit: 0 } : null,
+      hasAPI ? { label: I18N.t("section.api_avail", "接口可用率"), st: trendStat(samples, sm => +sm.api_avail_percent), fmt: pct, warn: 0, crit: 0 } : null,
+      hasAPI ? { label: I18N.t("section.api_p95_label", "P95") + " · " + I18N.t("section.api_latency_short", "接口延时"), st: trendStat(samples, sm => +sm.api_p95_resp_ms), fmt: fmtMs, warn: 0, crit: 0 } : null,
+    ]);
+
+    const wrap = id => `<div class="chart-wrap" data-lazy-chart="${id}"><canvas id="${id}" width="1000" height="240"></canvas>` +
+      `<button class="chart-enlarge" data-chart="${id}" title="${I18N.t('ui.zoom_preview')}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg></button></div>`;
+    const chartCount = groups.reduce((a, g) => a + g.ids.length, 0);
+    body.innerHTML = `
+      ${renderDetailToolbar(from, to)}
+      ${historySourceBanner(src, srcReason)}
+      ${statsHTML}
+      <div class="chart-container">
+        ${groups.filter(g => g.ids.length).map(g =>
+          `<div class="chart-group-title">${esc(g.title)}</div>` + g.ids.map(wrap).join("")
+        ).join("")}
+      </div>
+      <div class="hint">${I18N.t("section.sample_points")}: ${samples.length} · ${I18N.t("section.granularity")}: ${gran} · ${I18N.t("section.chart_count", "图表")}: ${chartCount}${coverHint}${srcHint}</div>
+    `;
 
     if (!load.isCurrent()) return;
 
@@ -1545,7 +1831,9 @@ async function loadAndRenderCharts() {
       const allSeries = [];
       Object.keys(DETAIL_CHART_PENDING).forEach(cid => {
         const sp = DETAIL_CHART_PENDING[cid];
-        if (sp && sp.series) allSeries.push(...sp.series);
+        // 阈值线是常量，不参与预测：把 th_* 送进预测接口，轻则白算一遍，重则让整批预测
+        // 因为一个服务端认不出的字段名失败，连带真实曲线的预测一起没有。
+        if (sp && sp.series) allSeries.push(...sp.series.filter(x => x && x.kind !== "threshold"));
       });
       const fcMethod = typeof getChartForecastModel === "function" ? getChartForecastModel("host-detail") : "auto";
       const en = await enrichSharedForecast(samples, allSeries, {
@@ -2426,7 +2714,9 @@ function estimateZoomRangeHours(src) {
 
 function buildZoomCtxFromSrc(src) {
   const base = src && (src._fcBase || src._aiBase) || {};
-  const series = (base.series || src.series || []).filter(s => s && s.kind !== "forecast" && !s.dashed);
+  // 阈值线（kind:'threshold'）要留下：放大预览里同样需要"离触发还有多远"。其余 dashed
+  // 序列是预测线，重载时会重新算，留着只会画两遍。
+  const series = (base.series || src.series || []).filter(s => s && s.kind !== "forecast" && (!s.dashed || s.kind === "threshold"));
   const reload = base.reload || src.reload || null;
   const hostId = (reload && reload.hostId) || (src.forecastScope === "host-detail" ? DETAIL_HOST_ID : "") || "";
   const checkId = (reload && (reload.checkId || reload.id)) || "";
@@ -2605,7 +2895,10 @@ async function reloadZoomChartData() {
       DETAIL_CHARTS.__zoom = z;
       return;
     }
-    const series = (ZOOM_CTX.series || []).map(s => Object.assign({}, s, { kind: "history", dashed: false }));
+    // 阈值线是常量，重载数据与它无关：原样保留（否则会被改成实线并参与预测）。
+    const series = (ZOOM_CTX.series || []).map(s => s && s.kind === "threshold"
+      ? Object.assign({}, s)
+      : Object.assign({}, s, { kind: "history", dashed: false }));
     const horizonSec = Math.max(1800, win.to - win.from);
     const titleBase = ZOOM_CTX.titleBase || "";
     const title = zoomTitleWithRange(titleBase, win.from, win.to).replace(/\s*[·•]\s*放大预览\s*$/, "");
