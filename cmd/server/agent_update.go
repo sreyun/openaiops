@@ -1206,14 +1206,22 @@ func (s *Server) runLegacyAgentUpdateScriptKind(h *Host, serverURL string, force
 	return out, kind, nil
 }
 
-// hostHasPendingAgentUpdate is true when any in-memory job still has this host
+// hostPendingAgentUpdate is true when any in-memory job still has this host
 // in pending_verify / running — blocks soft-retry storms overlapping a live swap.
-func (s *Server) hostHasPendingAgentUpdate(hostID string) bool {
+// The second return value describes that job.
+//
+// 光说「已有升级任务在进行中」是条死胡同：操作台上看到的是一句永远不变的话，分不清它
+// 是正常走在那条最长 20 分钟的校验阶梯上（module 换版 → 5 分钟等版本号 → legacy 救援
+// → 再 5 分钟），还是有个 job 再也不会结束。把 job 号、主机在这个 job 里的状态与方式、
+// 以及**已经卡了多久**一起带出来，这条理由才自己就能回答「到底在等什么」——尤其是
+// 「已持续 45m」这种一眼就知道不对的数字。
+func (s *Server) hostPendingAgentUpdate(hostID string) (bool, string) {
 	if s == nil || s.agentUpdates == nil || hostID == "" {
-		return false
+		return false, ""
 	}
 	s.agentUpdates.mu.Lock()
 	defer s.agentUpdates.mu.Unlock()
+	now := time.Now().Unix()
 	for _, j := range s.agentUpdates.jobs {
 		if j == nil || j.Status == "done" {
 			continue
@@ -1224,11 +1232,24 @@ func (s *Server) hostHasPendingAgentUpdate(hostID string) bool {
 			}
 			switch hr.Status {
 			case "pending", "running", "pending_verify":
-				return true
+				since := hr.Updated
+				if since <= 0 {
+					since = j.CreatedAt
+				}
+				method := hr.Method
+				if method == "" {
+					method = "未开始"
+				}
+				age := "未知"
+				if since > 0 && now >= since {
+					age = (time.Duration(now-since) * time.Second).String()
+				}
+				return true, fmt.Sprintf("job=%s 该主机状态=%s 方式=%s 已持续 %s 目标=%s",
+					j.ID, hr.Status, method, age, j.TargetVer)
 			}
 		}
 	}
-	return false
+	return false, ""
 }
 
 // maybeAutoUpdateHost enqueues a single-host update when policy is enabled.
@@ -1247,6 +1268,11 @@ func (s *Server) maybeAutoUpdateHost(hostID string) {
 		if reason != "" {
 			s.agentUpdates.recordSkip(h.ID, reason, detail)
 			slog.Debug("Agent 自动升级跳过", "host", shortID(h.ID), "hostname", h.Hostname, "reason", reason, "detail", detail)
+		} else {
+			// 闸门静默放行的唯一出口是「版本已追上」。这里必须把旧的跳过原因清掉：否则一台
+			// 早就升到位的主机会永远挂在「最近未升级的主机与原因」表里，写着当初那句
+			// pending_job——看上去正是「还没升级」，而真相恰好相反。
+			s.agentUpdates.clearSkip(h.ID)
 		}
 		return
 	}
@@ -1302,10 +1328,12 @@ func (s *Server) decideAutoUpdate(h *Host) (bool, string, string) {
 		}
 		return false, "", ""
 	}
-	// Do not soft-retry while a prior job is still awaiting version ack.
-	if s.hostHasPendingAgentUpdate(h.ID) {
-		return false, "pending_job", "已有升级任务在进行中（pending/running/pending_verify）"
-	}
+	// 先问「这台机器**能不能**升」，再问「现在轮不轮得到升」。两类闸门都会挡住升级，但
+	// 只有前者是需要人去处理的：dist 里没有对应二进制、老 agent 没有下载基址——这些不修
+	// 就永远升不上去。pending_job / cooldown 则是自愈的，几十分钟后自己就过去了。
+	// 顺序放反的代价很实在：一台因为缺包永远升不了的机器，每一轮都恰好撞在「已有升级任务
+	// 在进行中」上，屏幕上于是永远显示一条会自愈的理由，真正要修的那条一次都不出现。
+	// 这两项检查都是纯读取，提前做没有副作用（有副作用的 remoteGateCheck/冷却仍在后面）。
 	goos, goarch := hostGOOSArch(h)
 	if _, ok := s.agentDistResolveForHost(h); !ok {
 		return false, "no_artifact", fmt.Sprintf("服务端没有 %s/%s 的 Agent 安装包（dist 目录缺失对应二进制）", goos, goarch)
@@ -1318,6 +1346,11 @@ func (s *Server) decideAutoUpdate(h *Host) (bool, string, string) {
 		if base == "" {
 			return false, "no_download_base", "老版 agent 需要公网下载基址：请配置 public_url 或确认 agent 上报的 server_url 可达"
 		}
+	}
+	// Do not soft-retry while a prior job is still awaiting version ack.
+	if busy, detail := s.hostPendingAgentUpdate(h.ID); busy {
+		return false, "pending_job", "已有升级任务在进行中（pending/running/pending_verify）：" + detail +
+			"；结果见「最近的升级任务」表"
 	}
 	// Freeze-only for auto path: highRisk=false so default remote gate does not
 	// require an approved change outside freeze windows (manual push stays high-risk).
@@ -1365,8 +1398,21 @@ func (s *Server) runAgentAutoUpdateScan() {
 		if h == nil {
 			continue
 		}
-		// 只扫在线主机：离线主机无法执行升级命令，徒增错误日志。
+		// 只扫在线主机：离线主机无法执行升级命令，徒增错误日志。但「静默跳过」在这里是有
+		// 代价的——跳过原因是**上一轮**留下的，主机一旦离线就再没人覆盖它，屏幕上会永远
+		// 冻在那句旧理由上（最典型的就是换版后再没回来的 Windows 机器：写着「已有升级任务
+		// 在进行中」，而那个 job 早就收摊了）。所以对**确实落后**的离线主机记一条真话；
+		// 已经是目标版本的离线机器不记，免得把跳过表灌满噪音。
 		if h.LastSeen <= 0 || now-h.LastSeen > offlineSec {
+			if agentVersionBehind(h.AgentVersion, appVersion) {
+				detail := "主机离线，无法下发升级命令"
+				if h.LastSeen > 0 {
+					detail += fmt.Sprintf("（最后上报于 %s 前）", (time.Duration(now-h.LastSeen) * time.Second).String())
+				} else {
+					detail += "（从未上报过）"
+				}
+				s.agentUpdates.recordSkip(h.ID, "offline", detail)
+			}
 			continue
 		}
 		checked++
