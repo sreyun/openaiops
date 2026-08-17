@@ -129,3 +129,48 @@ func TestPowerShellScriptsHaveNoCaseColludingVariables(t *testing.T) {
 		}
 	}
 }
+
+// 现网 2026-08-17 23:15，server11 的取证输出里，目录中只剩三个脚本文件：
+//
+//	aiops-agent-update-helper.ps1  13850B  23:15:18   ← Agent 侧 module 助手（后写的）
+//	aiops-agent-update.cmd           278B  23:09:38
+//	aiops-agent-update.ps1         20169B  23:09:38   ← 服务端 legacy 助手
+//	（计划任务 AIOpsAgentLegacyUpdate：Last Run 23:09:51，Last Result: 1）
+//
+// 助手在 23:09 跑过并且失败了（Last Result=1），失败原因写进了 .result/.log；23:15 软重试
+// 改走 module 路径，而 Agent 侧每次开工都会 os.Remove 掉 aiops-agent-update.{log,result}
+// （清陈旧标记，对它自己完全正确）——两条路共用同一组文件名，于是**唯一记着为什么失败的
+// 那两个文件被下一次尝试擦掉了**，只留下一个 "Last Result: 1"。
+//
+// 两条路必须各写各的文件。Agent 侧那组名字已经烧进现网的老 Agent 里改不动，所以让服务端
+// 这一侧（引导脚本与助手都由服务端生成、同版本下发）改名。
+func TestUpdateHelperFileNamesDoNotCollide(t *testing.T) {
+	helper := windowsUpdateHelperScript()
+	inline := decodeLegacyWindowsPS(t, legacyWindowsAgentUpdateScript("https://mon.example", "aiops-agent.exe", testPinSHA))
+
+	// Agent 侧 module 路径写死的那组名字（cmd/agent/module_agent_update_windows.go）。
+	for _, agentOwned := range []string{"'aiops-agent-update.log'", "'aiops-agent-update.result'"} {
+		if strings.Contains(helper, agentOwned) {
+			t.Errorf("服务端助手仍在用 Agent 侧的文件名 %s：下一次 module 升级会把它的失败原因删掉", agentOwned)
+		}
+	}
+	for _, own := range []string{"aiops-agent-legacy-update.log", "aiops-agent-legacy-update.result"} {
+		if !strings.Contains(helper, own) {
+			t.Errorf("服务端助手没有使用自己的文件名 %s", own)
+		}
+	}
+	// 引导脚本等的标记必须与助手写的是同一个文件，否则握手永远等不到。
+	if !strings.Contains(inline, "aiops-agent-legacy-update") {
+		t.Fatal("引导脚本的 result 标记没跟着改名，握手会永远超时")
+	}
+	if strings.Contains(inline, `$Mk="$W\$N.result"`) {
+		t.Fatal("引导脚本仍在等 Agent 侧那个会被删掉的标记文件")
+	}
+	// 取证要同时读两组，否则改名之后反而看不见 legacy 的证据。
+	ev := decodeLegacyWindowsPS(t, windowsUpdateEvidenceCommand())
+	for _, want := range []string{"aiops-agent-update.log", "aiops-agent-legacy-update.log"} {
+		if !strings.Contains(ev, want) {
+			t.Errorf("取证命令没有读 %s", want)
+		}
+	}
+}

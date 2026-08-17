@@ -810,12 +810,17 @@ func windowsUpdateEvidenceCommand() string {
 	// 另外查一次计划任务：via=task 时它的"上次结果"能直接给出助手为什么没跑——
 	// 0x41325 就是"被电池策略拒绝运行"这类调度器自己的判定，主机上任何日志都不会有。
 	// ProgramData 之外还要看 TEMP：`md $W` 失败时引导脚本会整体退到那里。
+	//
+	// 两组文件名都要读：module 路径（Agent 自己生成的助手）写 aiops-agent-update.*，
+	// legacy 路径（服务端下发的助手）写 aiops-agent-legacy-update.*。它们曾经同名，
+	// 结果是后跑的那条把先跑的那条的失败原因删掉了——现网丢过一次，见
+	// TestUpdateHelperFileNamesDoNotCollide。
 	ps := `$ErrorActionPreference='SilentlyContinue'
 foreach($d in @("$env:ProgramData\aiops-agent-update","$env:TEMP\aiops-agent-update")){
 if(-not(Test-Path -LiteralPath $d)){Write-Output "--- $d MISSING";continue}
 Write-Output "--- $d"
 Get-ChildItem -LiteralPath $d -Force|ForEach-Object{Write-Output ("  "+$_.Name+" "+$_.Length+"B "+$_.LastWriteTime)}
-foreach($f in @('aiops-agent-update.result','aiops-agent-update.log')){$q=Join-Path $d $f
+foreach($f in @('aiops-agent-update.result','aiops-agent-update.log','aiops-agent-legacy-update.result','aiops-agent-legacy-update.log')){$q=Join-Path $d $f
 if(Test-Path -LiteralPath $q){Write-Output "--- $f";Get-Content -LiteralPath $q -Tail 25}}}
 foreach($t in @('AIOpsAgentLegacyUpdate','AIOpsAgentSelfUpdate')){
 $r=& "$env:SystemRoot\System32\schtasks.exe" /Query /TN $t /V /FO LIST 2>$null

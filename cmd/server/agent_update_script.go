@@ -384,6 +384,13 @@ echo "legacy agent update ok sha=$ACTUAL"
 // $Server / $Bin / $Sha 由引导脚本作为命令行参数传入；其余路径本脚本自行推导。$Sha 是
 // 服务端算出的产物摘要，见下面 Get-Payload 的注释——它是证书链断裂时仍能安全升级的前提。
 //
+// 第四条约束，2026-08-17 现网丢过一次证据：**本脚本的 log/result 文件名不能与 Agent 侧
+// module 助手那一组相同**。两条路都写在 ProgramData\aiops-agent-update\ 下，而 Agent 每次
+// 开工都会 os.Remove 掉 aiops-agent-update.{log,result} 来清陈旧标记——对它自己完全正确，
+// 但顺手把 legacy 这条路刚写下的失败原因一起删了。现网那台机器的取证输出里只剩计划任务的
+// "Last Result: 1"，唯一记着"为什么失败"的两个文件已经不在。因此本脚本写
+// aiops-agent-legacy-update.{log,result}；引导脚本等的标记也是同一个名字（见 $G）。
+//
 // 第三条隐性约束，踩过一次：**本脚本绝不能终止 AIOpsAgentLegacyUpdate 这个计划任务**。
 // 它自己就是该任务的运行实例，`schtasks /End` 会连整个任务进程树一起终止——而历史上
 // 那行调用恰好落在停服务、换二进制之前，于是每一次救援都死在那里：主机停在旧版本，
@@ -395,15 +402,18 @@ $ProgressPreference='SilentlyContinue'
 $helperPid = $PID
 $Started = Get-Date
 $Work = Split-Path -Parent $PSCommandPath
-$Log = Join-Path $Work 'aiops-agent-update.log'
+# These file names must differ from the agent module helper's -- it deletes its
+# own aiops-agent-update.{log,result} on every run and would take this path's
+# evidence with them. See the Go comment on windowsUpdateHelperPS.
+$Log = Join-Path $Work 'aiops-agent-legacy-update.log'
 function Write-Log($m){ try{ Add-Content -LiteralPath $Log -Value ("[{0}] {1}" -f (Get-Date -Format o), $m) -Encoding UTF8 }catch{} }
 # The result file is this helper's only channel back to the panel, so it is
 # written before anything that can fail. $Dir is unknown until the install is
 # resolved -- the copy beside the exe is added once it is.
 $Dir = $null
 function Write-Result($m){
-  $targets = @(Join-Path $Work 'aiops-agent-update.result')
-  if($Dir){ $targets += (Join-Path $Dir 'aiops-agent-update.result') }
+  $targets = @(Join-Path $Work 'aiops-agent-legacy-update.result')
+  if($Dir){ $targets += (Join-Path $Dir 'aiops-agent-legacy-update.result') }
   foreach($p in $targets){ try{ Set-Content -LiteralPath $p -Value $m -Encoding UTF8 }catch{} }
 }
 # One swap at a time, fleet-wide-proof: the bootstrap tries WMI, then a scheduled
@@ -915,7 +925,8 @@ $S='%s';$B='%s';$D='%s';$H='%s';$T='AIOpsAgentLegacyUpdate';$N='aiops-agent-upda
 $R="$env:SystemRoot\System32"
 $W="$env:ProgramData\$N"
 try{md $W -Force|Out-Null}catch{$W="$env:TEMP\$N";md $W -Force|Out-Null}
-$F="$W\$N.ps1";$U="$S%s";$Mk="$W\$N.result";$Cm="$W\$N.cmd"
+$G='aiops-agent-legacy-update'
+$F="$W\$N.ps1";$U="$S%s";$Mk="$W\$G.result";$Cm="$W\$N.cmd"
 rm $F,$Mk -Force -EA 0
 try{(New-Object Net.WebClient).DownloadFile($U,$F)}catch{[Net.ServicePointManager]::ServerCertificateValidationCallback={$true};(New-Object Net.WebClient).DownloadFile($U,$F)}
 $sha=[Security.Cryptography.SHA256]::Create();$fs=[IO.File]::OpenRead($F)
@@ -930,8 +941,8 @@ $Try={param($tg,$bk)if($k){return};try{&$bk}catch{return};for($i=0;$i -lt 12;$i+
 &$Try 'wmi' {if(([wmiclass]'Win32_Process').Create('"'+$P+'" '+$Ar).ReturnValue){throw 'x'}}
 &$Try 'task' {[void](& "$R\schtasks.exe" /Create /TN $T /TR $Cm /SC ONCE /ST 23:59 /RU SYSTEM /F);if($LASTEXITCODE){throw 'x'};[void](& "$R\schtasks.exe" /Run /TN $T)}
 &$Try 'cmd' {Start-Process $Cm -WindowStyle Hidden}
-if(-not $k){throw "helper never started (wmi/task/cmd); see $W\$N.log"}
-Write-Output "legacy agent update ok helper=$($hx.Substring(0,12)) via=$k log=$W\$N.log"
+if(-not $k){throw "helper never started (wmi/task/cmd); see $W\$G.log"}
+Write-Output "legacy agent update ok helper=$($hx.Substring(0,12)) via=$k log=$W\$G.log"
 `,
 		strings.ReplaceAll(server, "'", "''"),
 		strings.ReplaceAll(bin, "'", "''"),
