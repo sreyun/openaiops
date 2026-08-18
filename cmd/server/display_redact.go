@@ -139,19 +139,6 @@ func (s *Server) sanitizeActivityEntry(e LogEntry, idToLabel map[string]string) 
 	return e
 }
 
-// (s *Server) redactUserFacing is a convenience wrapper.
-func (s *Server) redactUserFacing(text string) string {
-	return redactUserFacingText(text, s.buildHostLabelMap())
-}
-
-// (h *SreyunCore) redactUserFacing uses the parent server map when available.
-func (h *SreyunCore) redactUserFacing(text string) string {
-	if h == nil || h.s == nil {
-		return redactUserFacingText(text, nil)
-	}
-	return h.s.redactUserFacing(text)
-}
-
 // (h *SreyunCore) hostLabelForID resolves a host_id to a safe display label.
 func (h *SreyunCore) hostLabelForID(hostID string) string {
 	hostID = strings.TrimSpace(hostID)

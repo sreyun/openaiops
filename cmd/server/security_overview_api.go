@@ -142,11 +142,6 @@ func scheduleHealthFromPlaybook(enabled bool, sc *PlaybookSchedule) map[string]a
 	return out
 }
 
-func (s *Server) countOpenSecurityFindings() (critical, high int) {
-	c := s.countOpenSecurityFindingsDetail()
-	return c.Critical, c.High
-}
-
 func findingOpen(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case "resolved", "false_positive", "ack", "accepted":

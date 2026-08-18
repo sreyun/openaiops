@@ -249,8 +249,6 @@ type forwardManager struct {
 	connCounts      map[string]*fwdCounter          // per-rule / per-http-proxy 活跃+累计连接数
 	stats           forwardStats                    // P3: aggregate metrics
 	cfg             *ConfigStore                    // config reference for port range
-	store           *Store                          // store reference for host lookup
-	server          *Server                         // server reference for serveForwardListener (restart)
 }
 
 func newForwardManager(cfg *ConfigStore) *forwardManager {
@@ -615,7 +613,9 @@ func (m *forwardManager) createRule(hostID, hostname string, targetPort, localPo
 	var ln net.Listener
 	var pc net.PacketConn
 	var err error
-	actualPort := localPort
+	// 绑定成功后端口一律从 listener/PacketConn 上回读（见下方 actualPort），
+	// 因为 OS 自动分配那条路径只有内核知道结果。所以这里不再预置任何"打算用的端口"，
+	// 免得留下一个看着像真值、实际永远被覆盖的变量。
 	// tryBind 按协议绑定 TCP 监听器或 UDP 报文连接（二选一）。
 	tryBind := func(addr string) error {
 		if protocol == "udp" {
@@ -628,16 +628,14 @@ func (m *forwardManager) createRule(hostID, hostname string, targetPort, localPo
 	bound := func() bool { return ln != nil || pc != nil }
 
 	if localPort > 0 {
-		if tryBind(listenHost+":"+strconv.Itoa(localPort)) != nil {
-			actualPort = 0 // 指定端口占用，退回端口段
-		}
+		// 指定端口占用就往下走端口段；bound() 是唯一的判据。
+		_ = tryBind(listenHost + ":" + strconv.Itoa(localPort))
 	}
 	if !bound() {
 		rng := int(time.Now().UnixNano() % int64((maxPort-minPort)+1))
 		for attempt := 0; attempt < 100; attempt++ {
 			candidate := minPort + ((rng + attempt) % ((maxPort - minPort) + 1))
 			if tryBind(listenHost+":"+strconv.Itoa(candidate)) == nil {
-				actualPort = candidate
 				break
 			}
 		}
@@ -648,6 +646,7 @@ func (m *forwardManager) createRule(hostID, hostname string, targetPort, localPo
 		}
 	}
 
+	actualPort := 0
 	if protocol == "udp" {
 		actualPort = pc.LocalAddr().(*net.UDPAddr).Port
 	} else {
@@ -859,36 +858,6 @@ func (m *forwardManager) updateRuleWhitelist(id string, enabled bool, list []str
 	m.mu.Unlock()
 	_ = m.cfg.UpdateForwardRule(id, persistedFromRule(r))
 	return r, nil
-}
-
-// copyRule duplicates an existing rule with a new ID.
-func (m *forwardManager) copyRule(id string) (*forwardRule, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	r, ok := m.rules[id]
-	if !ok {
-		return nil, fmt.Errorf("rule not found")
-	}
-	wlOn, wlList, _ := r.whitelistSnapshot()
-	newRule := &forwardRule{
-		id:           termID()[:8],
-		hostID:       r.hostID,
-		hostname:     r.hostname,
-		targetPort:   r.targetPort,
-		localPort:    0, // will be auto-assigned
-		listenAddr:   "",
-		listener:     nil,
-		packetConn:   nil,
-		protocol:     r.protocol,
-		groupID:      r.groupID,
-		operator:     r.operator,
-		createdAt:    time.Now().Unix(),
-		enabled:      true,
-		remoteTarget: r.remoteTarget,
-	}
-	newRule.setWhitelist(wlOn, wlList)
-	m.rules[newRule.id] = newRule
-	return newRule, nil
 }
 
 // restoreRules recreates TCP forward listeners from persisted config on startup.

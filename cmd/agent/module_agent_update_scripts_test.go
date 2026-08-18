@@ -103,9 +103,15 @@ func TestWindowsHelperStartsRegisteredServiceWithoutConfig(t *testing.T) {
 	if loop < 0 || loop < gate {
 		t.Fatal("service start loop must sit after — and outside — the config-gated branch")
 	}
-	userMode := strings.Index(script, "return (Restart-AgentUserMode")
+	// Restart-AgentService returns 'service'/'usermode'/'failed' rather than a
+	// boolean, so the tail is a guarded call instead of "return (Restart-...".
+	// What matters here is unchanged: user mode is reached only after the loop.
+	userMode := strings.Index(script, "Restart-AgentUserMode -Exe $Exe")
 	if userMode < 0 || userMode < loop {
 		t.Fatal("user-mode fallback must be the last resort, after the service start attempt")
+	}
+	if !strings.Contains(script, "return 'usermode'") {
+		t.Fatal("a user-mode start must be reported as its own outcome, not as success")
 	}
 }
 
@@ -371,7 +377,9 @@ func TestWindowsHelperLeavesHealthyAgentAloneOnPreSwapFailure(t *testing.T) {
 	}
 	// The restart call must sit *directly* under the guard. Checking the line in
 	// isolation cannot tell guarded from unguarded — it is the same text either way.
-	guarded := guard + "\n      [void](Restart-AgentService -Exe $exe -Cfg $cfg -Dir $dir)\n"
+	// The call now keeps its tri-state result (and logs it) instead of discarding
+	// it with [void]; the guarding it must sit under is what this test protects.
+	guarded := guard + "\n      $rbMode = Restart-AgentService -Exe $exe -Cfg $cfg -Dir $dir\n"
 	if !strings.Contains(script, guarded) {
 		t.Fatal("the restart call is not the guarded branch's body")
 	}
@@ -402,5 +410,72 @@ func TestWindowsHelperUsesSharedVersionProbe(t *testing.T) {
 	}
 	if strings.Contains(script, "$probe.ExitCode -ne 0") {
 		t.Fatal("退出码读不出来时是 $null，直接与 0 比较会把可用的二进制判死")
+	}
+}
+
+// ---- 换版后的成败判据 ----
+//
+// 这三个测试守的是同一次线上事故：一次发版后全部 Windows Agent 离线，盘上是新
+// 二进制、服务却是 Stopped，而控制台记的是「升级成功」。三个缺陷叠出来的：
+// 用退出码判 install-service 的成败、用户态兜底被当成成功、成功就不回滚。
+
+// install-service 的成败绝不能看 Start-Process -PassThru 的退出码：在拦截/包装
+// 进程创建的主机上（EDR）ExitCode 读出来是 $null，"-eq 0" 对一次完全成功的执行
+// 也为假。这和当初误判探针的是同一个缺陷（见 shared.WindowsVersionProbePS）。
+func TestWindowsUpdateNeverJudgesInstallServiceByExitCode(t *testing.T) {
+	script := buildWindowsUpdateHelperScript(`C:\a\aiops-agent.exe`, `C:\a\new.exe`,
+		`C:\a\config.yaml`, `C:\a\u.log`, `C:\a\u.result`, `C:\b\u.result`)
+	for _, forbidden := range []string{
+		"$p -and $p.ExitCode -eq 0",
+		"$p.ExitCode -eq 0",
+	} {
+		if strings.Contains(script, forbidden) {
+			t.Fatalf("助手仍在用退出码判定 install-service 的成败: %q", forbidden)
+		}
+	}
+	if !strings.Contains(script, "advisory only") {
+		t.Fatal("退出码应降级为日志线索，并在脚本里写明它只是 advisory")
+	}
+	// 判据必须落在可观测的事实上：服务进入 Running。
+	if !strings.Contains(script, "Wait-ServiceState $name 'Running' 45") {
+		t.Fatal("install-service 之后必须以服务状态作为判据")
+	}
+}
+
+// 用户态兜底把二进制拉起来了，但没有服务：进程随会话结束而死、重启后无人拉起。
+// 这不能记成升级成功，否则机群会在控制台一片绿的情况下悄悄掉光。
+func TestWindowsUpdateReportsUserModeStartAsDegraded(t *testing.T) {
+	script := buildWindowsUpdateHelperScript(`C:\a\aiops-agent.exe`, `C:\a\new.exe`,
+		`C:\a\config.yaml`, `C:\a\u.log`, `C:\a\u.result`, `C:\b\u.result`)
+	for _, want := range []string{
+		"return 'usermode'",
+		"return 'service'",
+		"return 'failed'",
+		"reason=service-not-running",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("助手缺少三态重启结果 %q", want)
+		}
+	}
+	deg := strings.Index(script, `Write-Result ("degraded `)
+	ok := strings.Index(script, `Write-Result ("ok `)
+	if deg < 0 || ok < 0 {
+		t.Fatal("助手必须能分别写出 degraded 与 ok 两种结果")
+	}
+	if deg > ok {
+		t.Fatal("degraded 分支必须在 ok 之前判定，否则用户态启动仍会被记成成功")
+	}
+}
+
+// 三态返回值是字符串。PowerShell 里任何非空字符串都为真，所以
+// "if (-not (Restart-AgentService ...))" 会把 'failed' 读成成功——必须显式比较。
+func TestRestartAgentServiceResultIsComparedAsString(t *testing.T) {
+	script := buildWindowsUpdateHelperScript(`C:\a\aiops-agent.exe`, `C:\a\new.exe`,
+		`C:\a\config.yaml`, `C:\a\u.log`, `C:\a\u.result`, `C:\b\u.result`)
+	if strings.Contains(script, "-not (Restart-AgentService") {
+		t.Fatal("三态结果被当布尔用：'failed' 是非空字符串，会被判成成功")
+	}
+	if !strings.Contains(script, "$restartMode -eq 'failed'") {
+		t.Fatal("必须显式比较 'failed' 才触发回滚")
 	}
 }

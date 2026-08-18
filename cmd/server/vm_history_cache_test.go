@@ -188,7 +188,11 @@ func TestVMCircuitBreakerHalfOpenAdmitsOneProbe(t *testing.T) {
 		t.Fatal("second cool-down did not admit a probe")
 	}
 	b.success()
-	if !b.allow() || !b.allow() {
+	// allow() 有副作用（消耗探测配额），这里要的就是「连续两次都放行」。写成
+	// `!b.allow() || !b.allow()` 会短路：第一次放行时第二次才执行，第一次不放行时
+	// 第二次根本不跑——断言强度取决于结果，不是我们想要的。显式取两次值。
+	firstAllowed, secondAllowed := b.allow(), b.allow()
+	if !firstAllowed || !secondAllowed {
 		t.Fatal("successful probe did not close the breaker")
 	}
 }

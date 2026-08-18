@@ -20,7 +20,7 @@ func BuildExplainReport(sql string, d Dialect, analysis *ExplainAnalysis, meta S
 		IndexHints:   opt.IndexHints,
 		Suggestions:  []Finding{},
 		RewrittenSQL: opt.RewrittenSQL,
-		MetadataUsed: meta != nil && len(meta) > 0,
+		MetadataUsed: len(meta) > 0,
 	}
 
 	if analysis != nil {

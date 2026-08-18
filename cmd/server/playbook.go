@@ -407,9 +407,7 @@ func (pm *playbookManager) resolveOneTarget(target string, hosts []*Host) []*Hos
 	var result []*Host
 	switch {
 	case target == "" || target == "all":
-		for _, h := range hosts {
-			result = append(result, h)
-		}
+		result = append(result, hosts...)
 	case strings.HasPrefix(target, "folder:"):
 		fid := strings.TrimSpace(target[len("folder:"):])
 		if fid == "" || pm.cfg == nil {

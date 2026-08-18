@@ -1359,14 +1359,6 @@ func adaptiveHistoryStep(from, to int64) int64 {
 	}
 }
 
-// queryHistory reads a host's series back from VM (the authoritative time-series
-// store) over [from,to] and reassembles []shared.Sample keyed by timestamp.
-// Prefer stepped query_range (consistent density); fall back to raw export for
-// short windows when MetricsQL selector is unavailable.
-func (v *vmWriter) queryHistory(hostID string, from, to int64) ([]shared.Sample, bool) {
-	return v.queryHistoryFilter(hostID, from, to, nil)
-}
-
 func (v *vmWriter) queryHistoryFilter(hostID string, from, to int64, names []string) ([]shared.Sample, bool) {
 	out, ok, _ := v.queryHistoryFilterReason(hostID, from, to, names)
 	return out, ok
@@ -1447,10 +1439,6 @@ func (v *vmWriter) queryHistoryFilterInner(hostID string, from, to int64, names 
 	return nil, false
 }
 
-func (v *vmWriter) queryHistoryExport(hostID string, from, to int64) ([]shared.Sample, bool) {
-	return v.queryHistoryExportNames(hostID, from, to, nil)
-}
-
 func (v *vmWriter) queryHistoryExportNames(hostID string, from, to int64, names []string) ([]shared.Sample, bool) {
 	c := v.cfg.VMConfig()
 	if !c.Enabled || c.URL == "" {
@@ -1478,12 +1466,6 @@ func (v *vmWriter) queryHistoryExportNames(hostID string, from, to int64, names 
 		return nil, false
 	}
 	return downsampleSamples(out, 600), true // shared helper in sreyun_charts.go
-}
-
-// queryHistoryRange uses MetricsQL series selector + query_range so long windows
-// stay bounded. Reassembles the same Sample shape as parseVMExport.
-func (v *vmWriter) queryHistoryRange(hostID string, from, to, step int64) ([]shared.Sample, bool) {
-	return v.queryHistoryRangeNames(hostID, from, to, step, nil)
 }
 
 func (v *vmWriter) queryHistoryRangeNames(hostID string, from, to, step int64, names []string) ([]shared.Sample, bool) {

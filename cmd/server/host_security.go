@@ -83,12 +83,7 @@ func normalizeFIMScope(s string) string {
 
 // clamAVEnabled defaults ON. Opt out with disable_clamav=true (preferred) or
 // enable_clamav=false when disable_clamav is unset and config was explicitly saved.
-func (c HostSecurityConfig) clamAVEnabled() bool {
-	if c.DisableClamAV {
-		return false
-	}
-	return true
-}
+func (c HostSecurityConfig) clamAVEnabled() bool { return !c.DisableClamAV }
 
 // fimEnabled defaults ON. Opt out with disable_fim=true.
 func (c HostSecurityConfig) fimEnabled() bool {
@@ -365,10 +360,8 @@ type hostSecurityManager struct {
 	scans      []*HostScanResult
 	lastByHost map[string]*HostScanResult
 	lastRun    map[string]int64 // schedule key → unix
-	lastTick   time.Time
 	dir        string
 	seq        int
-	persist    func()
 }
 
 func newHostSecurityManager(dir string) *hostSecurityManager {
@@ -388,23 +381,6 @@ func newHostSecurityManager(dir string) *hostSecurityManager {
 		m.seq = len(m.scans)
 	}
 	return m
-}
-
-// allocScanMeta builds a short readable id + label, e.g.
-// id=hs-003-0725-1830-a3f1  label=sre.local · #003 · 07-25 18:30
-func (m *hostSecurityManager) allocScanMeta(hostname string) (id, label string, seq int) {
-	m.mu.Lock()
-	m.seq++
-	seq = m.seq
-	m.mu.Unlock()
-	now := time.Now()
-	hostname = strings.TrimSpace(hostname)
-	if hostname == "" {
-		hostname = "未命名主机"
-	}
-	id = fmt.Sprintf("hs-%03d-%s-%s", seq, now.Format("0102-1504"), randomHex(2))
-	label = fmt.Sprintf("%s · #%03d · %s", hostname, seq, now.Format("01-02 15:04"))
-	return id, label, seq
 }
 
 func (m *hostSecurityManager) path() string {
@@ -468,30 +444,6 @@ func (m *hostSecurityManager) saveLocked() {
 		return
 	}
 	_ = os.Rename(tmp, m.path())
-}
-
-func (m *hostSecurityManager) add(scan *HostScanResult) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.scans = append([]*HostScanResult{scan}, m.scans...)
-	if len(m.scans) > hostSecMaxScans {
-		m.scans = m.scans[:hostSecMaxScans]
-	}
-	m.rememberLastLocked(scan)
-	m.saveLocked()
-}
-
-func (m *hostSecurityManager) update(scan *HostScanResult) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for i, s := range m.scans {
-		if s != nil && s.ID == scan.ID {
-			m.scans[i] = scan
-			break
-		}
-	}
-	m.rememberLastLocked(scan)
-	m.saveLocked()
 }
 
 // finishIfRunning applies completion only while the scan is still running.
@@ -1118,6 +1070,11 @@ func (m *hostSecurityManager) reapStuckLocked(timeoutSec int) int {
 			sc.Error = fmt.Sprintf("扫描超时中断（超过 %ds）", limit)
 			sc.FinishedAt = now
 			n++
+			// 扫描超时的形态是「安全页面上这台机器一直没有新结果」——看起来像没扫，
+			// 其实是每次都跑到一半被掐掉。反复超时说明预算或目标规模不对，属于要人
+			// 处理的一类；进归口后连续 3 次同因就会开事件。
+			reportFault("scan", "host_security_timeout", "warning", sc.HostID,
+				fmt.Sprintf("主机安全扫描「%s」超时中断（超过 %ds），本次结果作废", firstNonEmpty(sc.Hostname, sc.HostID), limit), "")
 		}
 	}
 	if n > 0 {
@@ -1144,18 +1101,6 @@ func (m *hostSecurityManager) cancelScan(id string) bool {
 		return true
 	}
 	return false
-}
-
-func (m *hostSecurityManager) runningCount() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	n := 0
-	for _, s := range m.scans {
-		if s != nil && s.Status == "running" {
-			n++
-		}
-	}
-	return n
 }
 
 func (s *Server) beginHostSecurityScan(hostID, operator, trigger string) *HostScanResult {

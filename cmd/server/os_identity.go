@@ -1,7 +1,6 @@
 package main
 
 import (
-	"strconv"
 	"strings"
 )
 
@@ -158,11 +157,6 @@ func normalizeWindowsVersion(platform string) string {
 	}
 	// Fallback: "Windows 11 (Build 26100)" / bare year tokens.
 	return normalizeHostDistroMajor(platform)
-}
-
-func hostDistroMajorInt(ver string) int {
-	n, _ := strconv.Atoi(normalizeHostDistroMajor(ver))
-	return n
 }
 
 // distroVersionMatches reports whether want (selector side) matches have (host).

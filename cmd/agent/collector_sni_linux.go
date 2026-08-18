@@ -74,10 +74,8 @@ func (sc *sniCollector) runNative(ctx context.Context, reporter func(shared.DNSM
 	closeFD := func() { closeOnce.Do(func() { _ = syscall.Close(fd) }) }
 	defer closeFD()
 	go func() {
-		select {
-		case <-ctx.Done():
-			closeFD() // 解除阻塞中的 Recvfrom
-		}
+		<-ctx.Done()
+		closeFD() // 解除阻塞中的 Recvfrom
 	}()
 
 	// 内核 BPF 过滤（best-effort）。必须在 bind 之前挂：bind 前的短暂窗口即使漏几个包也无所谓，

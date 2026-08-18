@@ -56,7 +56,8 @@ func TestOverrideDirTakesPrecedence(t *testing.T) {
 }
 
 func TestHashVersionDeterministic(t *testing.T) {
-	if hashVersion("abc") != hashVersion("abc") {
+	first, second := hashVersion("abc"), hashVersion("abc")
+	if first != second {
 		t.Fatal("hash should be deterministic")
 	}
 	if hashVersion("abc") == hashVersion("abd") {

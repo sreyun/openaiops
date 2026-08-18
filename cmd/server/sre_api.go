@@ -3711,13 +3711,6 @@ func (s *Server) retrieveMemoryWithCitations(preferKind, userMsg string, topK in
 	return b.String(), n, "", citations
 }
 
-// retrieveMemoryForPrompt 根据用户当前消息检索语义最相关的 Top-K 历史记忆，
-// 返回可拼入 system prompt 的文本片段。无 pg / 无 embedding 配置时返回空串。
-func (s *Server) retrieveMemoryForPrompt(preferKind, userMsg string, topK int) string {
-	t, _, _ := s.retrieveMemoryDetailed(preferKind, userMsg, topK)
-	return t
-}
-
 // handleDiagnosisFeedback records user feedback on an AI diagnosis.
 // POST /api/v1/incidents/{id}/diagnosis-feedback  {message_index, helpful, reason?}
 func (s *Server) handleDiagnosisFeedback(w http.ResponseWriter, r *http.Request) {

@@ -87,17 +87,6 @@ func (h *SreyunCore) toolCount() int { return len(h.snapshot().byName) }
 // nativeToolDefs returns the OpenAI-style function definitions (read-only).
 func (h *SreyunCore) nativeToolDefs() []map[string]any { return h.snapshot().native }
 
-// toolPrompt returns the text-injection tool description block.
-func (h *SreyunCore) toolPrompt() string { return h.snapshot().prompt }
-
-// eachTool iterates the published snapshot. Safe against concurrent re-registration.
-func (h *SreyunCore) eachTool(fn func(name string, t SreyunTool)) {
-	snap := h.snapshot()
-	for _, name := range snap.names {
-		fn(name, snap.byName[name])
-	}
-}
-
 // mutateTools applies fn to the staging map under the write lock, then republishes.
 func (h *SreyunCore) mutateTools(fn func(tools map[string]SreyunTool)) {
 	h.toolsMu.Lock()

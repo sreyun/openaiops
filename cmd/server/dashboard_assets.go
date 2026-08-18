@@ -102,14 +102,6 @@ func (s *Server) removeDashAssetFile(dashID, name string) {
 	_ = os.Remove(path)
 }
 
-func (s *Server) removeDashAssetURL(url string) {
-	dashID, name, ok := parseDashAssetURL(url)
-	if !ok {
-		return
-	}
-	s.removeDashAssetFile(dashID, name)
-}
-
 // removeDashboardAssets 删除某看板的全部外观资源目录。
 func (s *Server) removeDashboardAssets(dashID string) {
 	if !dashAssetDashIDRe.MatchString(dashID) {

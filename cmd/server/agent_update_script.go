@@ -618,6 +618,12 @@ function Test-Running {
   } | Select-Object -First 1
   return ($null -ne $daemon)
 }
+# Restart-Agent returns 'service' / 'usermode' / 'failed', never a boolean.
+# 'usermode' means the binary runs but no Windows service does: the host stays up
+# only until that process or its logon session ends, and nothing restarts it on
+# reboot. Callers MUST compare the returned string against 'failed'. A boolean
+# test would silently invert the meaning: in PowerShell every non-empty string is
+# truthy, so 'failed' would be read as success and the rollback never fires.
 function Restart-Agent {
   $ok=$false
   $svcs=@()
@@ -626,13 +632,24 @@ function Restart-Agent {
   Write-Log ("restart path hasService=$hasSvc cfg=$Cfg")
   if($hasSvc -and $Cfg){
     $p=Start-Process -FilePath $Exe -ArgumentList @('--install-service','--config',$Cfg) -WorkingDirectory $Dir -Wait -PassThru -WindowStyle Hidden
-    if($p -and $p.ExitCode -eq 0){ $ok=$true }
+    # Never judge by $p.ExitCode: on hosts that intercept or wrap process
+    # creation (EDR), the getter throws and PowerShell swallows it into $null,
+    # so "-eq 0" is False for a run that fully succeeded -- the same defect that
+    # made the version probe reject a good binary. Judge by service state below.
+    $code='unavailable'
+    try{ if($null -ne $p){ $code=[string]$p.ExitCode } }catch{ $code='unavailable' }
+    if([string]::IsNullOrEmpty($code)){ $code='unavailable' }
+    Write-Log ("install-service exit=" + $code + " (advisory only; verdict comes from service state)")
   }
   # A registered service already carries '--service --config <abs>' in its
   # ImagePath, so plain start is the correct recovery -- including when no config
   # could be resolved at all. Gating this on $Cfg is how a host ended up with a
   # freshly swapped binary, a stopped service and no way back online.
-  if(-not $ok -and $svcs.Count -gt 0){
+  # Runs unconditionally now. --install-service normally starts the service
+  # itself, in which case sc start just returns ERROR_SERVICE_ALREADY_RUNNING and
+  # the status check below confirms it -- so this doubles as the verification the
+  # exit code can no longer provide.
+  if($svcs.Count -gt 0){
     foreach($n in $svcs){
       [void](Invoke-Native "$env:SystemRoot\System32\sc.exe" @('start',$n))
       try{ Start-Service -Name $n -ErrorAction SilentlyContinue }catch{}
@@ -644,7 +661,8 @@ function Restart-Agent {
       if($ok){ Write-Log ("service started: " + $n); break }
     }
   }
-  if(-not $ok){
+  if($ok){ return 'service' }
+  if($true){
     $vbs=Join-Path $Dir 'start-agent.vbs'
     if(Test-Path -LiteralPath $vbs){
       Start-Process wscript.exe -ArgumentList ('"'+$vbs+'"') -WorkingDirectory $Dir -WindowStyle Hidden
@@ -656,8 +674,20 @@ function Restart-Agent {
       else { Write-Log 'FATAL: no service and no config beside exe; refusing bare Start-Process'; return $false }
     }
   }
-  for($i=0;$i -lt 20;$i++){ if(Test-Running){ return $true }; Start-Sleep -Seconds 2 }
-  return $false
+  # Last chance: a service may still be coming up. Only a Running service counts
+  # as a real restart; anything else is at best a loose process.
+  for($i=0;$i -lt 20;$i++){
+    foreach($n in $svcNames){
+      $s=Get-Service $n -ErrorAction SilentlyContinue
+      if($s -and $s.Status -eq 'Running'){ Write-Log ("service running: " + $n); return 'service' }
+    }
+    if(Test-Running){
+      Write-Log 'WARNING: agent process is up but no Windows service is running'
+      return 'usermode'
+    }
+    Start-Sleep -Seconds 2
+  }
+  return 'failed'
 }
 $SvcCmd = Get-AgentServiceCommandLine
 $Exe = Resolve-AgentExe
@@ -732,8 +762,17 @@ try {
   if(-not $moved){ throw 'replace binary failed (file lock)' }
   $swapped = $true
   try{ Unblock-File -Path $Exe -ErrorAction SilentlyContinue }catch{}
-  if(-not (Restart-Agent)){ throw 'agent not running after update' }
+  $restartMode = Restart-Agent
+  if($restartMode -eq 'failed'){ throw 'agent not running after update' }
   $ver = (Invoke-VersionProbe $Exe).Output
+  if($restartMode -eq 'usermode'){
+    # Swapped, and something is running -- but not as a service. Do not report
+    # this as a successful update: the host will drop offline later while the
+    # console still shows green, which is exactly how a fleet goes dark quietly.
+    Write-Log ("update degraded: binary is at " + $ver + " but the Windows service is NOT running")
+    Write-Result ("degraded " + (Get-Date -Format o) + " version=" + $ver + " reason=service-not-running")
+    exit 0
+  }
   Write-Log ("update ok version=" + $ver)
   Write-Result ("ok " + (Get-Date -Format o) + " version=" + $ver)
   exit 0
@@ -754,7 +793,8 @@ try {
     # (no admin rights, locked SCM). Restart only when the swap happened or the
     # agent is genuinely not running.
     if($swapped -or -not (Test-Running)){
-      [void](Restart-Agent)
+      $rbMode = Restart-Agent
+      Write-Log ("rollback restart mode=" + $rbMode)
     } else {
       Write-Log 'agent still running and nothing was swapped; leaving it alone'
     }

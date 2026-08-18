@@ -1439,14 +1439,6 @@ func driftForecast(vals []float64, steps int, damp float64) []float64 {
 	return out
 }
 
-func detectSeasonPeriod(vals []float64) int {
-	p, corr := detectSeasonPeriodCorr(vals)
-	if corr < 0.32 {
-		return 0
-	}
-	return p
-}
-
 func detectSeasonPeriodCorr(vals []float64) (period int, bestCorr float64) {
 	n := len(vals)
 	if n < 16 {

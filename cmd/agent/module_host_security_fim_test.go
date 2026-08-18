@@ -96,7 +96,7 @@ func TestFimMaybeTextDiffOnHashChange(t *testing.T) {
 func TestCollectFIMInventoryRespectsDisableDiff(t *testing.T) {
 	// Smoke: function returns without panic; inventory may be empty on Windows CI sandbox.
 	inv, diffs := collectFIMInventory(false)
-	if diffs != nil && len(diffs) != 0 {
+	if len(diffs) != 0 {
 		t.Fatalf("diff disabled but got %d diffs", len(diffs))
 	}
 	_ = inv

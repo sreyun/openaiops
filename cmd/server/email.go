@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
-	"net"
 	"net/smtp"
 	"strings"
 	"sync"
@@ -168,13 +167,6 @@ func (em *emailManager) canSend(email string) bool {
 		}
 	}
 	return true
-}
-
-// markSent records the send time for rate limiting.
-func (em *emailManager) markSent(email string) {
-	em.mu.Lock()
-	em.lastSent[strings.ToLower(email)] = time.Now()
-	em.mu.Unlock()
 }
 
 // issueCode generates and stores a 6-digit code for the given email + purpose.
@@ -350,11 +342,4 @@ func validEmail(s string) bool {
 	domain := s[at+1:]
 	dot := strings.IndexByte(domain, '.')
 	return dot > 0 && dot < len(domain)-1
-}
-
-// lookupMX is an optional best-effort MX record check — used to give a friendlier
-// error when the domain has no mail server. Returns nil if the check can't be done.
-func lookupMX(domain string) bool {
-	_, err := net.LookupMX(domain)
-	return err == nil
 }

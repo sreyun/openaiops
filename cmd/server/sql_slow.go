@@ -490,10 +490,6 @@ LIMIT ?`
 	return strings.TrimSpace(q), args
 }
 
-func mysqlCollectSlowDigests(c MySQLConnection, cfg *SlowSQLMonitorConfig) ([]slowDigestRow, error) {
-	return mysqlCollectSlowDigestsWithCache(c, cfg, nil)
-}
-
 func mysqlCollectSlowDigestsWithCache(c MySQLConnection, cfg *SlowSQLMonitorConfig, cache *sqlDigestFulltextCache) ([]slowDigestRow, error) {
 	cfg = cfg.withDefaults()
 	db, err := mysqlOpenSlow(c)

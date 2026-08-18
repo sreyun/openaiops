@@ -79,12 +79,6 @@ func (d *DB) BindSRE(inc *incidentManager, tk *ticketManager) {
 	d.tickets = tk
 }
 
-// dbPathFor places the database next to the server config file.
-func dbPathFor(cfgPath string) string {
-	dir := filepath.Dir(cfgPath)
-	return filepath.Join(dir, "aiops.db")
-}
-
 // recordingsDirFor places the terminal session recordings next to the config/DB,
 // so they live on the same persistent data volume.
 func recordingsDirFor(cfgPath string) string {

@@ -128,11 +128,6 @@ func Tz(key string, args ...any) string {
 	return T(defaultLang, key, args...)
 }
 
-// supportedLangsList returns the list of supported languages for the API.
-func supportedLangsList() []string {
-	return supportedLangs
-}
-
 // LogKind constants — stored as English enum values, translated at display time.
 const (
 	KindOperation = "operation"

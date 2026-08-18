@@ -154,12 +154,7 @@ func moduleHostInspectCtx(ctx context.Context, args map[string]string) ([]byte, 
 			},
 		},
 	}
-	check := func() bool {
-		if ctx.Err() != nil {
-			return false
-		}
-		return true
-	}
+	check := func() bool { return ctx.Err() == nil }
 	// 基础（全平台）
 	if !check() {
 		return []byte(`{"error":"cancelled"}`), 130
@@ -727,7 +722,7 @@ func (b *inspectBuilder) collectDisk() {
 	st := "ok"
 	items := []inspectItem{}
 	alert := 0
-	type diskRow struct{ mount, fstype, size, used, avail, pct string }
+	type diskRow struct{ mount, size, used, avail, pct string }
 
 	var rows []diskRow
 	switch runtime.GOOS {

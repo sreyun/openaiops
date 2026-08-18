@@ -347,9 +347,7 @@ func (s *Server) handleListSSOIdentities(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	ids := make([]ExternalIdentity, 0, len(acc.Identities))
-	for _, id := range acc.Identities {
-		ids = append(ids, id)
-	}
+	ids = append(ids, acc.Identities...)
 	cfg := s.cfg.SSOConfig()
 	oidc := s.cfg.OIDCConfig()
 	type avail struct {

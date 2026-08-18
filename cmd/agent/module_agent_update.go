@@ -192,6 +192,7 @@ var updateDiagnostics struct {
 	text string
 }
 
+//lint:ignore U1000 used by module_agent_update_windows.go; CI analyses linux only
 func setUpdateDiagnostics(s string) {
 	updateDiagnostics.mu.Lock()
 	updateDiagnostics.text = s

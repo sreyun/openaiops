@@ -406,7 +406,7 @@ func main() {
 				level = slog.LevelWarn
 				enforcingModules = append(enforcingModules, m)
 			}
-			slog.Log(nil, level, "检测到安全模块",
+			slog.Log(context.Background(), level, "检测到安全模块",
 				"module", m.Name, "status", m.Status, "details", m.Details)
 		}
 		// Handle --security-mode parameter

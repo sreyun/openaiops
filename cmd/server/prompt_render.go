@@ -20,7 +20,6 @@ type promptVars map[string]string
 type promptStore struct {
 	mu      sync.RWMutex
 	dir     string
-	version string // 全局版本指纹：目录有覆盖时随覆盖内容变化
 }
 
 var defaultPromptStore = &promptStore{}

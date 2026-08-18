@@ -109,37 +109,6 @@ func isKylinFamily(d OSDistInfo) bool {
 	return false
 }
 
-// isKylinOS is the legacy helper for backward compatibility.
-func isKylinOS() bool {
-	return isKylinFamily(getOSDist())
-}
-
-// isDomesticOS returns true for Chinese domestic operating systems that may
-// have non-standard security modules (kysec, custom SELinux policies, etc.).
-func isDomesticOS() bool {
-	d := getOSDist()
-	domesticIDs := map[string]bool{
-		"kylin": true, "neokylin": true, "uos": true, "deepin": true,
-		"openeuler": true, "openEuler": true, "euleros": true, "nfs": true,
-		"anolis": true, "alinux": true, "tencentos": true,
-	}
-	if domesticIDs[d.ID] {
-		return true
-	}
-	for _, id := range strings.Fields(d.IDLike) {
-		if domesticIDs[id] {
-			return true
-		}
-	}
-	lower := strings.ToLower(d.Name + " " + d.PrettyName)
-	for _, kw := range []string{"kylin", "uos", "deepin", "openeuler", "euleros", "euler os", "neokylin", "方德", "中标"} {
-		if strings.Contains(lower, kw) {
-			return true
-		}
-	}
-	return false
-}
-
 // probeSecurityModules checks for all known Linux security modules.
 func probeSecurityModules() []SecurityModule {
 	var modules []SecurityModule

@@ -177,13 +177,6 @@ func (s *Server) retrieveSkillsDetailed(query string, topK int) (text string, na
 	return b.String(), names, len(ids), ""
 }
 
-// retrieveSkillsForPrompt 检索与当前任务最相关的技能，格式化为可注入提示词的文本，
-// 同时异步记录一次使用（use_count++）。无技能 / 无相关匹配时返回空串。
-func (s *Server) retrieveSkillsForPrompt(query string, topK int) string {
-	t, _, _, _ := s.retrieveSkillsDetailed(query, topK)
-	return t
-}
-
 // skillRetrievalScope best-effort resolves BusinessService / host category from query text
 // (hostname / host id / service name) for scoped skill retrieval.
 func (s *Server) skillRetrievalScope(query string) (serviceID, category string) {

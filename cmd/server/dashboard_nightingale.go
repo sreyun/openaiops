@@ -87,9 +87,7 @@ func mapNightingaleDashboard(raw []byte, nameOverride, source string) (Dashboard
 	if d.Name == "" {
 		d.Name = "导入的兼容看板"
 	}
-	for _, t := range splitN9eTags(exp.Tags) {
-		d.Tags = append(d.Tags, t)
-	}
+	d.Tags = append(d.Tags, splitN9eTags(exp.Tags)...)
 
 	for _, gv := range cfg.Var {
 		if dv, ok := mapN9eVar(gv); ok {

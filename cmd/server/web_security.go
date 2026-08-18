@@ -699,26 +699,6 @@ func (m *webScanManager) saveLocked() {
 	_ = os.Rename(tmp, m.path())
 }
 
-func (m *webScanManager) add(scan *WebScanResult) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.scans = append([]*WebScanResult{scan}, m.scans...)
-	m.trimLocked()
-	m.saveLocked()
-}
-
-func (m *webScanManager) update(scan *WebScanResult) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for i, s := range m.scans {
-		if s != nil && s.ID == scan.ID {
-			m.scans[i] = scan
-			break
-		}
-	}
-	m.saveLocked()
-}
-
 // finishIfRunning applies a completion under lock only when the scan is still
 // running — cancels/timeouts win over a stale worker finishing later.
 func (m *webScanManager) finishIfRunning(id string, apply func(live *WebScanResult)) bool {
@@ -839,6 +819,11 @@ func (m *webScanManager) reapStuckLocked(timeoutSec int) int {
 			sc.Error = fmt.Sprintf("扫描超时中断（超过 %ds）", limit)
 			sc.FinishedAt = now
 			n++
+			// 扫描超时的形态是「安全页面上这台机器一直没有新结果」——看起来像没扫，
+			// 其实是每次都跑到一半被掐掉。反复超时说明预算或目标规模不对，属于要人
+			// 处理的一类；进归口后连续 3 次同因就会开事件。
+			reportFault("scan", "web_security_timeout", "warning", "",
+				fmt.Sprintf("Web 漏洞扫描「%s」超时中断（超过 %ds），本次结果作废", firstNonEmpty(sc.TargetName, sc.TargetID), limit), "")
 		}
 	}
 	if n > 0 {
@@ -864,18 +849,6 @@ func (m *webScanManager) cancelScan(id string) bool {
 		return true
 	}
 	return false
-}
-
-func (m *webScanManager) runningCount() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	n := 0
-	for _, s := range m.scans {
-		if s != nil && s.Status == "running" {
-			n++
-		}
-	}
-	return n
 }
 
 // nucleiJSONL is a minimal subset of Nuclei -jsonl output.

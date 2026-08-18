@@ -1620,15 +1620,6 @@ func isStockAIThresholdLadder(th []DashThreshold) bool {
 	return true
 }
 
-// normalizeAISectionWidths 保留给测试/兼容调用；新布局器不再依赖它做装箱。
-func normalizeAISectionWidths(panels []DashPanel) {
-	for i := range panels {
-		t := panels[i].Type
-		panels[i].Grid.W = aiPanelWidth(t, panels[i].Grid.W)
-		panels[i].Grid.H = aiPanelHeight(t, panels[i].Grid.H)
-	}
-}
-
 // generateDashboardViaAI 是生成主流程：汇集可用指标上下文 → aiComplete → 抽 JSON → 校验落盘。
 // preferredName 非空时作为看板名称（避免先落盘再二次改名失败导致「假失败」）。
 // 解析失败时：① 严格重试一次（禁思考、只吐 JSON）；② 命中常见预设则用内置模板兜底。

@@ -49,9 +49,6 @@ func getOSDist() OSDistInfo {
 	}
 }
 
-// isDomesticOS is always false on non-Linux platforms.
-func isDomesticOS() bool { return false }
-
 // setKysecMode is a no-op on non-Linux platforms.
 func setKysecMode(mode string, _ time.Duration) error {
 	return fmt.Errorf("security mode switching is only supported on Linux")

@@ -183,11 +183,6 @@ func (s *Server) handleListAIToolAudit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.aiGov.listTools(100))
 }
 
-// aiGovAllowRequest enforces daily quota for Assist/Sreyun/Chat entrypoints.
-func (s *Server) aiGovAllowRequest(r *http.Request) (bool, string) {
-	return s.aiGovAllowRequestTask(r, "")
-}
-
 // aiGovAllowRequestTask enforces daily quota unless task is listed in QuotaExemptTasks.
 func (s *Server) aiGovAllowRequestTask(r *http.Request, task string) (bool, string) {
 	if s == nil || s.cfg == nil || s.aiGov == nil {

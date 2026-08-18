@@ -108,10 +108,6 @@ func dsPromRange(ds DataSource, promql string, start, end, step int64) ([]promMa
 	return parsePromMatrixBody(body)
 }
 
-func dsPromInstant(ds DataSource, promql string) ([]promSeries, bool) {
-	return dsPromInstantAt(ds, promql, 0)
-}
-
 // dsPromInstantAt evaluates at unix time `at` (0 = now). See vmQueryVectorAt.
 func dsPromInstantAt(ds DataSource, promql string, at int64) ([]promSeries, bool) {
 	q := url.Values{"query": {promql}}
@@ -218,10 +214,6 @@ func (s *Server) dashRangeSeries(dsID, promql string, from, to, step int64) ([]p
 		return nil, false
 	}
 	return s.vm.vmQueryRangeSeries(promql, from, to, step)
-}
-
-func (s *Server) dashVector(dsID, promql string) ([]promSeries, bool) {
-	return s.dashVectorAt(dsID, promql, 0)
 }
 
 // dashVectorAt runs an instant query evaluated at unix time `at` (0 = now).

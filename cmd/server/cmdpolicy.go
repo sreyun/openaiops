@@ -15,10 +15,6 @@ type CmdPolicyConfig struct {
 	DisableBuiltins bool     `json:"disable_builtins,omitempty"` // if true, only AllowPrefixes (dangerous)
 }
 
-func defaultCmdPolicy() CmdPolicyConfig {
-	return CmdPolicyConfig{Mode: "strict"}
-}
-
 var (
 	dangerCmdRes = []*regexp.Regexp{
 		regexp.MustCompile(`(?i)\brm\s+(-[a-zA-Z]*f|-[a-zA-Z]*r)`),

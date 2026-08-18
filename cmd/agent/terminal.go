@@ -376,13 +376,6 @@ func (a *Agent) termSessionAlive(server, sid string) (alive bool, ok bool) {
 	}
 }
 
-// runShellCommand 用系统 shell 执行一条命令，返回合并输出（stdout+stderr）与退出码。
-func runShellCommand(command string) ([]byte, int) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
-	return runShellCommandCtx(ctx, command)
-}
-
 func runShellCommandCtx(ctx context.Context, command string) ([]byte, int) {
 	if ctx == nil {
 		ctx = context.Background()

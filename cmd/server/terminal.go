@@ -271,13 +271,6 @@ func (m *termManager) create(hostID, hostname, operator string) *termSession {
 	return m.createFull(hostID, hostname, operator, "", "")
 }
 
-// createExec makes a one-shot session that runs a single command via the agent's
-// dedicated exec path (no interactive PTY, no sentinel) — reliable across shells
-// and OSes, which the interactive-terminal approach was not (esp. Linux bash).
-func (m *termManager) createExec(hostID, hostname, command string) *termSession {
-	return m.createExecWithExecID(hostID, hostname, command, 0)
-}
-
 // createExecWithExecID tags the session with a playbook execution id so cancel can
 // close/remove every related exec session without touching interactive terminals.
 func (m *termManager) createExecWithExecID(hostID, hostname, command string, execID int64) *termSession {

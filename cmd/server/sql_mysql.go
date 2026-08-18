@@ -288,9 +288,8 @@ func walkExplain(node map[string]any, hits *[]sqltoolkit.ExplainHit) {
 	if node == nil {
 		return
 	}
-	if fs, ok := node["using_filesort"].(bool); ok && fs {
-		// attach to next table if present in same node
-	}
+	// 父节点的 using_filesort / using_temporary_table 在下面 table 分支里与表级标志
+	// 合并（见 h.UsingFilesort ||= …），这里不需要再单独处理一次。
 	if t, ok := node["table"].(map[string]any); ok {
 		h := sqltoolkit.ExplainHit{
 			Table:        fmt.Sprint(t["table_name"]),
@@ -350,11 +349,6 @@ func walkExplain(node map[string]any, hits *[]sqltoolkit.ExplainHit) {
 			walkExplain(m, hits)
 		}
 	}
-}
-
-// mysqlFetchMetadata loads information_schema stats/columns/indexes for the given tables.
-func mysqlFetchMetadata(c MySQLConnection, tables []string) (sqltoolkit.SchemaMeta, error) {
-	return mysqlFetchMetadataInSchema(c, c.Database, tables)
 }
 
 // mysqlFetchMetadataInSchema is like mysqlFetchMetadata but forces TABLE_SCHEMA when schema is set.

@@ -49,9 +49,7 @@ func (cs *ConfigStore) ListK8sClusters() []K8sClusterConfig {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	out := make([]K8sClusterConfig, 0, len(cs.cfg.K8sClusters))
-	for _, c := range cs.cfg.K8sClusters {
-		out = append(out, c)
-	}
+	out = append(out, cs.cfg.K8sClusters...)
 	return out
 }
 

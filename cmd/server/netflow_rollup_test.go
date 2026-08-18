@@ -12,11 +12,6 @@ import (
 // 老实现按五元组打 label，src_port 是临时端口 → 每条 flow 一条新序列 →
 // 时序库几天就被拖垮。这些测试守住"基数封顶"这条命。
 
-// vmRecorder 截获推给 VM 的原始行，用来数序列。
-type vmRecorder struct{ lines []string }
-
-func (r *vmRecorder) push(line string) { r.lines = append(r.lines, line) }
-
 func mkFlows(n int) []shared.FlowRecord {
 	out := make([]shared.FlowRecord, 0, n)
 	for i := 0; i < n; i++ {

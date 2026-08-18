@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"fmt"
 	"log/slog"
-	"net"
 	"os"
 	"runtime"
 	"strconv"
@@ -296,17 +295,4 @@ func (pc *packetCollector) diff(current map[string]conntrackEntry) []shared.Flow
 	// Update snapshot
 	pc.prevSnapshot = current
 	return flows
-}
-
-// ipToInt converts an IPv4 address string to uint32 for comparison.
-func ipToInt(ip string) uint32 {
-	parsed := net.ParseIP(ip)
-	if parsed == nil {
-		return 0
-	}
-	parsed = parsed.To4()
-	if parsed == nil {
-		return 0
-	}
-	return uint32(parsed[0])<<24 | uint32(parsed[1])<<16 | uint32(parsed[2])<<8 | uint32(parsed[3])
 }

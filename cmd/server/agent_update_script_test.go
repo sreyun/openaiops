@@ -226,7 +226,10 @@ func TestWindowsUpdateHelperNeverEndsItsOwnScheduledTask(t *testing.T) {
 // with a brand-new binary they never ran.
 func TestWindowsUpdateHelperStartsExistingServiceWithoutConfig(t *testing.T) {
 	ps := windowsUpdateHelperScript()
-	const guard = "if(-not $ok -and $svcs.Count -gt 0){"
+	// Unconditional now: --install-service usually starts the service itself, but
+	// its exit code is unreadable on hosts that wrap process creation, so this
+	// plain start doubles as the verification the exit code can no longer give.
+	const guard = "if($svcs.Count -gt 0){"
 	guardAt := strings.Index(ps, guard)
 	if guardAt < 0 {
 		t.Fatal("helper must try to start an already-registered service even when no config is known")
@@ -627,5 +630,45 @@ func TestLegacyHelperAcceptsProbeWithUnreadableExitCode(t *testing.T) {
 func TestLegacyHelperUsesSharedVersionProbe(t *testing.T) {
 	if !strings.Contains(windowsUpdateHelperScript(), shared.WindowsVersionProbePS) {
 		t.Fatal("救援脚本必须内嵌 shared.WindowsVersionProbePS，不要另抄一份")
+	}
+}
+
+// ---- 换版后的成败判据（对应 cmd/agent 侧同名三个测试）----
+//
+// 线上事故：一次发版后全部 Windows Agent 离线，盘上是新二进制、服务是 Stopped，
+// 控制台却记着「升级成功」。救援脚本与 Agent 自带助手是两条独立路径，同一组
+// 不变量必须两边都守住。
+
+func TestLegacyWindowsUpdateNeverJudgesInstallServiceByExitCode(t *testing.T) {
+	ps := windowsUpdateHelperScript()
+	for _, forbidden := range []string{"$p -and $p.ExitCode -eq 0", "if($p -and $p.ExitCode -eq 0){ $ok=$true }"} {
+		if strings.Contains(ps, forbidden) {
+			t.Fatalf("救援脚本仍在用退出码判定 install-service 的成败: %q", forbidden)
+		}
+	}
+	if !strings.Contains(ps, "advisory only") {
+		t.Fatal("退出码应降级为日志线索")
+	}
+}
+
+func TestLegacyWindowsUpdateReportsUserModeStartAsDegraded(t *testing.T) {
+	ps := windowsUpdateHelperScript()
+	for _, want := range []string{"return 'usermode'", "return 'service'", "return 'failed'", "reason=service-not-running"} {
+		if !strings.Contains(ps, want) {
+			t.Fatalf("救援脚本缺少三态重启结果 %q", want)
+		}
+	}
+	if !strings.Contains(ps, `Write-Result ("degraded `) {
+		t.Fatal("服务没起来必须记成 degraded，不能记成 ok")
+	}
+}
+
+func TestLegacyRestartAgentResultIsComparedAsString(t *testing.T) {
+	ps := windowsUpdateHelperScript()
+	if strings.Contains(ps, "-not (Restart-Agent)") {
+		t.Fatal("三态结果被当布尔用：'failed' 是非空字符串，会被判成成功")
+	}
+	if !strings.Contains(ps, "$restartMode -eq 'failed'") {
+		t.Fatal("必须显式比较 'failed' 才触发回滚")
 	}
 }

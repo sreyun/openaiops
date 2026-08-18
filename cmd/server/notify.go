@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -355,12 +354,25 @@ func (n *Notifier) pushChannels(cfg ServerConfig, a Alert, firing bool) {
 	routeSel, routed := govRouteChannels(cfg.Governance, a)
 	send := func(ch string) bool { return !routed || routeSel[ch] }
 
+	// noteChannelFailure：告警发不出去是**所有自身故障里后果最重**的一种——它让全部
+	// 告警同时形同虚设，而且没有任何人会来告诉你，因为本该来告诉你的正是坏掉的那条
+	// 通道。此前它只落一条活动记录，混在成千上万条里，没人会去翻。
+	//
+	// 不在这里做「连续几次」的判断：那由自身故障归口按指纹统一决定（同一渠道同一错误
+	// 连续 3 次开事件），各处自己拍阈值最后一定是有的太吵、有的永远沉默。
+	noteChannelFailure := func(channel string, err error) {
+		reportFault("notify", channel+"_send_failed", "warning", a.HostID,
+			"告警通知渠道「"+channel+"」发送失败："+err.Error()+
+				"；该渠道当前发不出告警，此期间的告警不会有人收到", "")
+	}
+
 	text := formatAlert(a, firing)
 	smsText := formatAlertSMS(a, firing)
 	var sent []string
 	if send("feishu") && cfg.Feishu.Enabled && cfg.Feishu.Webhook != "" {
 		if err := n.sendFeishu(cfg.Feishu, text); err != nil {
 			slog.Error(Tz("notify.feishu_failed"), "err", err)
+			noteChannelFailure("feishu", err)
 			n.store.AddLog(LogEntry{Kind: KindSystem, Level: "warning", Actor: Tz("notify.notification"), Host: a.Hostname, Message: Tz("log.feishu_failed", err.Error())})
 		} else {
 			sent = append(sent, Tz("notify.feishu"))
@@ -369,6 +381,7 @@ func (n *Notifier) pushChannels(cfg ServerConfig, a Alert, firing bool) {
 	if send("dingtalk") && cfg.Dingtalk.Enabled && cfg.Dingtalk.Webhook != "" {
 		if err := n.sendDingtalk(cfg.Dingtalk, text); err != nil {
 			slog.Error(Tz("notify.dingtalk_failed"), "err", err)
+			noteChannelFailure("dingtalk", err)
 			n.store.AddLog(LogEntry{Kind: KindSystem, Level: "warning", Actor: Tz("notify.notification"), Host: a.Hostname, Message: Tz("log.dingtalk_failed", err.Error())})
 		} else {
 			sent = append(sent, Tz("notify.dingtalk"))
@@ -381,6 +394,7 @@ func (n *Notifier) pushChannels(cfg ServerConfig, a Alert, firing bool) {
 		for _, to := range n.cfg.AlertEmails() {
 			if err := sendEmail(cfg.SMTP, to, Tz("notify.alert_subject", a.Hostname), html); err != nil {
 				slog.Error(Tz("notify.email_failed"), "err", err)
+				noteChannelFailure("email", err)
 				n.store.AddLog(LogEntry{Kind: KindSystem, Level: "warning", Actor: Tz("notify.notification"), Host: a.Hostname, Message: Tz("log.email_failed", err.Error())})
 			} else {
 				okAny = true
@@ -394,6 +408,7 @@ func (n *Notifier) pushChannels(cfg ServerConfig, a Alert, firing bool) {
 	if send("webhook") && cfg.CustomWebhook.Enabled && cfg.CustomWebhook.URL != "" {
 		if err := sendCustomWebhook(cfg.CustomWebhook, text, a, firing); err != nil {
 			slog.Error(Tz("notify.custom_webhook_failed"), "err", err)
+			noteChannelFailure("webhook", err)
 			n.store.AddLog(LogEntry{Kind: KindSystem, Level: "warning", Actor: Tz("notify.notification"), Host: a.Hostname, Message: Tz("log.custom_webhook_failed", err.Error())})
 		} else {
 			sent = append(sent, Tz("notify.custom_webhook"))
@@ -735,25 +750,6 @@ func aliyunSignV3(method, canonicalURI, queryString, payload string, headers map
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(stringToSign))
 	return hex.EncodeToString(mac.Sum(nil))
-}
-
-// aliyunSign builds the Alibaba Cloud API V1 signature (HMAC-SHA1).
-// 保留用于兼容旧版，新代码请使用 aliyunSignV3。
-func aliyunSign(method string, params map[string]string, secret string) string {
-	keys := make([]string, 0, len(params))
-	for k := range params {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	var qs []string
-	for _, k := range keys {
-		qs = append(qs, aliyunEncode(k)+"="+aliyunEncode(params[k]))
-	}
-	canonical := strings.Join(qs, "&")
-	stringToSign := method + "&" + aliyunEncode("/") + "&" + aliyunEncode(canonical)
-	h := hmac.New(sha1.New, []byte(secret+"&"))
-	h.Write([]byte(stringToSign))
-	return base64.StdEncoding.EncodeToString(h.Sum(nil))
 }
 
 // sendSMS sends an alert via cloud SMS API (Aliyun / Huawei / Tencent).

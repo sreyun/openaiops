@@ -241,6 +241,7 @@ func encryptAES(privKul []byte, boots, etime int32, saltVal uint64, plaintext []
 	}
 	out := make([]byte, len(plaintext))
 	// #nosec G407 -- IV 非硬编码：按 RFC 3826 由 engineBoots‖engineTime‖salt 每报文派生
+	//lint:ignore SA1019 RFC 3826 defines SNMPv3 AES privacy as CFB-128; CTR/AEAD would not interoperate
 	cipher.NewCFBEncrypter(block, iv).XORKeyStream(out, plaintext)
 	privParams = make([]byte, 8)
 	binary.BigEndian.PutUint64(privParams, saltVal)
@@ -264,6 +265,7 @@ func decryptAES(privKul []byte, boots, etime int32, privParams, ct []byte) ([]by
 		return nil, err
 	}
 	out := make([]byte, len(ct))
+	//lint:ignore SA1019 RFC 3826 defines SNMPv3 AES privacy as CFB-128; CTR/AEAD would not interoperate
 	cipher.NewCFBDecrypter(block, iv).XORKeyStream(out, ct)
 	return out, nil
 }

@@ -3,7 +3,6 @@ package main
 import (
 	"os"
 	"runtime"
-	"strconv"
 	"strings"
 )
 
@@ -202,11 +201,6 @@ func normalizeDistroMajor(raw string) string {
 		}
 	}
 	return out
-}
-
-func distroMajorInt(ver string) int {
-	n, _ := strconv.Atoi(normalizeDistroMajor(ver))
-	return n
 }
 
 // linuxPkgManagerCmd picks the preferred package manager for this distro.

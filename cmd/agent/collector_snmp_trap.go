@@ -163,7 +163,7 @@ func parseV1Trap(content []byte, srcIP, community string) shared.SNMPTrapEvent {
 		}
 	}
 	// agent-addr (IpAddress, 4B)
-	if tag, c, rest, err = readTLV(rest); err == nil && len(c) == 4 {
+	if _, c, rest, err = readTLV(rest); err == nil && len(c) == 4 {
 		ev.AgentAddr = fmt.Sprintf("%d.%d.%d.%d", c[0], c[1], c[2], c[3])
 	}
 	// generic-trap

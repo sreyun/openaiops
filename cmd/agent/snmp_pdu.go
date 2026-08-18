@@ -75,10 +75,6 @@ func buildGet(reqID int32, oids [][]uint32) []byte {
 	return buildRequestPDU(pduGet, reqID, 0, 0, oids)
 }
 
-func buildGetNext(reqID int32, oids [][]uint32) []byte {
-	return buildRequestPDU(pduGetNext, reqID, 0, 0, oids)
-}
-
 func buildGetBulk(reqID int32, nonRep, maxRep int, oids [][]uint32) []byte {
 	return buildRequestPDU(pduGetBulk, reqID, nonRep, maxRep, oids)
 }

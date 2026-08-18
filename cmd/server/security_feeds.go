@@ -314,17 +314,6 @@ func (m *feedManager) stateOf(id string) FeedState {
 	return m.states[id]
 }
 
-func (m *feedManager) allStates() []FeedState {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	out := make([]FeedState, 0, len(m.states))
-	for _, st := range m.states {
-		out = append(out, st)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out
-}
-
 func (m *feedManager) currentJob() *FeedJob {
 	m.mu.Lock()
 	defer m.mu.Unlock()

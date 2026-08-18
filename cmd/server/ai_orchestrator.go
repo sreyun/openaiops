@@ -260,13 +260,6 @@ func (h *aiStatsHub) snapshot() map[string]any {
 	}
 }
 
-// recordAICall 统一观测入口（assist / chat / diagnose 等均可调用）。
-// ctx 携带 usage 槽位 id（见 withAIUsageSlot），使本调用能读到 LLM 调用写入的
-// 精确 token 而非仅字符粗估。无槽位时安全回退到全局估算。
-func (s *Server) recordAICall(ctx context.Context, task, model string, latencyMs int64, ok bool, errStr string, memHits, skillHits int, reply string) {
-	s.recordAICallActor(ctx, task, model, "", latencyMs, ok, errStr, memHits, skillHits, reply)
-}
-
 // recordAICallActor 同上，附带操作者（用于成本/用户分析）。
 func (s *Server) recordAICallActor(ctx context.Context, task, model, actor string, latencyMs int64, ok bool, errStr string, memHits, skillHits int, reply string) {
 	if s == nil || s.aiStats == nil {
@@ -292,12 +285,23 @@ func (s *Server) recordAICallActor(ctx context.Context, task, model, actor strin
 		MemHits: memHits, SkillHits: skillHits,
 		ReplyChars: len([]rune(reply)), ApproxTokens: approx,
 		PromptTokens: promptTok, CompletionTokens: completionTok,
-		CostEstimate: estimateAICost(cfg, promptTok, completionTok, approx),
-		UsageSource:  usageSource,
+		CostEstimate:  estimateAICost(cfg, promptTok, completionTok, approx),
+		UsageSource:   usageSource,
 		PromptVersion: promptVersionFor("assist-" + strings.TrimPrefix(task, "assist:")),
 		RouteReason:   inferRouteReason(cfg, task, model),
 	}
 	s.aiStats.record(st)
+	// AI 调用失败进自身故障归口。这里是**所有** AI 路径的公共出口（assist / Hermes /
+	// 自动诊断 / 自动巡检），接一处即可全覆盖。
+	//
+	// 为什么值得接：AI 失败的形态是「问了没反应」——按钮转一下没结果、自动诊断悄悄
+	// 什么都不写。用户看不出是模型配置错了、额度用完了还是网关挂了，而这三种的处理
+	// 方式完全不同。指纹按 task + 错误原文归并，同一个错连续 3 次就开事件带原文。
+	if !ok && strings.TrimSpace(errStr) != "" {
+		reportFault("ai", "call_failed", "warning", "",
+			"AI 调用失败（task="+task+"，model="+model+"）："+trimLine(errStr, 400)+
+				"；此期间依赖 AI 的诊断/分析/助手会静默无结果", "")
+	}
 	if s.pg != nil {
 		go s.pg.insertAICallEvent(st)
 	}

@@ -59,21 +59,6 @@ func writeRAGMeta(w http.ResponseWriter, m ragMeta) {
 	}
 }
 
-// writeRAGMetaSSE 兼容旧调用点，并附带当前 WeKnora 降级状态。
-func writeRAGMetaSSE(w http.ResponseWriter, memoryHits, skillHits int, degraded string, skillNames []string) {
-	m := ragMeta{
-		MemoryHits: memoryHits,
-		SkillHits:  skillHits,
-		SkillNames: skillNames,
-		Degraded:   degraded,
-	}
-	if tip := weknoraDegradedTip(); tip != "" {
-		m.WeKnoraDegraded = true
-		m.WeKnoraTip = tip
-	}
-	writeRAGMeta(w, m)
-}
-
 func writeRAGMetaFull(w http.ResponseWriter, memoryHits, skillHits int, degraded string, skillNames []string, citations []RAGCitation) {
 	m := ragMeta{
 		MemoryHits: memoryHits,
@@ -312,12 +297,6 @@ func diagnosisOrchestrationHint() string {
 type citationBuf struct {
 	mu    sync.Mutex
 	items []RAGCitation
-}
-
-func (c *citationBuf) reset() {
-	c.mu.Lock()
-	c.items = nil
-	c.mu.Unlock()
 }
 
 func (c *citationBuf) add(items ...RAGCitation) {

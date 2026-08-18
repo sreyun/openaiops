@@ -503,8 +503,19 @@ function Test-AgentRunning {
   $procs = @(Get-Process -Name $names -ErrorAction SilentlyContinue)
   if ($procs.Count -eq 0) { return $false }
   $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
-  # CIM unavailable (hardened / legacy hosts): cannot filter, trust the list.
-  if ($all.Count -eq 0) { return $true }
+  if ($all.Count -eq 0) {
+    # CIM unavailable (hardened / legacy hosts, often the same ones that wrap
+    # process creation). Command lines are unreadable here, so a leftover
+    # --desktop-worker is indistinguishable from a real agent. Session id still
+    # is: a service daemon lives in session 0, a desktop worker is spawned into
+    # the interactive session. Prefer that evidence, and record when the answer
+    # had to be a guess -- silently trusting it is how a stopped service passed
+    # for a healthy agent.
+    $svc0 = $procs | Where-Object { $_.Id -ne $helperPid -and $_.SessionId -eq 0 } | Select-Object -First 1
+    if ($null -ne $svc0) { return $true }
+    Write-Log 'CIM unavailable and no session-0 agent process; running state is unverified'
+    return $true
+  }
   $daemon = $all | Where-Object {
     $_.Name -match '^aiops-agent' -and $_.ProcessId -ne $helperPid -and
     (-not ($_.CommandLine -and $_.CommandLine -match '--desktop-worker'))
@@ -537,6 +548,15 @@ function Restart-AgentUserMode {
   Start-Sleep -Seconds 4
   return (Test-AgentRunning)
 }
+# Restart-AgentService returns one of three strings, never a boolean:
+#   'service'  -- a Windows service reached Running. The only real success.
+#   'usermode' -- the binary is running, but ONLY as a loose process. The host
+#                 survives until that process or its logon session ends, and
+#                 nothing brings it back on reboot. Reported as degraded.
+#   'failed'   -- nothing is running; caller must roll back.
+# Callers MUST compare the returned string against 'failed'. A boolean test would
+# silently invert the meaning: in PowerShell every non-empty string is truthy, so
+# 'failed' would be read as success and the rollback never fires.
 function Restart-AgentService {
   param([string]$Exe,[string]$Cfg,[string]$Dir)
   $svcs = @()
@@ -548,23 +568,29 @@ function Restart-AgentService {
   if ($hasSvc -and $Cfg -and (Test-Path -LiteralPath $Cfg)) {
     Write-Log ("install-service with config: " + $Cfg)
     $p = Start-Process -FilePath $Exe -ArgumentList @('--install-service','--config', $Cfg) -WorkingDirectory $Dir -Wait -PassThru -WindowStyle Hidden
-    if ($p -and $p.ExitCode -eq 0) {
-      foreach ($name in (Get-AgentServiceNames)) {
-        # Only wait on a service that EXISTS. Wait-ServiceState sleeps its full
-        # budget on a name Get-Service cannot even find, so walking the whole
-        # candidate list burned 45s per absent name -- up to 90s of extra downtime
-        # for an install registered under the last name in the list, spent while
-        # the agent is stopped and the panel is counting down its verify window.
-        if (-not (Get-Service -Name $name -ErrorAction SilentlyContinue)) { continue }
-        if (Wait-ServiceState $name 'Running' 45) {
-          Write-Log ("service running: " + $name)
-          Write-Log ("post-restart version: " + (Invoke-VersionProbe $Exe).Output)
-          return $true
-        }
+    # The exit code of a -PassThru object is NOT a usable verdict. On hosts where
+    # process creation is intercepted or wrapped (EDR is the common case) the
+    # ExitCode getter throws, PowerShell swallows the exception into $null, and
+    # "-eq 0" is False for a run that fully succeeded. That is the same defect
+    # that made the version probe reject a good binary; see WindowsVersionProbePS.
+    # The verdict comes from the observable fact instead: did a service reach
+    # Running. The code is kept only as a log breadcrumb.
+    $code = 'unavailable'
+    try { if ($null -ne $p) { $code = [string]$p.ExitCode } } catch { $code = 'unavailable' }
+    if ([string]::IsNullOrEmpty($code)) { $code = 'unavailable' }
+    Write-Log ("install-service exit=" + $code + " (advisory only; verdict comes from service state)")
+    foreach ($name in (Get-AgentServiceNames)) {
+      # Only wait on a service that EXISTS. Wait-ServiceState sleeps its full
+      # budget on a name Get-Service cannot even find, so walking the whole
+      # candidate list burned 45s per absent name -- up to 90s of extra downtime
+      # for an install registered under the last name in the list, spent while
+      # the agent is stopped and the panel is counting down its verify window.
+      if (-not (Get-Service -Name $name -ErrorAction SilentlyContinue)) { continue }
+      if (Wait-ServiceState $name 'Running' 45) {
+        Write-Log ("service running: " + $name)
+        Write-Log ("post-restart version: " + (Invoke-VersionProbe $Exe).Output)
+        return 'service'
       }
-    } else {
-      $code = if ($p) { $p.ExitCode } else { 'null' }
-      Write-Log ("install-service exit=" + $code)
     }
   }
   # A registered service already carries '--service --config <abs>' in its
@@ -579,9 +605,13 @@ function Restart-AgentService {
       Write-Log ("Start-Service $name failed: " + $_.Exception.Message)
       continue
     }
-    if (Wait-ServiceState $name 'Running' 45) { Write-Log ("Start-Service ok: " + $name); return $true }
+    if (Wait-ServiceState $name 'Running' 45) { Write-Log ("Start-Service ok: " + $name); return 'service' }
   }
-  return (Restart-AgentUserMode -Exe $Exe -Cfg $Cfg -Dir $Dir)
+  if (Restart-AgentUserMode -Exe $Exe -Cfg $Cfg -Dir $Dir) {
+    Write-Log 'WARNING: service did not come back; agent is running in user mode only'
+    return 'usermode'
+  }
+  return 'failed'
 }
 try {
   Write-Log ("helper start pid=$helperPid")
@@ -656,12 +686,22 @@ try {
   if (-not $moved) { throw "Move-Item/Copy-Item failed after retries" }
   $swapped = $true
   try { Unblock-File -Path $exe -ErrorAction SilentlyContinue } catch {}
-  if (-not (Restart-AgentService -Exe $exe -Cfg $cfg -Dir $dir)) {
+  $restartMode = Restart-AgentService -Exe $exe -Cfg $cfg -Dir $dir
+  if ($restartMode -eq 'failed') {
     throw 'agent failed to restart after binary replace'
   }
   $ver = (Invoke-VersionProbe $exe).Output
-  Write-Log ("update ok version=$ver")
-  Write-Result ("ok " + (Get-Date -Format o) + " version=" + $ver)
+  if ($restartMode -eq 'usermode') {
+    # The swap worked and something is running, but the service is stopped. This
+    # is NOT a successful update: the process dies with its session and nothing
+    # restarts it on reboot, so the fleet goes offline later while the console
+    # still shows green. Report it as degraded and let the server surface it.
+    Write-Log ("update degraded: binary is at " + $ver + " but the Windows service is NOT running")
+    Write-Result ("degraded " + (Get-Date -Format o) + " version=" + $ver + " reason=service-not-running")
+  } else {
+    Write-Log ("update ok version=$ver")
+    Write-Result ("ok " + (Get-Date -Format o) + " version=" + $ver)
+  }
 } catch {
   Write-Log ("update failed: " + $_.Exception.Message)
   Write-Result ("fail " + $_.Exception.Message)
@@ -687,7 +727,8 @@ try {
     # a working service on every failed attempt, turning "download failed" into
     # "host offline" the moment --install-service cannot put it back.
     if ($swapped -or -not (Test-AgentRunning)) {
-      [void](Restart-AgentService -Exe $exe -Cfg $cfg -Dir $dir)
+      $rbMode = Restart-AgentService -Exe $exe -Cfg $cfg -Dir $dir
+      Write-Log ("rollback restart mode=" + $rbMode)
     } else {
       Write-Log 'agent still running and nothing was swapped; leaving it alone'
     }

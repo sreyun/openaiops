@@ -59,6 +59,7 @@ func runCmd(name string, args ...string) string {
 // (cmdlet missing, access denied) must be distinguishable from "no VMs". Uses
 // Output() (not CombinedOutput) so stdout stays clean JSON; on failure the
 // *exec.ExitError still carries stderr for diagnostics.
+//lint:ignore U1000 used by hyperv_windows.go; CI analyses linux only
 func runCmdTimeout(d time.Duration, name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), d)
 	defer cancel()

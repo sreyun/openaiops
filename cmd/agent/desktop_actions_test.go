@@ -56,8 +56,13 @@ func TestDeskActionRequestJSON(t *testing.T) {
 	// Ensure marshaling round-trip does not invent fields that would leak in logs
 	// (server audit uses separate struct and must never log Text).
 	out, _ := json.Marshal(map[string]any{"action": req.Action, "enter": req.Enter, "len": len([]rune(req.Text))})
-	if string(out) == "" || containsSecret(string(out), "secret") {
-		// intentionally include length only in audit shape
+	// 这条断言此前写成了空 if，等于什么都没检查——而它要守的正是「审计形态里绝不能出现
+	// 原文」这件事：远程桌面的 type_text 会带着密码之类的内容过来。
+	if string(out) == "" {
+		t.Fatal("audit shape marshal produced nothing")
+	}
+	if containsSecret(string(out), "secret") {
+		t.Fatalf("audit shape leaked the typed text: %s", out)
 	}
 	auditShape := map[string]any{"action": "type_text", "len": len([]rune(req.Text))}
 	b, _ := json.Marshal(auditShape)

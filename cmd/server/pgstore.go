@@ -180,8 +180,12 @@ func (p *pgStore) flowSpillWorker() {
 					select {
 					case p.flowSpill <- j:
 					default:
-						p.flowDrop.Add(1)
+						n := p.flowDrop.Add(1)
 						slog.Warn("Flow spill 回灌失败，丢弃", "host", j.hostID, "rows", len(j.flows))
+						if n == 1 || n%200 == 0 {
+							reportFault("pg", "flow_spill_lost", "warning", j.hostID,
+								fmt.Sprintf("NetFlow 溢写批回灌失败并被丢弃，累计 %d 批；这批明细已经永久丢失", n), "")
+						}
 					}
 					goto nextTick
 				}
@@ -212,9 +216,16 @@ func (p *pgStore) insertFlowRecordsAsync(hostID, source string, flows []shared.F
 		default:
 		}
 	}
-	p.flowDrop.Add(1)
+	dropped := p.flowDrop.Add(1)
 	slog.Warn("Flow 入库队列已满，丢弃本批明细（写入跟不上摄入速率）",
-		"host", hostID, "rows", len(flows), "dropped_total", p.flowDrop.Load())
+		"host", hostID, "rows", len(flows), "dropped_total", dropped)
+	// 丢批的后果是「事后查不到那条流量」，而查不到不会说自己是被丢掉的——和曲线上的
+	// 洞是同一类沉默。只在头几次与每 200 次上报一次，避免持续过载时自己变成噪音源。
+	if dropped == 1 || dropped%200 == 0 {
+		reportFault("pg", "flow_queue_full", "warning", hostID,
+			fmt.Sprintf("NetFlow 明细入库队列已满，已累计丢弃 %d 批（写入跟不上摄入速率）；"+
+				"这些明细事后无法补回，流量回溯会出现缺口", dropped), "")
+	}
 }
 
 func (p *pgStore) netflowQueueStats() map[string]any {
@@ -1179,6 +1190,10 @@ func (p *pgStore) appendAlertRecord(r AlertRecord) {
 	if _, err := p.db.Exec(`INSERT INTO alert_history(key,fired_at,data) VALUES($1,$2,$3)`,
 		r.Key, r.FiredAt, raw); err != nil {
 		slog.Warn("PG 写告警历史失败", "err", err)
+		// 告警照常弹给人，历史里却没有它。事后复盘（MTTR、噪音率、SLO）读的是这张表，
+		// 缺一段就会安静地得出偏乐观的结论——比没有数据更糟。
+		reportFault("pg", "alert_history_write_failed", "warning", "",
+			"告警历史写入失败："+r.Key+"；该告警不会出现在事后复盘与 SLO 统计里", err.Error())
 	}
 }
 
@@ -1461,11 +1476,6 @@ type similarCase struct {
 
 // ---- 通用 AI 记忆（对话 / 文件 / URL / 多轮历史 向量化，持续沉淀 RAG 知识，自我进化）----
 
-// insertMemoryEmbedding 存一条 AI 记忆向量。kind: chat|file|url|history|diagnosis。
-func (p *pgStore) insertMemoryEmbedding(kind, source, content string, emb []float64, ts int64) error {
-	return p.insertMemoryEmbeddingScoped(kind, source, content, emb, ts, "", "", false)
-}
-
 func (p *pgStore) insertMemoryEmbeddingScoped(kind, source, content string, emb []float64, ts int64, serviceID, category string, verified bool) error {
 	pri := 1.0
 	if verified {
@@ -1683,13 +1693,6 @@ func (p *pgStore) hasDuplicateMemory(emb []float64, kind string) (bool, int64, e
 		return false, 0, nil // no duplicate found
 	}
 	return true, id, nil
-}
-
-// mergeDuplicateMemory appends new content to an existing memory and updates its embedding.
-// Used when a near-duplicate is detected: instead of creating a new entry, the new
-// knowledge is appended to preserve both the original and supplementary information.
-func (p *pgStore) mergeDuplicateMemory(id int64, appendContent string, newEmb []float64) error {
-	return p.mergeDuplicateMemoryEx(id, appendContent, newEmb, false, "", "")
 }
 
 func (p *pgStore) mergeDuplicateMemoryEx(id int64, appendContent string, newEmb []float64, verified bool, serviceID, category string) error {
@@ -1974,10 +1977,6 @@ func skillMatchesScope(sk Skill, serviceID, category string) bool {
 	return true
 }
 
-func (p *pgStore) listSkills() ([]Skill, error) {
-	return p.listSkillsFiltered(false)
-}
-
 // listSkillsFiltered includeArchived=true 时含已归档；默认含 active+draft（draft 需人工激活）。
 func (p *pgStore) listSkillsFiltered(includeArchived bool) ([]Skill, error) {
 	q := `SELECT id, name, trigger_desc, steps, tags, use_count, success_count, priority, source,
@@ -2129,12 +2128,6 @@ func (p *pgStore) skillProven(id int64) bool {
 	return sc > 0 || uc >= 3
 }
 
-func (p *pgStore) skillCount() int {
-	var n int
-	_ = p.db.QueryRow(`SELECT COUNT(*) FROM ai_skills`).Scan(&n)
-	return n
-}
-
 // memoryBrowseItem 记忆浏览器列表项（不含 embedding）。
 type memoryBrowseItem struct {
 	ID        int64   `json:"id"`
@@ -2147,11 +2140,6 @@ type memoryBrowseItem struct {
 	ServiceID string  `json:"service_id,omitempty"`
 	Category  string  `json:"category,omitempty"`
 	Verified  bool    `json:"verified"`
-}
-
-// listMemories 按时间倒序列出记忆，可选 kind / verified 过滤。limit 默认 50、上限 200。
-func (p *pgStore) listMemories(kind string, limit, offset int) ([]memoryBrowseItem, int, error) {
-	return p.listMemoriesFiltered(kind, "", limit, offset)
 }
 
 func (p *pgStore) listMemoriesFiltered(kind, verifiedFilter string, limit, offset int) ([]memoryBrowseItem, int, error) {

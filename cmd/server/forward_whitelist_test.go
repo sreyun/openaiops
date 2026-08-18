@@ -18,8 +18,7 @@ func TestNormalizeWhitelist(t *testing.T) {
 	if _, err := normalizeWhitelist(true, []string{"  ", ""}); err == nil {
 		t.Fatal("enabled blank lines should fail")
 	}
-	out, err = normalizeWhitelist(true, []string{"10.0.0.1", "10.0.0.1", "192.168.0.0/24", " bad "})
-	if err == nil {
+	if _, err = normalizeWhitelist(true, []string{"10.0.0.1", "10.0.0.1", "192.168.0.0/24", " bad "}); err == nil {
 		t.Fatal("invalid entry should fail")
 	}
 	out, err = normalizeWhitelist(true, []string{"10.0.0.1", "10.0.0.1", "192.168.0.0/24", "::1"})

@@ -55,13 +55,11 @@ type deskEncoderKind struct {
 var (
 	deskEncOnce   sync.Once
 	deskEncH264   []deskEncoderKind
-	deskEncH265   []deskEncoderKind
-	deskEncProbed bool
+	deskEncH265 []deskEncoderKind
 )
 
 func deskProbeEncoders() {
 	deskEncOnce.Do(func() {
-		deskEncProbed = true
 		if !ffmpegAvailable() {
 			return
 		}
@@ -114,21 +112,6 @@ func deskProbeEncoders() {
 			slog.Info("远程桌面视频编码器已探测", "encoders", strings.Join(names, ","))
 		}
 	})
-}
-
-func ffmpegEncoderExists(name string) bool {
-	deskProbeEncoders()
-	for _, e := range deskEncH264 {
-		if e.Name == name {
-			return true
-		}
-	}
-	for _, e := range deskEncH265 {
-		if e.Name == name {
-			return true
-		}
-	}
-	return false
 }
 
 func deskEncoderSmokeOK(name string) bool {
@@ -433,10 +416,6 @@ type deskVideoOpts struct {
 	AllowSoftHEVC bool
 }
 
-func startH264Pipe(mon deskMonitorInfo, scale float64, fps int) (*h264Pipe, error) {
-	return startDeskVideoPipe(mon, deskVideoOpts{Codec: "h264", Quality: 80, FPS: fps, Scale: scale})
-}
-
 func startDeskVideoPipe(mon deskMonitorInfo, opt deskVideoOpts) (*h264Pipe, error) {
 	if !ffmpegAvailable() {
 		return nil, fmt.Errorf("ffmpeg not found")
@@ -489,10 +468,6 @@ func startDeskVideoPipe(mon deskMonitorInfo, opt deskVideoOpts) (*h264Pipe, erro
 		return nil, err
 	}
 	return &h264Pipe{cmd: cmd, stdout: stdout, codec: enc.Codec, enc: enc.Name, qual: opt.Quality, fps: fps}, nil
-}
-
-func startH264RawPipe(w, h, fps int) (*h264Pipe, error) {
-	return startDeskVideoRawPipe(w, h, deskVideoOpts{Codec: "h264", Quality: 80, FPS: fps, AllowSoftHEVC: true})
 }
 
 func startDeskVideoRawPipe(w, h int, opt deskVideoOpts) (*h264Pipe, error) {

@@ -660,18 +660,6 @@ type streamToolChunk struct {
 	} `json:"usage"`
 }
 
-// aiChatVStream 是面向 OpenAI 兼容 Provider 的「流式 + 原生 Function Calling」调用：
-//   - content 增量通过 onDelta 逐字回调，供上层实时下发前端，实现真正的逐字流式；
-//   - tool_calls 增量按 index 累积（id/name 取首个非空、arguments 分片拼接），流结束后解析为
-//     nativeToolCall 列表返回。
-//
-// 原生 FC 下 content 与 tool_calls 天然分离，直接透传 content 不会把工具 JSON 泄漏给用户。
-// 仅支持 OpenAI 兼容端点；Anthropic 走非流式 aiChatV（其流式 tool-use 帧格式不同，成本高）。
-// ctx 用于客户端断开/超时时中止在途请求。
-func aiChatVStream(ctx context.Context, cfg AIConfig, messages []map[string]string, images []chatImage, tools []map[string]any, onDelta, onReasoning func(string)) (string, []nativeToolCall, error) {
-	return aiChatVStreamOpts(ctx, cfg, messages, images, tools, onDelta, onReasoning, aiCallOpts{})
-}
-
 func aiChatVStreamOpts(ctx context.Context, cfg AIConfig, messages []map[string]string, images []chatImage, tools []map[string]any, onDelta, onReasoning func(string), opts aiCallOpts) (string, []nativeToolCall, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -1077,11 +1065,6 @@ func streamChat(ctx context.Context, w http.ResponseWriter, cfg AIConfig, messag
 	return streamChatInner(ctx, w, cfg, messages, images, true)
 }
 
-// streamChatOpts is streamChat with per-call overrides (disable thinking for dashboard JSON tasks).
-func streamChatOpts(ctx context.Context, w http.ResponseWriter, cfg AIConfig, messages []map[string]string, images []chatImage, opts aiCallOpts) (string, error) {
-	return streamChatInnerOpts(ctx, w, cfg, messages, images, true, opts)
-}
-
 // streamChatNoDone 与 streamChat 相同但【不发】结尾 [DONE]——用于把多段流式内容（诊断正文 +
 // 自我校验 / MoA 聚合）拼成一条 SSE 响应，最后由调用方统一发一次 [DONE]。
 func streamChatNoDone(ctx context.Context, w http.ResponseWriter, cfg AIConfig, messages []map[string]string, images []chatImage) (string, error) {
@@ -1194,17 +1177,6 @@ var (
 	reAPIKey        = regexp.MustCompile("\\b(sk-[a-zA-Z0-9_-]{20,})\\b")
 	reSecretKV      = regexp.MustCompile("\\b(api_key|apikey|secret|password|token)\\s*[:=]\\s*['\"]?[^\\s'\"]+['\"]?")
 )
-
-// filterSensitiveContent strips JSON blocks, code fences, and sensitive patterns
-// from AI-generated text. Used by the frontend; also available for backend use.
-func filterSensitiveContent(text string) string {
-	text = reCodeFenceJSON.ReplaceAllString(text, "[已过滤代码块]")
-	text = reCodeFenceAny.ReplaceAllString(text, "[已过滤代码块]")
-	text = reToolCallJSON.ReplaceAllString(text, "")
-	text = reAPIKey.ReplaceAllString(text, "[已隐藏密钥]")
-	text = reSecretKV.ReplaceAllString(text, "$1=[已隐藏]")
-	return strings.TrimSpace(text)
-}
 
 // InspectionFinding is one item on an inspection report.
 type InspectionFinding struct {

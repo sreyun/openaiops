@@ -155,9 +155,7 @@ func (s *Server) persistContentAuditReport(rep shared.ContentAuditReport) {
 		for _, label := range ev.RedactionLabels {
 			hits = append(hits, "端侧脱敏:"+label)
 		}
-		for _, label := range ev.RiskLabels {
-			hits = append(hits, label)
-		}
+		hits = append(hits, ev.RiskLabels...)
 		if isContentPolicyBlocked(ev.PolicyDecision) {
 			hits = append(hits, "策略拦截:"+ev.PolicyDecision)
 		}

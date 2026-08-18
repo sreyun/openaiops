@@ -1335,17 +1335,6 @@ func (s *Server) agentUpdateDownloadBase(h *Host, jobURL string) string {
 	return s.agentPublicBaseURL()
 }
 
-func (s *Server) runLegacyAgentUpdateScript(h *Host, serverURL string, force bool) (string, error) {
-	out, kind, err := s.runLegacyAgentUpdateScriptKind(h, serverURL, force)
-	if err != nil {
-		return out, err
-	}
-	if kind != execOK {
-		return out, fmt.Errorf("legacy update script failed")
-	}
-	return out, nil
-}
-
 func (s *Server) runLegacyAgentUpdateScriptKind(h *Host, serverURL string, force bool) (string, execKind, error) {
 	goos, goarch := hostGOOSArch(h)
 	bin, ok := s.agentDistResolveForHost(h)

@@ -12,19 +12,20 @@ import (
 // Reduces GC pressure by recycling []byte buffers across hot paths
 // (collector reading, JSON encoding, terminal framing).
 
+// bufPool32K 只有 collector_windows.go 的一处使用者。CI 的 staticcheck 按 linux 分析，
+// 看不到那条 build tag 分支，所以会报 U1000——那是分析范围的结果，不是死代码。
+// 池里存 *[]byte 而不是 []byte：切片是三字的值，直接 Put 会在每次调用时把它逃逸到堆上，
+// 恰好抵消掉用池省下来的分配（SA6002）。
 var (
-	bufPool32K  = sync.Pool{New: func() any { return make([]byte, 32<<10) }}
-	bufPool4K   = sync.Pool{New: func() any { return make([]byte, 4<<10) }}
-	bufPool128  = sync.Pool{New: func() any { return make([]byte, 128) }}
+	bufPool32K   = sync.Pool{New: func() any { b := make([]byte, 32<<10); return &b }}
 	bytesBufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
 )
 
-func getBuf32K() []byte  { return bufPool32K.Get().([]byte) }
-func putBuf32K(b []byte) { bufPool32K.Put(b) }
-func getBuf4K() []byte   { return bufPool4K.Get().([]byte) }
-func putBuf4K(b []byte)  { bufPool4K.Put(b) }
-func getBuf128() []byte  { return bufPool128.Get().([]byte) }
-func putBuf128(b []byte) { bufPool128.Put(b) }
+//lint:ignore U1000 used by collector_windows.go; CI analyses linux only
+func getBuf32K() []byte { return *(bufPool32K.Get().(*[]byte)) }
+
+//lint:ignore U1000 used by collector_windows.go; CI analyses linux only
+func putBuf32K(b []byte) { bufPool32K.Put(&b) }
 func getBytesBuf() *bytes.Buffer {
 	b := bytesBufPool.Get().(*bytes.Buffer)
 	b.Reset()
@@ -154,25 +155,6 @@ func (cb *circuitBreaker) isOpen() bool {
 		return false
 	}
 	return cb.state == cbOpen
-}
-
-// ---- retryWithBackoff is a generic retry helper ----
-// Executes fn up to maxRetries times with exponential backoff between attempts.
-// Returns the last error if all attempts fail.
-func retryWithBackoff(maxRetries int, initial, max time.Duration, fn func() error) error {
-	bo := newBackoff(initial, max)
-	var lastErr error
-	for i := 0; i < maxRetries; i++ {
-		if err := fn(); err == nil {
-			return nil
-		} else {
-			lastErr = err
-		}
-		if i < maxRetries-1 {
-			time.Sleep(bo.next())
-		}
-	}
-	return lastErr
 }
 
 // maskToken returns a safe representation of a token for logging.

@@ -34,32 +34,35 @@ func main() {
 		log.Fatalf("invalid -target %q: %v", *target, err)
 	}
 
-	proxy := httputil.NewSingleHostReverseProxy(u)
+	proxy := &httputil.ReverseProxy{}
 	proxy.FlushInterval = 50 * time.Millisecond
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, e error) {
 		log.Printf("upstream error %s %s: %v", r.Method, r.URL.Path, e)
 		http.Error(w, "upstream unavailable", http.StatusBadGateway)
 	}
-	origDirector := proxy.Director
-	proxy.Director = func(req *http.Request) {
-		clientHost := req.Host
-		origDirector(req)
-		// Dial uses req.URL (upstream); keep browser Host for CSRF / cookies / absolute URLs.
-		if clientHost != "" {
-			req.Host = clientHost
-			req.Header.Set("X-Forwarded-Host", clientHost)
+	// Rewrite（Go 1.20+）取代已弃用的 Director。差别不只是名字：Rewrite 拿得到
+	// **未被改写过的** ProxyRequest.In，因此浏览器原始 Host、TLS 状态与对端地址都能
+	// 从 In 上直接读，不必像 Director 那样先把值抄出来再调用原 Director 补上——那个
+	// 抄来抄去的顺序正是这类反代最容易出错的地方。
+	proxy.Rewrite = func(pr *httputil.ProxyRequest) {
+		pr.SetURL(u)
+		// 上游按 pr.Out.URL 拨号；Host 保留浏览器原值，供 CSRF 校验 / Cookie 作用域 /
+		// 绝对 URL 生成使用。
+		if h := pr.In.Host; h != "" {
+			pr.Out.Host = h
+			pr.Out.Header.Set("X-Forwarded-Host", h)
 		}
-		client := peerIP(req)
+		client := peerIP(pr.In)
 		if client == "" {
 			return
 		}
-		req.Header.Set("X-Real-IP", client)
-		req.Header.Set("X-Forwarded-Proto", forwardedProto(req))
-		prior := strings.TrimSpace(req.Header.Get("X-Forwarded-For"))
+		pr.Out.Header.Set("X-Real-IP", client)
+		pr.Out.Header.Set("X-Forwarded-Proto", forwardedProto(pr.In))
+		prior := strings.TrimSpace(pr.In.Header.Get("X-Forwarded-For"))
 		if prior == "" {
-			req.Header.Set("X-Forwarded-For", client)
+			pr.Out.Header.Set("X-Forwarded-For", client)
 		} else if !hasIPToken(prior, client) {
-			req.Header.Set("X-Forwarded-For", client+", "+prior)
+			pr.Out.Header.Set("X-Forwarded-For", client+", "+prior)
 		}
 	}
 

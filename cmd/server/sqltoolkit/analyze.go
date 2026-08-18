@@ -52,7 +52,7 @@ func Analyze(in AnalyzeInput) AnalyzeResult {
 	out.IndexHints = opt.IndexHints
 
 	metaFindings := AuditMeta(shape, in.Meta, opt.IndexHints)
-	out.MetadataUsed = in.Meta != nil && len(in.Meta) > 0
+	out.MetadataUsed = len(in.Meta) > 0
 
 	explainFindings := AuditExplain(in.Explain)
 	out.ExplainUsed = in.Explain != nil

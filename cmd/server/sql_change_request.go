@@ -311,17 +311,15 @@ func (s *Server) syncSQLChangeRecordStatus(cr SQLChangeRequest, actor string) {
 	s.sqlChanges.SetChangeID(cr.ID, rec.ID)
 	st := normalizeChangeStatus(rec.Status)
 	switch cr.Status {
+	// approved / rejected 是终态：迁移的副作用就是全部目的，迁移后的状态没有下一步会读，
+	// 所以不再回写 st（只有下面 executed 那条会继续链式迁移，才需要跟踪状态）。
 	case "approved":
 		if st == ChangePendingApproval || st == ChangeDraft {
-			if out, terr := s.changes.Transition(rec.ID, "approve", actor, false); terr == nil {
-				st = normalizeChangeStatus(out.Status)
-			}
+			_, _ = s.changes.Transition(rec.ID, "approve", actor, false)
 		}
 	case "rejected":
 		if st == ChangePendingApproval || st == ChangeDraft {
-			if out, terr := s.changes.Transition(rec.ID, "reject", actor, false); terr == nil {
-				st = normalizeChangeStatus(out.Status)
-			}
+			_, _ = s.changes.Transition(rec.ID, "reject", actor, false)
 		}
 	case "executed", "done", "completed":
 		if st == ChangePendingApproval || st == ChangeDraft {
