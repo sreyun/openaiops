@@ -743,6 +743,15 @@ func (s *Server) markHostUpdateVerified(job *agentUpdateJob, hostID, ver string)
 	if s.agentUpdates == nil || job == nil {
 		return
 	}
+	// 版本号追上了 ≠ 服务起来了。Windows 上助手可能只把二进制拉成了一个游离进程
+	// （usermode），那个进程照样上报、版本号照样追上，于是这一行本来会判 success 并变绿，
+	// 而主机会在下一次重启后彻底掉线。助手自己已经把这件事写进 result 文件了，问它一句。
+	// 必须在加锁之前问：这条 exec 最长 30 秒，而每一次任务读取（包括操作台轮询）都要过
+	// 同一把 m.mu。
+	if verdict := s.windowsSwapDegraded(s.hostByID(hostID), ver); verdict != "" {
+		s.markHostUpdateDegraded(job, hostID, ver, verdict)
+		return
+	}
 	s.agentUpdates.mu.Lock()
 	defer s.agentUpdates.mu.Unlock()
 	j := s.agentUpdates.jobs[job.ID]

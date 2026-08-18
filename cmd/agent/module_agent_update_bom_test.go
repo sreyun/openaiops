@@ -17,6 +17,10 @@ func TestHelperProgressMarkerSurvivesUTF8BOM(t *testing.T) {
 		"ok 2026-08-16T20:03:11.000+08:00 version=v1.1.60",
 		"fail staging missing: C:\\Program Files\\aiops\\.aiops-agent.new.123.exe",
 		"[2026-08-16T20:00:00.0000000+08:00] helper start pid=4242",
+		// degraded 是助手换完版、重启完、判定完之后写下的终局结果（二进制新了但
+		// Windows 服务没起来）。漏掉它，一台日志写不进去、只留下 result 的主机会被
+		// 判成「助手根本没起来」，白白再走一遍 legacy 救援——两个助手抢同一次换版。
+		"degraded 2026-08-18T09:12:00.000+08:00 version=v1.1.70 reason=service-not-running",
 	} {
 		if !helperProgressMarker(body) {
 			t.Fatalf("plain body should count as progress: %q", body)

@@ -768,8 +768,13 @@ const utf8BOM = "\uFEFF"
 // 放在这个无 build tag 的文件里，是为了让 Linux CI 也能对它做断言（理由见文件头注释）。
 func helperProgressMarker(body string) bool {
 	body = strings.TrimSpace(strings.TrimPrefix(body, utf8BOM))
+	// "degraded " 也算助手跑过：那是助手换完版、重启完、判定完之后写下的**终局**结果
+	// （二进制新了但服务没起来）。漏掉它，一台日志写不进去、只留下 result 的主机会被判成
+	// 「助手根本没起来」，白白再走一遍 legacy 救援——两个助手抢同一次换版，正是最恶劣的
+	// 那类故障。
 	return strings.Contains(body, "helper start") || strings.HasPrefix(body, "running") ||
-		strings.HasPrefix(body, "ok ") || strings.HasPrefix(body, "fail ")
+		strings.HasPrefix(body, "ok ") || strings.HasPrefix(body, "fail ") ||
+		strings.HasPrefix(body, "degraded ")
 }
 
 // ---- quoting helpers (shared by the builders above) ----

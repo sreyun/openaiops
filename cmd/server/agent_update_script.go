@@ -670,8 +670,13 @@ function Restart-Agent {
       foreach($tn in @('AIOpsAgent','AIOpsAgentKeepalive','AIOps Agent')){
         [void](Invoke-Native "$env:SystemRoot\System32\schtasks.exe" @('/Run','/TN',$tn))
       }
+      # The else branch returns 'failed', not $false. This function's contract is
+      # the three strings documented above, and the caller compares with
+      # -eq 'failed'. A boolean here matches neither 'failed' nor 'usermode', so
+      # the swap would be reported as a clean success on the one host where
+      # nothing was restarted at all.
       if($Cfg){ Start-Process -FilePath $Exe -ArgumentList @('--config',$Cfg) -WorkingDirectory $Dir -WindowStyle Hidden }
-      else { Write-Log 'FATAL: no service and no config beside exe; refusing bare Start-Process'; return $false }
+      else { Write-Log 'FATAL: no service and no config beside exe; refusing bare Start-Process'; return 'failed' }
     }
   }
   # Last chance: a service may still be coming up. Only a Running service counts

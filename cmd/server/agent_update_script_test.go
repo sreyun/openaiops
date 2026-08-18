@@ -584,11 +584,53 @@ func TestWindowsUpdateHelperLeavesHealthyAgentAloneOnPreSwapFailure(t *testing.T
 	}
 	// The restart call must sit *directly* under the guard. Checking the line in
 	// isolation cannot tell guarded from unguarded — it is the same text either way.
-	if !strings.Contains(ps, guard+"\n      [void](Restart-Agent)\n") {
+	if !strings.Contains(ps, guard+"\n      $rbMode = Restart-Agent\n") {
 		t.Fatal("the restart call is not the guarded branch's body")
 	}
-	if strings.Count(ps[catchAt:], "[void](Restart-Agent)") != 1 {
+	if strings.Count(ps[catchAt:], "Restart-Agent") != 1 {
 		t.Fatal("an unguarded Restart-Agent remains on the failure path")
+	}
+}
+
+// restartAgentBody returns the source of the helper's Restart-Agent function.
+func restartAgentBody(t *testing.T, ps string) string {
+	t.Helper()
+	const head = "function Restart-Agent {\n"
+	at := strings.Index(ps, head)
+	if at < 0 {
+		t.Fatal("Restart-Agent not found in the rescue helper")
+	}
+	rest := ps[at+len(head):]
+	end := strings.Index(rest, "\n}\n") // the function's own closing brace, column 0
+	if end < 0 {
+		t.Fatal("could not find the end of Restart-Agent")
+	}
+	return rest[:end]
+}
+
+// Restart-Agent is documented to return 'service' / 'usermode' / 'failed'. A
+// single stray "return $false" is enough to undo the whole three-state design:
+// the caller tests "-eq 'failed'", and in PowerShell the LEFT operand decides
+// the comparison type, so $false -eq 'failed' coerces the string to a truthy
+// boolean and evaluates to False. The rollback never fires, "-eq 'usermode'" is
+// False for the same reason, and the helper writes "ok" for a host on which
+// nothing was restarted at all — the exact silent-outage this design prevents.
+func TestLegacyRestartAgentNeverReturnsABoolean(t *testing.T) {
+	body := restartAgentBody(t, windowsUpdateHelperScript())
+	for _, line := range strings.Split(body, "\n") {
+		code := strings.TrimSpace(line)
+		if strings.HasPrefix(code, "#") {
+			continue
+		}
+		at := strings.Index(code, "return ")
+		if at < 0 {
+			continue
+		}
+		switch strings.TrimSuffix(strings.TrimSpace(code[at+len("return "):]), " }") {
+		case "'service'", "'usermode'", "'failed'":
+		default:
+			t.Fatalf("Restart-Agent 必须只返回三态字符串，这一行没有: %s", code)
+		}
 	}
 }
 
