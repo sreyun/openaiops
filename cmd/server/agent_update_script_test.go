@@ -714,3 +714,36 @@ func TestLegacyRestartAgentResultIsComparedAsString(t *testing.T) {
 		t.Fatal("必须显式比较 'failed' 才触发回滚")
 	}
 }
+
+// 现网一台机器的服务 ImagePath 是这样的：
+//
+//	"C:\Program Files\AIOps Agent\aiops-agent.exe" --service --config "C:\Program"
+//
+// 救援脚本用 Start-Process -ArgumentList @('--install-service','--config',$Cfg) 拉起
+// Agent，而 Start-Process 把数组用**单个空格拼接、不加任何引号**，于是默认安装路径
+// C:\Program Files\AIOps Agent\config.yaml 在第一个空格处断开，Agent 收到的是
+// `--config C:\Program`，再把这个残缺路径原样写回服务 ImagePath。此后每一次启动都读不
+// 到配置、退回 localhost:8529——服务状态正常、进程活着、二进制是最新的，而主机在控制台
+// 上永远离线，重启无效。一次**成功**的换版就这样把机器打没了。
+//
+// 同一条不变量在 cmd/agent 侧也有一条：两条升级路径都会重写 ImagePath，守一边不够。
+func TestLegacyHelperQuotesTheConfigPathInStartProcess(t *testing.T) {
+	ps := windowsUpdateHelperScript()
+	seen := 0
+	for _, line := range strings.Split(ps, "\n") {
+		code := strings.TrimSpace(line)
+		if strings.HasPrefix(code, "#") || !strings.Contains(code, "-ArgumentList") {
+			continue
+		}
+		if !strings.Contains(code, "'--config'") {
+			continue
+		}
+		seen++
+		if !strings.Contains(code, `('"'+$Cfg+'"')`) {
+			t.Fatalf("Start-Process 的 --config 没有加引号，带空格的安装路径会被截断:\n%s", code)
+		}
+	}
+	if seen == 0 {
+		t.Fatal("没有找到任何传 --config 的 Start-Process —— 断言失效了，去确认脚本结构")
+	}
+}

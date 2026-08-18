@@ -35,6 +35,85 @@ func resolveConfigRelativePaths(cfg *config, cfgPath string) {
 	cfg.PluginsDir = anchorPath(base, cfg.PluginsDir)
 }
 
+// agentConfigCandidates 是配置文件的查找顺序：先按**工作目录**找，再按**可执行文件
+// 所在目录**找。
+//
+// 第二段是一次现网故障的直接修复。Windows 服务由 SCM 拉起时工作目录是
+// C:\Windows\System32，不是安装目录。ImagePath 里的 --config 一旦丢了或写成相对路径，
+// "config.yaml" 就被解析成 C:\Windows\System32\config.yaml——找不到，然后 Agent
+// **不报错、不退出**，带着默认的 localhost:8529 一直跑下去：服务状态正常、进程活着、
+// 二进制是最新的、重启多少次都一样，而控制台上这台主机永远离线。
+//
+// 更难查的是证据也跟着跑偏了：startServiceFileLog 用的是同一个 cfgPath 推出来的目录，
+// 于是运行日志、config.example.yaml、agent_state.json 全落进了 System32——东西一直在
+// 写，只是写在了没人会去看的地方。
+//
+// resolveConfigRelativePaths 早就为 state_file / plugins_dir 做过同一件事（那一次的现场
+// 是「同一台机器在多个 host 之间反复横跳」）。配置文件自身反而一直没有——补上之后，
+// 服务无论被怎样注册（绝对 --config、相对 --config、或者根本没有 --config），都能找回
+// 装在自己旁边的那份配置。
+func agentConfigCandidates() []string {
+	names := []string{"config.yaml", "config.yml", "config.json"}
+	out := append([]string{}, names...)
+	exe, err := os.Executable()
+	if err != nil {
+		return out
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	dir := filepath.Dir(exe)
+	if dir == "" || dir == "." {
+		return out
+	}
+	for _, n := range names {
+		out = append(out, filepath.Join(dir, n))
+	}
+	return out
+}
+
+// exeDir 返回可执行文件所在目录（解析软链后），取不到返回 ""。
+func exeDir() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	return filepath.Dir(exe)
+}
+
+// agentLogBaseDir 决定运行日志写到哪里。
+//
+// 配置**读到了**就写在它旁边（历史行为，安装目录）。一个字节都没读到时不能沿用
+// configBaseDir——那会把 filepath.Abs("config.yaml") 锚到工作目录上，而 Windows 服务的
+// 工作目录是 C:\Windows\System32。现网就是这么丢的：ImagePath 里的 --config 被空格截断
+// 之后，唯一写着原因的那条 WARN 落进了 System32\agent.log，没人会去那里找。
+// 读不到配置时锚到二进制旁边，至少人能在安装目录里看见它。
+func agentLogBaseDir(cfgPath string, cfgFound bool) string {
+	if cfgFound {
+		return configBaseDir(cfgPath)
+	}
+	if d := exeDir(); d != "" {
+		return d
+	}
+	return configBaseDir(cfgPath)
+}
+
+// firstExistingBesideExe 返回可执行文件旁边第一个真实存在的配置文件，没有则返回 ""。
+func firstExistingBesideExe() string {
+	for _, c := range agentConfigCandidates() {
+		if !filepath.IsAbs(c) {
+			continue
+		}
+		if st, err := os.Stat(c); err == nil && !st.IsDir() {
+			return c
+		}
+	}
+	return ""
+}
+
 // configBaseDir returns the absolute directory holding the config file, falling
 // back to the directory of the running executable when the path cannot be made
 // absolute (the executable dir is where the installer puts config.yaml anyway).

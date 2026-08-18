@@ -544,7 +544,16 @@ function Restart-AgentUserMode {
     }
   }
   Write-Log ('user-mode Start-Process --config ' + $Cfg)
-  Start-Process -FilePath $Exe -ArgumentList @('--config', $Cfg) -WorkingDirectory $Dir -WindowStyle Hidden
+  # $Cfg MUST be quoted here. Start-Process -ArgumentList joins an array with
+  # single spaces and adds NO quoting of its own, so the default install path
+  # 'C:\Program Files\AIOps Agent\config.yaml' arrives at the agent as
+  # '--config C:\Program' plus two stray positional arguments. The agent then
+  # writes that truncated path into the service ImagePath, and every later start
+  # cannot find its config: it falls back to localhost:8529 and the host is
+  # offline forever while the service looks perfectly healthy. This is how a
+  # SUCCESSFUL swap still took hosts down. (The wscript calls a few lines up were
+  # already quoting for exactly this reason.)
+  Start-Process -FilePath $Exe -ArgumentList @('--config', ('"'+$Cfg+'"')) -WorkingDirectory $Dir -WindowStyle Hidden
   Start-Sleep -Seconds 4
   return (Test-AgentRunning)
 }
@@ -567,7 +576,16 @@ function Restart-AgentService {
   Write-Log ("restart path hasService=$hasSvc services=" + ($svcs -join ',') + " cfg=$Cfg")
   if ($hasSvc -and $Cfg -and (Test-Path -LiteralPath $Cfg)) {
     Write-Log ("install-service with config: " + $Cfg)
-    $p = Start-Process -FilePath $Exe -ArgumentList @('--install-service','--config', $Cfg) -WorkingDirectory $Dir -Wait -PassThru -WindowStyle Hidden
+    # $Cfg MUST be quoted here. Start-Process -ArgumentList joins an array with
+    # single spaces and adds NO quoting of its own, so the default install path
+    # 'C:\Program Files\AIOps Agent\config.yaml' arrives at the agent as
+    # '--config C:\Program' plus two stray positional arguments. The agent then
+    # writes that truncated path into the service ImagePath, and every later start
+    # cannot find its config: it falls back to localhost:8529 and the host is
+    # offline forever while the service looks perfectly healthy. This is how a
+    # SUCCESSFUL swap still took hosts down. (The wscript calls a few lines up were
+    # already quoting for exactly this reason.)
+    $p = Start-Process -FilePath $Exe -ArgumentList @('--install-service','--config', ('"'+$Cfg+'"')) -WorkingDirectory $Dir -Wait -PassThru -WindowStyle Hidden
     # The exit code of a -PassThru object is NOT a usable verdict. On hosts where
     # process creation is intercepted or wrapped (EDR is the common case) the
     # ExitCode getter throws, PowerShell swallows the exception into $null, and

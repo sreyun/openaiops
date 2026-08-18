@@ -37,7 +37,7 @@ type config struct {
 	Python         string         `json:"python"`
 	StateFile      string         `json:"state_file"`
 	Category       string         `json:"category"`
-	FolderID       string         `json:"folder_id,omitempty"` // asset-tree node id (any depth); preferred over category for placement
+	FolderID       string         `json:"folder_id,omitempty"`       // asset-tree node id (any depth); preferred over category for placement
 	Token          string         `json:"token"`                     // legacy single-server token
 	Relay          bool           `json:"relay"`                     // gateway relay mode: proxy all requests to --server
 	Listen         string         `json:"listen,omitempty"`          // relay listen address (e.g. ":8529")
@@ -157,10 +157,33 @@ func main() {
 	// 默认自动探测 config.yaml / config.yml / config.json（第一个存在者）；YAML 为推荐格式，
 	// 优先级最高，故新旧安装并存时（迁移期）以 YAML 为准。--config 显式指定则优先，
 	// 且按其扩展名决定 JSON/YAML 解析。
-	cfgPath := shared.ResolveConfigPath("config.yaml", "config.yml", "config.json")
+	cfgPath := shared.ResolveConfigPath(agentConfigCandidates()...)
 	for i, a := range os.Args {
 		if a == "--config" && i+1 < len(os.Args) {
 			cfgPath = os.Args[i+1]
+		}
+	}
+	// 显式给了 --config 却指到一个不存在的文件时，退回二进制旁边那份配置。
+	//
+	// 这不是防御性编程，是修一次现网事故：升级助手用
+	// `Start-Process -ArgumentList @('--install-service','--config',$Cfg)` 拉起 Agent，而
+	// Start-Process 把数组用空格拼接、**不加任何引号**，于是默认安装路径
+	// `C:\Program Files\AIOps Agent\config.yaml` 到达 Agent 时变成了 `--config C:\Program`。
+	// Agent 把这个残缺路径原样写进服务 ImagePath，此后每一次启动都读不到配置、退回
+	// localhost:8529——服务状态正常、进程活着、二进制是最新的，而主机在控制台上永远离线。
+	// 一次**成功**的换版就这样把机器打没了。
+	//
+	// 助手侧的引号已经补上，但已经被写坏 ImagePath 的存量主机不会自己好：它们连不上
+	// 服务端，收不到任何修复。这一段让它们在换上带此修复的二进制之后自行认回配置。
+	// 只在旁边确实有配置时才退回，且必须留下 WARN——静默替换配置比读不到配置更危险。
+	if cfgPath != "" {
+		if _, err := os.Stat(cfgPath); err != nil {
+			if beside := firstExistingBesideExe(); beside != "" {
+				slog.Warn("--config 指定的文件不存在，改用可执行文件旁边的配置",
+					"given", cfgPath, "used", beside,
+					"hint", "服务 ImagePath 里的 --config 很可能被空格截断，请以管理员重新注册服务：aiops-agent --install-service --config \"<安装目录>\\config.yaml\"")
+				cfgPath = beside
+			}
 		}
 	}
 	// Remember the config this process actually runs with: the Windows/Linux
@@ -176,18 +199,24 @@ func main() {
 	// agent pointing at the hardcoded default (localhost:8529), which is the
 	// #1 cause of "agent reports to localhost" on freshly-installed Linux hosts
 	// where the install script exited before writing config.
+	// 日志里一律写**绝对**路径。这次现场排查卡了很久，就是因为这一行原来打印的是
+	// "path=config.yaml"——一个相对路径，看不出它到底解析到了哪里，而"到底解析到了哪里"
+	// 正是全部答案（服务的工作目录是 System32，不是安装目录）。
+	cfgFound := false
 	if b, err := os.ReadFile(cfgPath); err == nil {
+		cfgFound = true
 		if err := shared.DecodeConfig(cfgPath, b, &cfg); err != nil {
-			log.Fatalf("配置文件解析失败，已拒绝使用默认 localhost 配置继续运行: path=%s err=%v", cfgPath, err)
+			log.Fatalf("配置文件解析失败，已拒绝使用默认 localhost 配置继续运行: path=%s err=%v", agentActiveConfigPath, err)
 		} else {
-			slog.Info("已加载配置文件", "path", cfgPath)
+			slog.Info("已加载配置文件", "path", agentActiveConfigPath)
 		}
 	} else if os.Getenv("AIOPS_SERVER") == "" {
+		wd, _ := os.Getwd()
 		slog.Warn("配置文件不存在，使用默认配置（localhost:8529）",
-			"path", cfgPath,
+			"path", agentActiveConfigPath, "cwd", wd,
 			"hint", "请运行安装命令生成 config.yaml，或使用 --config / AIOPS_SERVER 指定服务端")
 	} else {
-		slog.Info("配置文件不存在，使用环境变量 AIOPS_SERVER", "path", cfgPath)
+		slog.Info("配置文件不存在，使用环境变量 AIOPS_SERVER", "path", agentActiveConfigPath)
 	}
 
 	// 首次启动时在配置目录自动生成 config.example.yaml（已存在则跳过）
@@ -335,7 +364,7 @@ func main() {
 		cfg.RelaySecret = v
 	}
 	if err := normalizeAndValidateConfig(&cfg); err != nil {
-		log.Fatalf("Agent 配置校验失败: path=%s err=%v", cfgPath, err)
+		log.Fatalf("Agent 配置校验失败: path=%s err=%v", agentActiveConfigPath, err)
 	}
 	// The working directory belongs to whoever started us (the Windows SCM uses
 	// System32), so relative paths must be anchored to the install dir instead.
@@ -348,7 +377,22 @@ func main() {
 		if desktopWorker {
 			name = "agent-desktop.log"
 		}
-		startServiceFileLog(configBaseDir(cfgPath), name)
+		startServiceFileLog(agentLogBaseDir(cfgPath, cfgFound), name)
+	}
+	// 放在 startServiceFileLog 之后：Fatalf 的原因必须落进安装目录的 agent.log。
+	// Windows 服务的 stderr 没有任何去处，先炸再写日志等于什么都没说。
+	// 服务模式下「读不到配置」必须当场炸掉，绝不能带着默认的 localhost:8529 继续跑。
+	//
+	// 现场故障就长这样：服务状态正常、进程活着、二进制是最新的、重启一百次也一样，而
+	// 控制台上主机永远离线——因为它一直在向 localhost 上报。唯一的线索是一条 WARN，而
+	// 那条 WARN 跟着 cfgPath 一起落进了 C:\Windows\System32\agent.log，没人会去那里找。
+	// 一个"看起来健康的哑巴"比一个起不来的服务坏得多：后者 SCM 会记录、会重试、人一眼
+	// 就能看见。手工前台运行不受此限（第一次跑还没配置是正常的）。
+	if svcRun && !cfgFound && os.Getenv("AIOPS_SERVER") == "" && !explicitFlags["server"] {
+		wd, _ := os.Getwd()
+		log.Fatalf("服务模式下找不到配置文件，拒绝以默认 localhost:8529 继续运行（那会让本机在控制台上永远离线）: "+
+			"path=%s cwd=%s；请以管理员重新注册服务并带上绝对路径的 --config："+
+			`aiops-agent --install-service --config "<安装目录>\config.yaml"`, agentActiveConfigPath, wd)
 	}
 
 	// Apply server TLS trust (self-signed CA / skip-verify) to every agent→server
