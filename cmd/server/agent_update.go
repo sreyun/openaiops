@@ -1272,6 +1272,7 @@ func shouldLegacyAgentUpdateFallback(out string, err error) bool {
 func moduleFailureIsRescuable(low string) bool {
 	for _, stop := range []string{
 		"sha-256 mismatch", "sha256 mismatch", // integrity: same artifact, same verdict
+		"stale artifact",       // the source served an old build; the script would fetch the same one
 		"not runnable",         // the staged binary does not start on this host
 		"unsupported platform", // no artifact exists for it at all
 		"already running",      // a swap is in flight; never launch a second one

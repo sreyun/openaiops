@@ -104,21 +104,73 @@ func startViaSystemdRun(script string) error {
 	return nil
 }
 
+// knownAgentUnits are the systemd units this binary can legitimately be running
+// under. aiops-relay is the gateway install (install-relay.sh): same binary,
+// same self-update path, different unit — restarting "aiops-agent" on a gateway
+// restarts nothing, so the new binary is staged and never activated, and the
+// panel sees the version refuse to move for reasons no log explains.
+var knownAgentUnits = []string{"aiops-agent", "aiops-monitor-agent", "aiops-relay"}
+
 func detectLinuxAgentUnit() string {
-	// Prefer the canonical one-liner / current --install-service name.
-	for _, u := range []string{"aiops-agent", "aiops-monitor-agent"} {
+	return pickLinuxAgentUnit(selfSystemdUnit(), func(u string) bool {
 		out, err := exec.Command("systemctl", "is-active", u).CombinedOutput()
-		if err == nil && strings.TrimSpace(string(out)) == "active" {
+		return err == nil && strings.TrimSpace(string(out)) == "active"
+	}, func(u string) bool {
+		_, err := os.Stat("/etc/systemd/system/" + u + ".service")
+		return err == nil
+	})
+}
+
+// pickLinuxAgentUnit chooses the unit to restart after a swap.
+//
+// self 优先于探测：一台机器完全可能同时装着 aiops-agent 与 aiops-relay（网关机也想被
+// 监控），此时 `systemctl is-active aiops-agent` 会痛快地回答 active——回答的却是另一个
+// 进程。要重启的只能是**我们自己所在的那个 unit**。
+func pickLinuxAgentUnit(self string, isActive, unitFileExists func(string) bool) string {
+	if self != "" {
+		for _, u := range knownAgentUnits {
+			if self == u {
+				return u
+			}
+		}
+	}
+	for _, u := range knownAgentUnits {
+		if isActive(u) {
 			return u
 		}
 	}
-	if _, err := os.Stat("/etc/systemd/system/aiops-agent.service"); err == nil {
-		return "aiops-agent"
-	}
-	if _, err := os.Stat("/etc/systemd/system/aiops-monitor-agent.service"); err == nil {
-		return "aiops-monitor-agent"
+	for _, u := range knownAgentUnits {
+		if unitFileExists(u) {
+			return u
+		}
 	}
 	return "aiops-agent"
+}
+
+// selfSystemdUnit returns the *.service this process belongs to, or "" when it
+// is not running under systemd. Parsed from /proc/self/cgroup, which carries the
+// unit path for both cgroup v1 (name=systemd hierarchy) and v2 (unified).
+func selfSystemdUnit() string {
+	b, err := os.ReadFile("/proc/self/cgroup")
+	if err != nil {
+		return ""
+	}
+	return systemdUnitFromCgroup(string(b))
+}
+
+func systemdUnitFromCgroup(text string) string {
+	for _, line := range strings.Split(text, "\n") {
+		// "0::/system.slice/aiops-agent.service" | "1:name=systemd:/system.slice/…"
+		idx := strings.LastIndex(line, "/")
+		if idx < 0 {
+			continue
+		}
+		leaf := strings.TrimSpace(line[idx+1:])
+		if strings.HasSuffix(leaf, ".service") {
+			return strings.TrimSuffix(leaf, ".service")
+		}
+	}
+	return ""
 }
 
 // windowsPowerShellPath is a stub for non-Windows builds (CIM helpers compile

@@ -125,8 +125,18 @@ func moduleAgentUpdate(args map[string]string, allowedBases []string) ([]byte, i
 			_ = os.Remove(staging)
 			continue
 		}
-		if err := agentBinaryVersionProbe(staging); err != nil {
+		probedVer, err := agentBinaryVersionProbe(staging)
+		if err != nil {
 			lastDL = fmt.Errorf("%s not runnable: %w", cand, err)
+			_ = os.Remove(staging)
+			continue
+		}
+		if agentUpdateArtifactIsStale(probedVer, wantVer) {
+			lastDL = fmt.Errorf("%w: %s from %s reports %s, but this upgrade targets %s"+
+				" — the download source is serving an outdated artifact (a relay /dl cache that could not"+
+				" revalidate against the cloud, or a server dist that was never refreshed);"+
+				" swapping it in would report success while the reported version never moves",
+				errStaleArtifact, cand, server, probedVer, wantVer)
 			_ = os.Remove(staging)
 			continue
 		}
@@ -142,6 +152,12 @@ func moduleAgentUpdate(args map[string]string, allowedBases []string) ([]byte, i
 		// download: a host that fails here every time would otherwise never hand
 		// back the log explaining why the round BEFORE it failed, which is exactly
 		// the host an operator most needs to see.
+		if errors.Is(lastDL, errStaleArtifact) {
+			// Not a download failure: the bytes arrived intact and matched their
+			// checksum. Saying "download failed" here would send the operator
+			// hunting for a network problem that does not exist.
+			return []byte("agent_update: " + lastDL.Error() + takeUpdateDiagnostics()), 1
+		}
 		return []byte("agent_update: download failed: " + lastDL.Error() + takeUpdateDiagnostics()), 1
 	}
 
@@ -476,28 +492,86 @@ func agentUpdateBinCandidates(goos, goarch, preferred string) []string {
 // actually starts on this host before it replaces a working agent (catches
 // Go≥1.21 PEs on Server 2012, and wrong-arch / truncated downloads everywhere).
 // AIOPS_UPDATE_PROBE=1 forces the callee onto its silent fast path.
-func agentBinaryVersionProbe(path string) error {
+// The returned string is the version the staged binary printed, or "" when the
+// probe could not establish one (see agentUpdateArtifactIsStale).
+func agentBinaryVersionProbe(path string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, path, "--version")
 	cmd.Env = append(os.Environ(), "AIOPS_UPDATE_PROBE=1")
 	out, err := cmd.CombinedOutput()
 	if err == nil {
-		return nil
+		return parseProbeVersion(string(out)), nil
 	}
 	msg := strings.TrimSpace(string(out))
 	if msg == "" {
 		msg = err.Error()
 	}
 	if runtime.GOOS == "windows" || probeFailureIsFatal(err) {
-		return fmt.Errorf("%s", msg)
+		return "", fmt.Errorf("%s", msg)
 	}
 	// Hardened hosts (SELinux/AppArmor/noexec staging dir) can deny exec of a
 	// freshly written file even though the binary itself is fine. Do not block the
 	// upgrade on an inconclusive probe — the restart watchdog plus .bak rollback
 	// remains the real safety net on Unix.
 	fmt.Fprintf(os.Stderr, "agent_update: version probe inconclusive (%s); continuing\n", msg)
-	return nil
+	return "", nil
+}
+
+// errStaleArtifact marks "the artifact is intact but it is the wrong version".
+//
+// 这条与「下载失败」必须分开：字节到齐了、SHA-256 也对上了，错的是**源**发出来的
+// 东西。服务端的 stale_artifact 闸门只看得见自己的 dist，看不见中继 /dl 缓存；而中继
+// 在回源校验失败时会有意继续发本地旧副本（对断网内网这正是它存在的意义）。旧二进制
+// 配旧 .sha256 自洽，探针也能跑起来，于是升级会一路"成功"到重启，主机上报的版本却
+// 纹丝不动——服务端只能等 pending_verify 超时、软重试、直到连续同因失败熔断，中间
+// 十几分钟屏幕上没有一句话指向真正的原因。
+var errStaleArtifact = errors.New("stale artifact")
+
+// agentUpdateArtifactIsStale reports whether the staged binary is a different
+// version from the one this job targets.
+//
+// 判不出来时一律返回 false：把「我不知道」当成「它是错的」会在受限主机上冻结整支
+// 机队，这与探针本身的原则一致（见 agentBinaryVersionProbe / probeFailureIsFatal）。
+func agentUpdateArtifactIsStale(probed, want string) bool {
+	if strings.TrimSpace(probed) == "" || strings.TrimSpace(want) == "" {
+		return false
+	}
+	return normalizeAgentVer(probed) != normalizeAgentVer(want)
+}
+
+// parseProbeVersion picks the version line out of the probe's combined output.
+//
+// 快路径只打一行版本号（main.go 的 AIOPS_UPDATE_PROBE 分支），但受限主机上偶尔会有
+// 一行 loader/审计告警混进 stderr，所以从后往前找第一行"长得像版本号"的，找不到就
+// 返回空——空表示"没判定"，不表示"版本不对"。
+func parseProbeVersion(out string) string {
+	lines := strings.Split(out, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		s := strings.TrimSpace(lines[i])
+		if looksLikeAgentVersion(s) {
+			return s
+		}
+	}
+	return ""
+}
+
+func looksLikeAgentVersion(s string) bool {
+	if s == "" || len(s) > 64 {
+		return false
+	}
+	t := normalizeAgentVer(s)
+	if t == "" || t[0] < '0' || t[0] > '9' || !strings.Contains(t, ".") {
+		return false
+	}
+	for _, r := range t {
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'z', r == '.', r == '-', r == '+', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // probeFailureIsFatal is true only when the staged binary demonstrably cannot

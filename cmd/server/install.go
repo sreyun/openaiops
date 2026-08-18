@@ -1795,6 +1795,9 @@ if ($SelfTestExit -eq 0) {
 const relayInstallShTemplate = `#!/bin/sh
 set -e
 SERVER="__SERVER__"
+TOKEN="__TOKEN__"
+CATEGORY="__CATEGORY__"
+FOLDER_ID="__FOLDER_ID__"
 LISTEN="${RELAY_LISTEN:-:8529}"
 if [ "$(id -u)" = "0" ]; then DIR="${AIOPS_DIR:-/opt/aiops-agent}"; else DIR="${AIOPS_DIR:-$HOME/.aiops-agent}"; fi
 
@@ -1873,10 +1876,15 @@ fi
 chmod +x aiops-agent
 
 # Write YAML without expanding metacharacters inside AIOPS_RELAY_SECRET.
+# token/category are what put the gateway itself in the host list: it relays AND
+# reports, so the one machine every internal agent depends on is monitored too.
 {
   printf 'relay: true\n'
   printf 'listen: "%s"\n' "$LISTEN"
   printf 'server: "%s"\n' "$SERVER"
+  if [ -n "$TOKEN" ]; then printf 'token: "%s"\n' "$TOKEN"; fi
+  if [ -n "$CATEGORY" ]; then printf 'category: "%s"\n' "$CATEGORY"; else printf 'category: "relay-gateway"\n'; fi
+  if [ -n "$FOLDER_ID" ]; then printf 'folder_id: "%s"\n' "$FOLDER_ID"; fi
   if [ -n "${AIOPS_RELAY_SECRET:-}" ]; then
     _esc=$(printf '%s' "$AIOPS_RELAY_SECRET" | sed 's/\\/\\\\/g; s/"/\\"/g')
     printf 'relay_secret: "%s"\n' "$_esc"
@@ -1886,6 +1894,8 @@ if [ ! -s config.yaml ]; then
   echo "[AIOps] ERROR: config.yaml was not created! Installation incomplete."
   exit 1
 fi
+# Owner-only: this file now carries the install token as well as relay_secret.
+chmod 600 config.yaml 2>/dev/null || true
 rm -f config.json 2>/dev/null || true
 echo "[AIOps] config written: $DIR/config.yaml (upstream: $SERVER, listen: $LISTEN)"
 
@@ -1994,7 +2004,10 @@ echo "  curl -fsSL http://<this-host-ip>:${RELAY_PORT}/install.sh | sh"
 const relayInstallPs1Template = `$ErrorActionPreference = "Stop"
 # Force TLS 1.2 (numeric 3072) so downloads work on Server 2012/2016 which default to TLS 1.0.
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072 } catch {}
-$Server = "__SERVER__"
+$Server   = "__SERVER__"
+$Token    = "__TOKEN__"
+$Category = "__CATEGORY__"
+$FolderID = "__FOLDER_ID__"
 $Listen = if ($env:RELAY_LISTEN) { $env:RELAY_LISTEN } else { ":8529" }
 $Dir    = Join-Path $env:LOCALAPPDATA "aiops-agent"
 
@@ -2041,6 +2054,14 @@ $RelayLines = New-Object System.Collections.Generic.List[string]
 $RelayLines.Add("relay: true")
 $RelayLines.Add("listen: '" + (([string]$Listen) -replace "'", "''") + "'")
 $RelayLines.Add("server: '" + (([string]$Server) -replace "'", "''") + "'")
+# token/category put the gateway itself in the host list: it relays AND reports.
+if ($Token) { $RelayLines.Add("token: '" + (([string]$Token) -replace "'", "''") + "'") }
+if ($Category) {
+  $RelayLines.Add("category: '" + (([string]$Category) -replace "'", "''") + "'")
+} else {
+  $RelayLines.Add("category: 'relay-gateway'")
+}
+if ($FolderID) { $RelayLines.Add("folder_id: '" + (([string]$FolderID) -replace "'", "''") + "'") }
 if ($env:AIOPS_RELAY_SECRET) {
   $RelayLines.Add("relay_secret: '" + (([string]$env:AIOPS_RELAY_SECRET) -replace "'", "''") + "'")
 }

@@ -110,26 +110,9 @@ WantedBy=multi-user.target
 }
 
 // currentSystemdUnit returns the *.service this process belongs to, or "" when
-// it is not running under systemd. Parsed from /proc/self/cgroup, which lists
-// the unit path for both cgroup v1 (name=systemd hierarchy) and v2 (unified).
-func currentSystemdUnit() string {
-	b, err := os.ReadFile("/proc/self/cgroup")
-	if err != nil {
-		return ""
-	}
-	for _, line := range strings.Split(string(b), "\n") {
-		// "0::/system.slice/aiops-agent.service" | "1:name=systemd:/system.slice/…"
-		idx := strings.LastIndex(line, "/")
-		if idx < 0 {
-			continue
-		}
-		leaf := strings.TrimSpace(line[idx+1:])
-		if strings.HasSuffix(leaf, ".service") {
-			return strings.TrimSuffix(leaf, ".service")
-		}
-	}
-	return ""
-}
+// it is not running under systemd. One definition only: the update helper needs
+// the same answer to decide which unit to restart (see pickLinuxAgentUnit).
+func currentSystemdUnit() string { return selfSystemdUnit() }
 
 // purgeAgentUnitDropIns removes *.service.d overrides for every known agent unit
 // without touching the running service. Drop-ins are what re-apply

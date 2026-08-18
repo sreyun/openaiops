@@ -151,6 +151,7 @@ relay gateway on the **only internet-reachable machine**:
 - The relay runs the Agent in Relay mode, listens on a local port, and reverse-proxies internal Agents' report / binary / terminal requests to the cloud server.
 - The relay injects **`X-Relay-Secret`** when reporting to the server; the server verifies this secret to authenticate the relay source.
 - Internal managed hosts just point `--server` at this relay — **no direct public-network access needed**.
+- The gateway itself keeps collecting and reporting straight to the cloud while it relays, so it appears in the host list and can be upgraded / opened as a terminal like any other host. This needs a `token` in its `config.yaml`; the install script writes one. Gateways installed before this change: re-run the relay install command with `?token=` (config and /dl cache are kept).
 
 Install (relay mode in "Install Agent", or similar):
 

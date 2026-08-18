@@ -407,8 +407,22 @@ func main() {
 		if listen == "" {
 			listen = ":8529"
 		}
-		runRelay(listen, strings.TrimRight(cfg.Server, "/"), cfg.RelaySecret)
-		return
+		// The gateway is a managed host like any other — it keeps collecting and
+		// reporting to the upstream while it relays, so it shows up in the host
+		// list and can be upgraded, inspected and opened as a terminal.
+		//
+		// 这里以前是 runRelay(...) + return：内网每一台 agent 都吊在这台机器上，而它
+		// 恰恰是面板上唯一看不见的一台——没有指标、没有告警、自动升级够不到它，出事
+		// 只能有人登上去看。它出网正常（这是中继模式的前提），直连上游上报没有额外
+		// 成本；上报走 cfg.Server，不绕自己一圈。
+		go runRelay(listen, strings.TrimRight(cfg.Server, "/"), cfg.RelaySecret)
+		if strings.TrimSpace(cfg.Token) == "" {
+			// 老网关（本改动之前装的）配置里没有 token。服务端开了安装 Token 校验时
+			// 注册会被拒，症状是"中继照常工作、主机列表里就是没有它"——说清楚比让人
+			// 去翻 403 日志强。
+			slog.Warn("中继网关未配置 token：若服务端开启了安装 Token 校验，本机不会出现在主机列表",
+				"fix", "用面板「安装 Agent → 网关中继」里带 ?token= 的命令重跑一次安装即可（配置与缓存都保留）")
+		}
 	}
 
 	// Desktop workers must NEVER mint a new host_id. The service owns identity
@@ -536,7 +550,16 @@ func main() {
 	}
 	// Linux: rewrite legacy sandboxed / non-root units so remote terminal can
 	// write /etc and $HOME (vim E45 / ProtectHome). No-op on other platforms.
-	ensureLinuxAgentUnitPrivileges(cfgPath)
+	//
+	// 中继网关跳过：它装的是 aiops-relay.service（或用户态 nohup/VBS），而这段在非 root
+	// 下会 sudo --install-service 把自己重装成 aiops-agent 服务再 os.Exit(0)。对一台内网
+	// 所有 agent 都吊在上面的网关机，开机就换掉服务名、顺带重启一次，代价远大于"远程
+	// 终端能不能写 /etc"这点收益。
+	if !cfg.Relay {
+		ensureLinuxAgentUnitPrivileges(cfgPath)
+	} else {
+		slog.Info("中继网关：跳过 systemd 单元提权自愈（不改动 aiops-relay 服务），仅上报与远程能力照常")
+	}
 	agent := NewAgent(
 		servers,
 		time.Duration(cfg.ReportInterval)*time.Second,
