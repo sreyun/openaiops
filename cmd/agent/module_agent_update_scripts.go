@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"strings"
+
+	"aiops-monitor/shared"
 )
 
 // Self-update restart helpers, as plain string builders.
@@ -468,30 +470,7 @@ function Invoke-Native {
   }
   return [pscustomobject]@{ ExitCode = $code; Output = $out.Trim() }
 }
-# Running an agent binary's --version needs a hard timeout: the probe target can
-# turn into a daemon at any moment, and an unbounded pipe read would hang the
-# helper forever right before the swap, leaving the host silently on the old
-# version with nothing to report.
-function Invoke-VersionProbe {
-  param([string]$File,[int]$TimeoutSec = 20)
-  $o = [IO.Path]::GetTempFileName()
-  $e = [IO.Path]::GetTempFileName()
-  try {
-    $p = Start-Process -FilePath $File -ArgumentList '--version' -NoNewWindow -PassThru -RedirectStandardOutput $o -RedirectStandardError $e
-    if (-not $p.WaitForExit($TimeoutSec * 1000)) {
-      try { $p.Kill() } catch {}
-      return [pscustomobject]@{ ExitCode = -1; Output = ("version probe timed out after " + $TimeoutSec + "s") }
-    }
-    $p.WaitForExit()
-    $txt = '' + (Get-Content -LiteralPath $o -Raw -ErrorAction SilentlyContinue) + (Get-Content -LiteralPath $e -Raw -ErrorAction SilentlyContinue)
-    return [pscustomobject]@{ ExitCode = $p.ExitCode; Output = $txt.Trim() }
-  } catch {
-    return [pscustomobject]@{ ExitCode = -1; Output = $_.Exception.Message }
-  } finally {
-    Remove-Item -Force -ErrorAction SilentlyContinue $o, $e
-  }
-}
-function Wait-ServiceState([string]$Name, [string]$Want, [int]$Seconds) {
+`+shared.WindowsVersionProbePS+`function Wait-ServiceState([string]$Name, [string]$Want, [int]$Seconds) {
   for ($i=0; $i -lt $Seconds; $i++) {
     $s = Get-Service -Name $Name -ErrorAction SilentlyContinue
     if ($s -and $s.Status -eq $Want) { return $true }
@@ -628,9 +607,10 @@ try {
   }
   Write-Log ("update begin exe=$exe cfg=$cfg")
   $probe = Invoke-VersionProbe $new
-  if ($probe.ExitCode -ne 0) {
+  if (-not (Test-ProbeRunnable $probe)) {
     throw ("staging binary not runnable before swap (exit=" + $probe.ExitCode + "): " + $probe.Output)
   }
+  if ($null -eq $probe.ExitCode) { Write-Log ("staging --version exit code unavailable; accepted on output") }
   Write-Log ("staging --version: " + $probe.Output)
   foreach ($name in (Get-AgentServiceNames)) {
     $svc = Get-Service -Name $name -ErrorAction SilentlyContinue

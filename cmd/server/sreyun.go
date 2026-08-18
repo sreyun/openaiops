@@ -387,6 +387,7 @@ func (h *SreyunCore) registerTools() {
 	h.registerNavTools()
 	h.registerPanelTools()
 	h.registerSecurityTools()
+	h.registerPlatformTools() // 平台自身故障：排障时要先排除的那一项
 	h.registerEvolveTools()
 	h.registerExternalMCPTools() // 内部自带加锁 + 发布
 }

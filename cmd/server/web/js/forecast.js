@@ -199,7 +199,7 @@ async function enrichSamplesWithForecast(samples, seriesDefs, opts) {
     if (!_fcStillCurrent(opts)) return Object.assign(base, { stale: true });
     if (!r.ok) {
       const errTxt = await r.text().catch(() => "");
-      return Object.assign(base, { meta: { ok: false, message: "预测接口失败 HTTP " + r.status + (errTxt ? (": " + errTxt.slice(0, 80)) : "") } });
+      return Object.assign(base, { meta: { ok: false, message: "预测接口失败 HTTP " + r.status + (errTxt ? (": " + errTxt.trim()) : "") } });
     }
     res = await r.json();
   } catch (e) {

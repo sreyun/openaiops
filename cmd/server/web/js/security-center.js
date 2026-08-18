@@ -120,7 +120,7 @@ async function loadAIToolAudit() {
           ? `<span class="tag ok">${esc(I18N.t("sec.status_done", "已执行"))}</span>`
           : `<span class="tag">${esc(I18N.t("sec.status_pending", "待审"))}</span>`);
       return `<tr><td>${esc(ts)}</td><td>${esc(e.actor || "")}</td><td>${esc(e.tool || "")}</td><td>${esc(e.action || "")}</td>
-        <td>${esc((typeof HostPicker!=="undefined"&&e.host_id)?(HostPicker.hostTitle({id:e.host_id,hostname:e.hostname,ip:e.ip||e.host_ip})||"未知主机"):(e.hostname||"未知主机"))}</td><td>${st}</td><td>${esc((e.detail || "").slice(0, 120).replace(/\bhermes(?:\s+agent)?\b/gi,"智能运维服务"))}</td></tr>`;
+        <td>${esc((typeof HostPicker!=="undefined"&&e.host_id)?(HostPicker.hostTitle({id:e.host_id,hostname:e.hostname,ip:e.ip||e.host_ip})||"未知主机"):(e.hostname||"未知主机"))}</td><td>${st}</td><td class="sec-detail">${esc((e.detail || "").replace(/\bhermes(?:\s+agent)?\b/gi,"智能运维服务"))}</td></tr>`;
     }).join("")}</tbody></table></div>`;
   } catch (e) {
     el.innerHTML = `<div class="hint">${esc(I18N.t("sec.load_failed", "加载失败"))}：${esc(String(e))}</div>`;

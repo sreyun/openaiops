@@ -6262,3 +6262,8 @@ html.embed-mode body {
 .agent-auto-skips-tbl{width:100%;border-collapse:collapse;font-size:12px}
 .agent-auto-skips-tbl th,.agent-auto-skips-tbl td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line);vertical-align:top}
 .agent-auto-skips-tbl th{color:var(--muted);font-weight:600;white-space:nowrap}
+
+/* AI 操作审计的「详情」列：这段文字是这条动作到底做了什么的**唯一**记录。
+   此前它被 slice(0,120) 截断，而表格里没有任何下钻可以看到剩下的部分——
+   与「Windows 升级失败详情被截到 160 字」是同一个缺陷：证据在最后一步被切掉。 */
+.sec-detail{ white-space:pre-wrap; word-break:break-word; max-width:520px; }

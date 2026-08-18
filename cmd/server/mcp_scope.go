@@ -21,7 +21,7 @@ var mcpScopeTools = map[string][]string{
 	"infra":     {"list_hosts", "query_containers", "query_k8s", "locate_resource", "query_hyperv", "query_netflow", "query_netflow_flows"},
 	"knowledge": {"search_similar_cases", "search_knowledge", "list_ui_views", "navigate_ui", "query_security_posture"},
 	"alerts":    {"list_alerts"},
-	"sre":       {"get_duty_context", "diagnose_incident", "run_diagnostic", "check_host_health", "list_hosts", "list_alerts", "list_recent_changes"},
+	"sre":       {"get_duty_context", "diagnose_incident", "run_diagnostic", "check_host_health", "list_hosts", "list_alerts", "list_recent_changes", "query_platform_faults"},
 	"ai":        {"run_assist_task", "analyze_dashboard", "diagnose_incident", "get_duty_context", "list_hosts"},
 }
 

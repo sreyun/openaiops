@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"unicode/utf16"
+
+	"aiops-monitor/shared"
 )
 
 // buildLegacyAgentUpdateCommand returns a one-shot shell/PowerShell command that
@@ -509,30 +511,7 @@ function Invoke-Native {
   } catch { $out = $_.Exception.Message; $code = -1 } finally { $ErrorActionPreference = $prevEAP }
   return [pscustomobject]@{ ExitCode = $code; Output = $out.Trim() }
 }
-# Running an agent binary's --version needs a hard timeout: the probe target can
-# turn into a daemon at any moment, and an unbounded pipe read would hang the
-# helper forever right before the swap, leaving the host silently on the old
-# version with nothing to report.
-function Invoke-VersionProbe {
-  param([string]$File,[int]$TimeoutSec = 20)
-  $o = [IO.Path]::GetTempFileName()
-  $e = [IO.Path]::GetTempFileName()
-  try {
-    $p = Start-Process -FilePath $File -ArgumentList '--version' -NoNewWindow -PassThru -RedirectStandardOutput $o -RedirectStandardError $e
-    if (-not $p.WaitForExit($TimeoutSec * 1000)) {
-      try { $p.Kill() } catch {}
-      return [pscustomobject]@{ ExitCode = -1; Output = ("version probe timed out after " + $TimeoutSec + "s") }
-    }
-    $p.WaitForExit()
-    $txt = '' + (Get-Content -LiteralPath $o -Raw -ErrorAction SilentlyContinue) + (Get-Content -LiteralPath $e -Raw -ErrorAction SilentlyContinue)
-    return [pscustomobject]@{ ExitCode = $p.ExitCode; Output = $txt.Trim() }
-  } catch {
-    return [pscustomobject]@{ ExitCode = -1; Output = $_.Exception.Message }
-  } finally {
-    Remove-Item -Force -ErrorAction SilentlyContinue $o, $e
-  }
-}
-$procNames=@('aiops-agent','aiops-agent-windows-amd64','aiops-agent-windows-arm64','aiops-agent-windows-amd64-win2012')
+` + shared.WindowsVersionProbePS + `$procNames=@('aiops-agent','aiops-agent-windows-amd64','aiops-agent-windows-arm64','aiops-agent-windows-amd64-win2012')
 $svcNames=@('AiopsMonitorAgent','AIOps-Agent','AIOpsAgent')
 $exeNames=@('aiops-agent.exe','aiops-agent-windows-amd64.exe','aiops-agent-windows-arm64.exe','aiops-agent-windows-amd64-win2012.exe')
 # The service ImagePath is the authoritative description of the install: it
@@ -716,7 +695,8 @@ try {
   if(-not $Expected -or $Expected -ne $Actual){ Remove-Item $New -Force -ErrorAction SilentlyContinue; throw "SHA-256 mismatch (want $Expected got $Actual)" }
   Write-Log ("downloaded $Bin sha=$Actual")
   $probe = Invoke-VersionProbe $New
-  if($probe.ExitCode -ne 0){ Remove-Item $New -Force -ErrorAction SilentlyContinue; throw ("staging not runnable (exit="+$probe.ExitCode+"): "+$probe.Output) }
+  if(-not (Test-ProbeRunnable $probe)){ Remove-Item $New -Force -ErrorAction SilentlyContinue; throw ("staging not runnable (exit="+$probe.ExitCode+"): "+$probe.Output) }
+  if($null -eq $probe.ExitCode){ Write-Log ("staging --version exit code unavailable; accepted on output") }
   Write-Log ("staging --version: " + $probe.Output)
   Write-Result ("running " + (Get-Date -Format o) + " stage=staged sha=" + $Actual)
   # Everything above is harmless; everything below stops the agent -- and the

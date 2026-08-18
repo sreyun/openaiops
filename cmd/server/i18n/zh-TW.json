@@ -18,9 +18,8 @@
   "auth.global_mfa_required": "管理員已啟用全域兩步驗證策略，請完成綁定後登入",
   "auth.unauthorized": "未授權",
   "auth.relay_unauthorized": "中繼金鑰驗證失敗",
-    "auth.must_change_password": "管理員已重設您的密碼，請立即修改密碼",
+  "auth.must_change_password": "管理員已重設您的密碼，請立即修改密碼",
   "auth.init_not_required": "無需初始化：帳戶已完成安全設定",
-
   "login.sms_not_available": "簡訊驗證碼登入功能即將上線，請使用使用者名稱或手機號+密碼登入",
   "login.sms_sent": "驗證碼已發送，請檢查手機簡訊",
   "login.sms_disabled": "簡訊通道未啟用，請聯繫管理員在設定中開啟簡訊推送",
@@ -40,7 +39,6 @@
   "login.switch_username": "使用者名稱登入",
   "login.sms_login_btn": "簡訊驗證碼登入",
   "login.phone_placeholder": "輸入手機號",
-
   "alert.offline": "主機 %s（%s）已失聯 %d 秒",
   "alert.cpu_high": "CPU 使用率 %.1f%%（空閒 %.1f%%）",
   "alert.mem_high": "記憶體使用率 %.1f%%（剩餘 %s）",
@@ -94,7 +92,6 @@
   "alert.api_throughput_low": "API 吞吐量降至 %.0f req/s",
   "alert.task_fail": "定時任務執行失敗 %d 次",
   "alert.task_timeout": "定時任務超時 %.0f 秒",
-
   "notify.title": "【AIOps】%s",
   "notify.host": "主機",
   "notify.ip": "IP",
@@ -153,7 +150,6 @@
   "notify.alert_subject": "AIOps 告警：%s",
   "notify.email_alert_fired": "🔴 告警觸發",
   "notify.email_alert_recovered": "✅ 告警恢復",
-
   "check.unknown_type": "未知檢查類型: %s",
   "check.request_failed": "請求失敗: %s",
   "check.connect_failed": "連線失敗: %s",
@@ -177,7 +173,6 @@
   "check.custom_recovered": "自訂監控恢復：%s",
   "check.self_failed": "伺服器健康檢查異常（%s）",
   "check.custom_monitor": "自訂監控",
-
   "user.username_exists": "使用者名稱已存在",
   "user.not_found": "使用者不存在",
   "user.keep_one_admin": "至少保留一名管理員",
@@ -188,13 +183,11 @@
   "user.invalid_email": "信箱格式不合法",
   "user.invalid_username_format": "使用者名稱僅限字母/數字/-_.，長度 2–32 位",
   "user.default_display": "管理員",
-
   "config.threshold_range": "閾值 %s 必須在 0-100 之間（目前 %.1f）",
   "config.offline_positive": "離線判定時間必須大於 0（目前 %d 秒）",
   "config.smtp_port_range": "SMTP 連接埠必須在 1-65535 之間（目前 %d）",
   "config.smtp_password_short": "SMTP 密碼至少 4 位",
   "config.no_revert": "沒有可回滾的上一版本設定",
-
   "recovery.invalid_email": "信箱格式不合法",
   "recovery.username_required": "請輸入使用者名稱",
   "recovery.no_smtp": "系統未設定信箱服務，請聯繫管理員",
@@ -216,13 +209,11 @@
   "recovery.email_send_failed": "信箱發送失敗，請稍後重試",
   "recovery.email_send_error": "信箱發送失敗：%s",
   "recovery.rate_limited": "發送過於頻繁，請 60 秒後再試",
-
   "recovery.invalid_purpose": "無效的找回類型",
   "recovery.token_invalid": "重置令牌無效或已過期",
   "recovery.mfa_not_configured": "MFA 未正確配置",
   "recovery.email_username_code_subject": "AIOps — 帳戶找回驗證碼",
   "recovery.email_username_code_body": "您的驗證碼是：<b style=\"font-size:24px;letter-spacing:4px;color:#4c8dff\">%s</b>",
-
   "recovery.email_username_subject": "AIOps — 帳號使用者名稱",
   "recovery.email_username_body": "您的登入使用者名稱為：<b style=\"font-size:18px\">%s</b>",
   "recovery.email_disclaimer": "如非本人操作請忽略此信箱。",
@@ -237,7 +228,6 @@
   "recovery.email_mfa_code": "驗證碼：<b style=\"font-size:24px;letter-spacing:4px;color:#4c8dff\">%s</b>",
   "recovery.email_mfa_validity": "驗證碼 10 分鐘內有效，單次使用。",
   "recovery.email_mfa_disclaimer": "如非本人操作，請立即修改密碼。",
-
   "terminal.disabled": "遠端終端已被管理員停用",
   "terminal.ws_required": "需要 WebSocket 升級",
   "terminal.no_channel": "✗ 無法建立終端會話——伺服器未找到該主機的反向終端通道。",
@@ -249,7 +239,6 @@
   "terminal.timeout": "Agent 未在預期時間內接入終端通道，已斷開。",
   "terminal.timeout_hint_https": "排查：1) 服務是否在跑 2) config.server 是否為 https:// 3) 查看 agent.log 是否有「終端通道已就緒」或指紋 403。",
   "terminal.session_not_found": "會話不存在或已結束",
-
   "playbook.not_found": "劇本不存在",
   "playbook.no_target": "目標主機為空或均已離線——請檢查步驟的目標選擇與主機在線狀態",
   "playbook.exec_not_found": "執行記錄不存在",
@@ -268,7 +257,6 @@
   "playbook.sched_bad_weekday": "星期取值非法（應為 0–6）",
   "playbook.sched_bad_kind": "未知的定時類型",
   "playbook.uncategorized": "未分類",
-
   "incident.not_found": "事件不存在",
   "incident.title_required": "事件標題不能為空",
   "incident.comment_required": "留言內容不能為空",
@@ -309,18 +297,14 @@
   "ticket.evt_assign": "指派給 %s",
   "ticket.evt_attach": "上傳了 %d 個附件",
   "ticket.unassigned": "未指派",
-  "ticket.unassigned": "未指派",
   "ticket.from_incident": "由事件 #%d 升級生成",
   "log.remediation_saved": "儲存自動修復規則「%s」",
   "log.slo_saved": "儲存 SLO「%s」",
-
   "check_api.invalid_params": "名稱 / 目標 / 類型不合法",
-
   "agent.invalid_token": "無效或缺失的接入 Token",
   "agent.fingerprint_failed": "指紋鑒權失敗：未註冊或指紋不匹配",
   "agent.fingerprint_required": "指紋資訊必填",
   "agent.fingerprint_conflict": "主機指紋與已登記記錄衝突，拒絕覆蓋身分",
-
   "email.not_configured": "信箱服務未設定或未啟用",
   "email.invalid_header": "非法的收件人 / 主題 / 發件人名稱",
   "email.tls_failed": "TLS 連線失敗: %v",
@@ -331,12 +315,10 @@
   "email.data_error": "資料寫入失敗: %v",
   "email.write_error": "信箱寫入失敗: %v",
   "email.send_error": "信箱發送失敗: %v",
-
   "db.read_failed": "資料庫讀取失敗(已忽略,將以空狀態啟動)",
   "db.parse_failed": "資料庫解析失敗(已忽略,將以空狀態啟動)",
   "db.restored": "已從資料庫恢復",
   "db.save_failed": "資料庫落盤失敗",
-
   "server.flag_addr": "監聽位址，如 :8529 或 0.0.0.0:8529",
   "server.flag_config": "伺服器設定檔路徑（告警/閾值/分類）",
   "server.flag_dist": "Agent 下載目錄（含各平台二進位與 plugins.zip）；留空自動探測 ./dist 或程式所在目錄",
@@ -351,7 +333,6 @@
   "server.dist_missing": "未找到 Agent 下載檔案，一鍵安裝不可用；請用 -dist 指定含 aiops-agent* 與 plugins.zip 的目錄",
   "server.save_failed": "退出前落盤失敗",
   "server.saved_exit": "狀態已落盤,伺服器退出。",
-
   "log.login_failed": "登入失敗：%s",
   "log.login_success": "登入成功：%s",
   "log.totp_failed": "動態驗證碼錯誤：%s",
@@ -418,11 +399,9 @@
   "log.username_recovered": "用戶名找回成功：%s",
   "log.reset_token_issued": "密碼重置令牌已簽發：%s",
   "log.observe_terminal": "旁觀終端會話 %s",
-
   "log.kind.operation": "操作",
   "log.kind.system": "系統",
   "log.kind.plugin": "插件",
-
   "common.invalid_json": "JSON 格式不合法",
   "common.host_not_found": "主機不存在",
   "common.invalid_id": "ID 不合法",
@@ -431,9 +410,7 @@
   "common.invalid_to_param": "無效的 'to' 參數",
   "common.invalid_from_param": "無效的 'from' 參數",
   "common.from_less_than_to": "'from' 必須小於 'to'",
-
   "empty.no_online_hosts": "目前沒有在線主機",
-
   "forward.disabled": "端口轉發已被管理員停用",
   "forward.invalid_port": "無效的連接埠號",
   "forward.host_port_required": "host_id 和 target_port 必填",
@@ -448,7 +425,6 @@
   "forward.too_many_sessions": "活躍會話數過多，請關閉不需要的轉發後重試",
   "forward.tcp_agent_offline": "Agent 未在線，連線被拒絕",
   "forward.tcp_closed": "TCP 轉發已關閉",
-
   "log.forward_create": "建立端口轉發 %s → %s:%d (本地 %s)",
   "log.forward_close": "關閉端口轉發 %s → :%d",
   "log.forward_tcp": "TCP 轉發 %s:%d 已建立",
@@ -462,12 +438,10 @@
   "log.forward_reason_timeout": "空閒逾時",
   "log.forward_reason_agent_down": "Agent 斷開",
   "log.forward_reason_error": "傳輸錯誤",
-
   "forward.reason_host_unknown": "主機未註冊或從未上報",
   "forward.reason_agent_down": "Agent 已離線 %s 分鐘",
   "forward.reason_no_fingerprint": "Agent 未採集到機器指紋（無法建立轉發通道）",
   "forward.reason_channel_not_ready": "轉發通道未就緒，請稍後重試",
-
   "terminal_auth.password_too_short": "終端密碼至少需要 8 位字元",
   "terminal_auth.password_weak": "終端密碼必須同時包含大寫字母、小寫字母、數字和特殊字元",
   "terminal_auth.not_set": "尚未設定終端密碼",
@@ -475,7 +449,8 @@
   "terminal_auth.locked": "終端密碼驗證次數過多，請 5 分鐘後再試",
   "terminal_auth.terminal_verify_required": "需要驗證終端密碼",
   "terminal_auth.terminal_password_not_set": "需要先設定終端密碼",
-
   "log.terminal_password_set": "設定終端密碼：%s",
-  "log.terminal_verified": "終端密碼驗證通過：%s"
+  "log.terminal_verified": "終端密碼驗證通過：%s",
+  "agent_update.actor": "Agent 升級",
+  "platform.self_fault": "平台自檢"
 }

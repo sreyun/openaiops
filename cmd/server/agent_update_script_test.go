@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"aiops-monitor/shared"
 	"time"
 	"unicode/utf16"
 )
@@ -598,5 +600,32 @@ func TestAgentUpdateJobFinalizeWindowCoversTheVerifyLadder(t *testing.T) {
 	if agentUpdateJobFinalizeWindow <= ladder {
 		t.Fatalf("finalize window %v does not cover the %v verify ladder: a job would be marked done "+
 			"while hosts are still pending_verify", agentUpdateJobFinalizeWindow, ladder)
+	}
+}
+
+// 换版前的探针曾经把「退出码读不出来」当成「二进制不可运行」。现场日志
+// （server11，v0.19.98 → v0.19.100，连续五次）证明了后果：
+//
+//	downloaded aiops-agent.exe sha=<与服务端 pin 一致>
+//	update failed: staging not runnable (exit=): v0.19.100
+//
+// 括号里是空的，冒号后面是探针自己读回来的版本号——它跑起来了、版本也对，却在
+// 换版之前被自己挡下，每 6 分钟重来一次，永远升不上去。
+func TestLegacyHelperAcceptsProbeWithUnreadableExitCode(t *testing.T) {
+	ps := windowsUpdateHelperScript()
+	if !strings.Contains(ps, "Test-ProbeRunnable $probe") {
+		t.Fatal("换版前的判定必须走 Test-ProbeRunnable，而不是直接比较退出码")
+	}
+	if strings.Contains(ps, "$probe.ExitCode -ne 0") {
+		t.Fatal("退出码读不出来时是 $null，直接与 0 比较会把可用的二进制判死")
+	}
+}
+
+// 这段探针在服务端救援脚本与 Agent 模块助手里各用一次。曾经是两份逐字副本，于是
+// 同一个缺陷同时长在两条升级路径上：模块助手判死之后退到 legacy 救援，救援用同样
+// 的判据再判死一次。唯一定义处在 shared，谁再抄一份这条测试就红。
+func TestLegacyHelperUsesSharedVersionProbe(t *testing.T) {
+	if !strings.Contains(windowsUpdateHelperScript(), shared.WindowsVersionProbePS) {
+		t.Fatal("救援脚本必须内嵌 shared.WindowsVersionProbePS，不要另抄一份")
 	}
 }

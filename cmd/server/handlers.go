@@ -39,6 +39,7 @@ type Server struct {
 	push      *pushHub            // P3-1: WebSocket push hub for real-time updates
 	// --- SRE workflow layer ---
 	incidents    *incidentManager         // incident hub (alert/SLO/manual)
+	faults       *platformFaultManager    // 平台自身故障归口（见 self_fault.go）
 	remediation  *remediationManager      // closed-loop auto-remediation
 	slos         *sloManager              // SLO + error budgets
 	distProbes   *distProbeManager        // 分布式多点探测（迭代 D）
@@ -90,6 +91,7 @@ func NewServer(store *Store, cfg *ConfigStore, notifier *Notifier, distDir strin
 		agentUpdates: newAgentUpdateManager(),
 		cicdWatcher:  newCICDFailureWatcher(),
 		incidents:    newIncidentManager(),
+		faults:       newPlatformFaultManager(),
 		remediation:  newRemediationManager(cfg),
 		slos:         newSLOManager(cfg),
 		distProbes:   newDistProbeManager(),
@@ -226,6 +228,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/agents/auto-update-policy", s.handleAgentAutoUpdatePolicyGet)
 	mux.HandleFunc("POST /api/v1/agents/auto-update-policy", s.handleAgentAutoUpdatePolicySet)
 	mux.HandleFunc("GET /api/v1/agents/auto-update-status", s.handleAgentAutoUpdateStatusGet)
+	// 平台自身故障：与主机故障同一条闭环，只是主体是平台自己（见 self_fault.go）。
+	mux.HandleFunc("GET /api/v1/platform/faults", s.handlePlatformFaults)
 	mux.HandleFunc("GET /api/v1/resources/search", s.handleResourceSearch)
 	mux.HandleFunc("GET /api/v1/hosts/{id}/metrics", s.handleHostMetrics)
 	mux.HandleFunc("GET /api/v1/hosts/{id}/history", s.handleHostHistory)

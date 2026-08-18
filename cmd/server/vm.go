@@ -79,11 +79,11 @@ type vmWriter struct {
 	historyCache *vmHistoryCache
 	// diag 记录读写两个方向最近一次的结果，供 /api/v1/vm/diagnostics 回答
 	// 「到底写进去没有 / 读得到吗」。见 vm_diag.go。
-	diag    vmDiag
-	dropped atomic.Uint64
-	stopCh       chan struct{}
-	stopped      chan struct{}
-	stopOnce     sync.Once
+	diag     vmDiag
+	dropped  atomic.Uint64
+	stopCh   chan struct{}
+	stopped  chan struct{}
+	stopOnce sync.Once
 	// rawCh carries pre-formatted Prometheus text lines (hardware / SNMP / NetFlow /
 	// Hyper-V / exporter scrape) through the SAME batch+retry pipeline as host
 	// samples. 这些指标此前是「每次调用起一个 goroutine 发一个请求、失败就算了」：
@@ -157,6 +157,11 @@ func (v *vmWriter) enqueue(hostID, hostname, category string, ts int64, m shared
 		n := v.dropped.Add(1)
 		if n == 1 || n%200 == 0 {
 			slog.Warn("VictoriaMetrics 写入队列已满，样本被丢弃（历史以 VM 为准，丢点会在曲线上形成空洞）", "dropped", n, "host", hostID)
+			// 丢点的后果是用户看到的曲线上多一个洞，而洞本身不会说自己是怎么来的——
+			// 「主机历史曲线看不到」那一类现象的根因就藏在这里。进自身故障归口。
+			reportFault("vm", "queue_full", "warning", hostID,
+				fmt.Sprintf("VictoriaMetrics 写入队列已满，已累计丢弃 %d 个样本；历史以 VM 为准，丢点会在曲线上形成空洞", n),
+				"")
 		}
 	}
 }
@@ -352,7 +357,10 @@ func (v *vmWriter) vmImportDone(resp *http.Response, err error, kind string, n i
 		return false
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+	// 响应体必须读出来而不是倒进 io.Discard：VM 在 4xx 里写的就是**哪一条样本为什么
+	// 非法**（非法标签名、超长标签值、NaN…），而这批数据接下来会被丢掉。把唯一解释
+	// 原因的那段文字扔掉，就等于让「时序写入长期瘫痪」永远查不出是哪条坏样本引起的。
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 	switch {
 	case resp.StatusCode/100 == 2:
 		v.diag.writeOK()
@@ -367,8 +375,12 @@ func (v *vmWriter) vmImportDone(resp *http.Response, err error, kind string, n i
 		if v.breaker != nil {
 			v.breaker.failure()
 		}
+		reason := strings.TrimSpace(string(body))
 		slog.Warn("VictoriaMetrics 拒绝写入（不可重试，该批已丢弃）",
-			"kind", kind, "status", resp.StatusCode, "n", n)
+			"kind", kind, "status", resp.StatusCode, "n", n, "vm_reason", trimLine(reason, 400))
+		reportFault("vm", "write_rejected", "warning", "",
+			fmt.Sprintf("VictoriaMetrics 拒绝写入（HTTP %d，kind=%s，本批 %d 条已丢弃且不会重试）",
+				resp.StatusCode, kind, n), reason)
 		return true
 	}
 }

@@ -30,6 +30,26 @@ import (
 // 太短会在持续 panic 时变成刷屏 + 空转；太长又会让监控出现长时间盲区。
 var superviseRestartDelay = 5 * time.Second
 
+// onPlatformPanic 把 panic 送进平台自身故障归口（self_fault.go），由 Server 启动时装配。
+//
+// 为什么要有这个钩子：这两个函数是包级的，拿不到 *Server；而 panic 恰恰是平台自身最
+// 严重的一类故障——一条常驻循环反复崩溃意味着某个监控能力已经静默失效了，此前它只有
+// 一行 slog.Error。日志是给已经知道要查什么的人看的；不知道该查什么的时候，日志等于
+// 不存在。接进归口之后，它会像主机故障一样开事件、被 AI 诊断、进闭环。
+//
+// 用变量而不是接口：这条路径要能在任何 goroutine 里被调用，且绝不能因为自身出错再引发
+// 一次 panic（调用点都做了 nil 判断）。
+var onPlatformPanic func(name, kind string, r any, stack string)
+
+func reportPanic(name, kind string, r any, stack string) {
+	if onPlatformPanic == nil {
+		return
+	}
+	// 钩子自己 panic 不能把「保住进程」这件事反过来搞砸。
+	defer func() { _ = recover() }()
+	onPlatformPanic(name, kind, r, stack)
+}
+
 // superviseLoop runs fn forever, restarting it after a panic.
 func superviseLoop(name string, fn func()) {
 	for {
@@ -46,8 +66,10 @@ func superviseLoop(name string, fn func()) {
 func runSupervised(name string, fn func()) (returnedNormally bool) {
 	defer func() {
 		if r := recover(); r != nil {
+			stack := string(debug.Stack())
 			slog.Error("后台循环 panic（进程已保住，将重启该循环）",
-				"loop", name, "panic", r, "stack", string(debug.Stack()))
+				"loop", name, "panic", r, "stack", stack)
+			reportPanic(name, "loop_panic", r, stack)
 			returnedNormally = false
 		}
 	}()
@@ -61,8 +83,10 @@ func safeGo(name string, fn func()) {
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
+				stack := string(debug.Stack())
 				slog.Error("后台任务 panic（已隔离，不影响进程）",
-					"task", name, "panic", r, "stack", string(debug.Stack()))
+					"task", name, "panic", r, "stack", stack)
+				reportPanic(name, "task_panic", r, stack)
 			}
 		}()
 		fn()

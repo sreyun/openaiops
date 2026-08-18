@@ -1028,6 +1028,14 @@ func (p *pgStore) appendAudit(e LogEntry) {
 			"operation", "append",
 			"secret_degraded", auditChainSecretDegraded(),
 			"error_class", auditAppendErrorClass(err))
+		// 审计链写失败是**没有任何人会来告诉你**的一类故障：页面照常、告警照常，
+		// 只有事后取证时才会发现链上缺了一段，而那时已经无从补起。按 critical 进
+		// 自身故障归口，第一次就开事件。
+		reportFault("pg", "audit_append_failed", "critical", "",
+			"审计链追加失败（error_class="+auditAppendErrorClass(err)+
+				"，密钥降级="+strconv.FormatBool(auditChainSecretDegraded())+"）；"+
+				"此后这段时间的审计记录将无法通过完整性对账",
+			err.Error())
 	}
 }
 

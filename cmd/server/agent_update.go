@@ -83,6 +83,9 @@ type agentUpdateManager struct {
 	inFlight map[string]int64
 	// skipReasons: host_id → latest auto-update skip cause (observability).
 	skipReasons map[string]agentUpdateSkipInfo
+	// failStreaks: host_id → 连续同因失败状态。见 agent_update_failstreak.go：
+	// 无限次重试一个不会自愈的原因，等价于把它藏起来。
+	failStreaks map[string]agentUpdateFailStreak
 	// lastScanAt is updated by the periodic fleet scanner.
 	lastScanAt int64
 }
@@ -92,6 +95,7 @@ func newAgentUpdateManager() *agentUpdateManager {
 		jobs:        map[string]*agentUpdateJob{},
 		inFlight:    map[string]int64{},
 		skipReasons: map[string]agentUpdateSkipInfo{},
+		failStreaks: map[string]agentUpdateFailStreak{},
 	}
 }
 
@@ -750,6 +754,8 @@ func (s *Server) markHostUpdateVerified(job *agentUpdateJob, hostID, ver string)
 			hr.Status = "success"
 			hr.Message = truncateRun("verified agent_version="+ver, 500)
 			hr.Updated = time.Now().Unix()
+			// 这里已经持有 m.mu，不能再走 clearFailStreak（同一把锁）。
+			delete(s.agentUpdates.failStreaks, hostID)
 			return
 		}
 	}
@@ -773,20 +779,30 @@ func (s *Server) markHostUpdateVerifyFailed(job *agentUpdateJob, hostID, target 
 	// Fetch evidence BEFORE taking the lock: this exec can sit for up to 60s and
 	// every job read (console polling included) goes through the same mutex.
 	evidence := s.windowsUpdateEvidence(s.hostByID(hostID))
-	s.agentUpdates.mu.Lock()
-	defer s.agentUpdates.mu.Unlock()
-	j := s.agentUpdates.jobs[job.ID]
-	if j == nil {
-		return
-	}
-	for _, hr := range j.Hosts {
-		if hr != nil && hr.HostID == hostID && hr.Status == "pending_verify" {
-			hr.Status = "failed"
-			hr.Message = truncateRun("restart scheduled but agent_version still behind "+target+
-				" (the update helper never completed the swap; will soft-retry)"+evidence, 1200)
-			hr.Updated = time.Now().Unix()
-			return
+	// 加锁段收进闭包，因为出锁之后还要记一次「连续同因失败」——noteAgentUpdateFailure
+	// 要拿同一把 m.mu，写成 defer 会因为 LIFO 顺序排在 Unlock 之前，直接自锁。
+	failMsg, failFrom := func() (string, string) {
+		s.agentUpdates.mu.Lock()
+		defer s.agentUpdates.mu.Unlock()
+		j := s.agentUpdates.jobs[job.ID]
+		if j == nil {
+			return "", ""
 		}
+		for _, hr := range j.Hosts {
+			if hr != nil && hr.HostID == hostID && hr.Status == "pending_verify" {
+				hr.Status = "failed"
+				hr.Message = truncateRun("restart scheduled but agent_version still behind "+target+
+					" (the update helper never completed the swap; will soft-retry)"+evidence, 1200)
+				hr.Updated = time.Now().Unix()
+				return hr.Message, hr.FromVer
+			}
+		}
+		return "", ""
+	}()
+	// 指纹算的是**含证据**的整条消息：助手日志尾巴里那句 "update failed: …" 才是真正
+	// 区分「哪一类失败」的东西，只看开场白的话所有 Windows 失败都长一个样。
+	if failMsg != "" {
+		s.noteAgentUpdateFailure(hostID, failFrom, failMsg)
 	}
 }
 
@@ -1165,6 +1181,7 @@ func (s *Server) executeAgentUpdateHost(job *agentUpdateJob, hr *agentUpdateHost
 					truncateRun(msg+pendingVerifyNextStep(goos, method, job), 900))
 			} else {
 				s.agentUpdates.setHostResult(hr, "success", method, msg)
+				s.agentUpdates.clearFailStreak(h.ID)
 			}
 			return
 		}
@@ -1182,6 +1199,7 @@ func (s *Server) executeAgentUpdateHost(job *agentUpdateJob, hr *agentUpdateHost
 		msg = truncateRun(msg+": "+out, 500)
 	}
 	s.agentUpdates.setHostResult(hr, "failed", method, msg)
+	s.noteAgentUpdateFailure(h.ID, hr.FromVer, msg)
 }
 
 // shouldLegacyAgentUpdateFallback switches to the install-style script when the
@@ -1254,15 +1272,15 @@ func moduleFailureIsRescuable(low string) bool {
 		}
 	}
 	for _, retry := range []string{
-		"download failed",       // proxy / firewall / TLS chain / HTTP status
-		"missing server url",    // agent could not resolve a base; the script carries one
-		"resolve executable",    // script finds the install via the service ImagePath
-		"not allowed",           // agent rejected the base we passed (validateUpdateServerURL)
-		"disallowed",            //
-		"certificate",           // old root stores cannot chain to the panel cert
-		"x509",                  //
-		"tls",                   //
-		"timeout", "timed out",  //
+		"download failed",      // proxy / firewall / TLS chain / HTTP status
+		"missing server url",   // agent could not resolve a base; the script carries one
+		"resolve executable",   // script finds the install via the service ImagePath
+		"not allowed",          // agent rejected the base we passed (validateUpdateServerURL)
+		"disallowed",           //
+		"certificate",          // old root stores cannot chain to the panel cert
+		"x509",                 //
+		"tls",                  //
+		"timeout", "timed out", //
 		"connection", "refused", //
 		"no such host", "dial ", //
 	} {
@@ -1467,6 +1485,9 @@ func (s *Server) decideAutoUpdate(h *Host) (bool, string, string) {
 	if !agentVersionBehind(h.AgentVersion, appVersion) {
 		// Version caught up — release any leftover cooldown early.
 		s.agentUpdates.clearInFlight(h.ID)
+		// 版本追上了，之前那串失败无论因为什么都已经过去：熔断必须自动解除，
+		// 否则一台被人工升好的机器会永远挂在「已暂停自动升级」上。
+		s.agentUpdates.clearFailStreak(h.ID)
 		// 「判定为不落后」是这条闸门里**唯一完全静默**的出口：不记跳过原因、不打日志。
 		// 正常情况没问题（绝大多数主机本来就是最新的，记下来只会淹没真实原因）。但如果
 		// 上报的版本串**和目标不一样**却仍被判成不落后，那要么是版本比较出了偏差，要么是
@@ -1506,6 +1527,12 @@ func (s *Server) decideAutoUpdate(h *Host) (bool, string, string) {
 		if base == "" {
 			return false, "no_download_base", "老版 agent 需要公网下载基址：请配置 public_url 或确认 agent 上报的 server_url 可达"
 		}
+	}
+	// 连续同因失败：这台机器已经在同一个坑里摔了好几次，再自动推一次只会得到第六份
+	// 一模一样的日志。放在 pending_job / cooldown 这类会自愈的理由**之前**，理由和
+	// no_artifact 那几条同理——不修就永远不会好，必须让它出现在屏幕上。
+	if blocked, detail := s.agentUpdateFailStreakGate(h.ID); blocked {
+		return false, "fail_streak", detail
 	}
 	// Do not soft-retry while a prior job is still awaiting version ack.
 	if busy, detail := s.hostPendingAgentUpdate(h.ID); busy {
@@ -1604,6 +1631,7 @@ func (s *Server) handleAgentAutoUpdateStatusGet(w http.ResponseWriter, r *http.R
 		"comparable":               isComparableAgentVer(appVersion),
 		"last_scan_at":             lastScan,
 		"skips":                    s.agentUpdates.skipSnapshot(s),
+		"fail_streaks":             s.agentUpdates.failStreakSnapshot(s),
 	})
 }
 

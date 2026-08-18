@@ -18,9 +18,8 @@
   "auth.global_mfa_required": "Administrator has enabled global MFA policy, please complete enrollment to log in",
   "auth.unauthorized": "Unauthorized",
   "auth.relay_unauthorized": "Relay secret verification failed",
-    "auth.must_change_password": "Your password has been reset by the administrator. Please change it now.",
+  "auth.must_change_password": "Your password has been reset by the administrator. Please change it now.",
   "auth.init_not_required": "Initialization not required: the account is already set up.",
-
   "login.sms_not_available": "SMS code login is coming soon. Please use username or phone + password.",
   "login.sms_sent": "Verification code sent, please check your phone.",
   "login.sms_disabled": "SMS channel is disabled. Ask an admin to enable SMS push in settings.",
@@ -40,7 +39,6 @@
   "login.switch_username": "Username login",
   "login.sms_login_btn": "SMS code login",
   "login.phone_placeholder": "Enter phone number",
-
   "alert.offline": "Host %s (%s) has been offline for %d seconds",
   "alert.cpu_high": "CPU usage %.1f%% (idle %.1f%%)",
   "alert.mem_high": "Memory usage %.1f%% (free %s)",
@@ -94,7 +92,6 @@
   "alert.api_throughput_low": "API throughput dropped to %.0f req/s",
   "alert.task_fail": "Scheduled task failed %d times",
   "alert.task_timeout": "Scheduled task timeout %.0f seconds",
-
   "notify.title": "[AIOps] %s",
   "notify.host": "Host",
   "notify.ip": "IP",
@@ -155,7 +152,6 @@
   "notify.alert_subject": "AIOps Alert: %s",
   "notify.email_alert_fired": "🔴 Alert Fired",
   "notify.email_alert_recovered": "✅ Alert Recovered",
-
   "check.unknown_type": "Unknown check type: %s",
   "check.request_failed": "Request failed: %s",
   "check.connect_failed": "Connection failed: %s",
@@ -179,7 +175,6 @@
   "check.custom_recovered": "Custom check recovered: %s",
   "check.self_failed": "Server health check failed (%s)",
   "check.custom_monitor": "Custom Monitor",
-
   "user.username_exists": "Username already exists",
   "user.not_found": "User not found",
   "user.keep_one_admin": "At least one admin must be kept",
@@ -190,13 +185,11 @@
   "user.invalid_email": "Invalid email format",
   "user.invalid_username_format": "Username may only contain letters/digits/-_. (2-32 chars)",
   "user.default_display": "Administrator",
-
   "config.threshold_range": "Threshold %s must be between 0-100 (current: %.1f)",
   "config.offline_positive": "Offline detection time must be greater than 0 (current: %d seconds)",
   "config.smtp_port_range": "SMTP port must be between 1-65535 (current: %d)",
   "config.smtp_password_short": "SMTP password must be at least 4 characters",
   "config.no_revert": "No previous configuration to revert to",
-
   "recovery.invalid_email": "Invalid email format",
   "recovery.username_required": "Please enter a username",
   "recovery.no_smtp": "Email service is not configured, please contact the administrator",
@@ -218,13 +211,11 @@
   "recovery.email_send_failed": "Email sending failed, please try again later",
   "recovery.email_send_error": "Email sending failed: %s",
   "recovery.rate_limited": "Sending too frequently, please wait 60 seconds",
-
   "recovery.invalid_purpose": "Invalid recovery type",
   "recovery.token_invalid": "Reset token is invalid or expired",
   "recovery.mfa_not_configured": "MFA is not properly configured",
   "recovery.email_username_code_subject": "AIOps — Account Recovery Code",
   "recovery.email_username_code_body": "Your verification code is: <b style=\"font-size:24px;letter-spacing:4px;color:#4c8dff\">%s</b>",
-
   "recovery.email_username_subject": "AIOps — Account Username",
   "recovery.email_username_body": "Your login username is: <b style=\"font-size:18px\">%s</b>",
   "recovery.email_disclaimer": "If you did not request this, please ignore this email.",
@@ -239,7 +230,6 @@
   "recovery.email_mfa_code": "Verification code: <b style=\"font-size:24px;letter-spacing:4px;color:#4c8dff\">%s</b>",
   "recovery.email_mfa_validity": "The code is valid for 10 minutes, single use only.",
   "recovery.email_mfa_disclaimer": "If you did not request this, please change your password immediately.",
-
   "terminal.disabled": "Remote terminal has been disabled by the administrator",
   "terminal.ws_required": "WebSocket upgrade required",
   "terminal.no_channel": "✗ Cannot establish terminal session — no reverse terminal channel found for this host.",
@@ -251,7 +241,6 @@
   "terminal.timeout": "Agent did not connect to the terminal channel within the expected time, disconnected.",
   "terminal.timeout_hint_https": "Check: 1) Agent service running 2) config.server is https:// 3) agent.log shows terminal channel ready or fingerprint 403.",
   "terminal.session_not_found": "Session does not exist or has ended",
-
   "playbook.not_found": "Playbook not found",
   "playbook.no_target": "Target hosts are empty or all offline — please check step target selection and host online status",
   "playbook.exec_not_found": "Execution record not found",
@@ -270,7 +259,6 @@
   "playbook.sched_bad_weekday": "Invalid weekday (must be 0–6)",
   "playbook.sched_bad_kind": "Unknown schedule type",
   "playbook.uncategorized": "Uncategorized",
-
   "incident.not_found": "Incident not found",
   "incident.title_required": "Incident title is required",
   "incident.comment_required": "Comment cannot be empty",
@@ -310,19 +298,15 @@
   "ticket.evt_status": "Status changed to %s",
   "ticket.evt_assign": "Assigned to %s",
   "ticket.evt_attach": "Attached %d file(s)",
-  "ticket.unassigned": "Unassigned",
   "ticket.unassigned": "unassigned",
   "ticket.from_incident": "Escalated from incident #%d",
   "log.remediation_saved": "Saved auto-remediation rule \"%s\"",
   "log.slo_saved": "Saved SLO \"%s\"",
-
   "check_api.invalid_params": "Name / Target / Type is invalid",
-
   "agent.invalid_token": "Invalid or missing access token",
   "agent.fingerprint_failed": "Fingerprint authentication failed: not registered or fingerprint mismatch",
   "agent.fingerprint_required": "Fingerprint required",
   "agent.fingerprint_conflict": "Host fingerprint conflicts with an existing record; identity rebind refused",
-
   "email.not_configured": "Email service is not configured or enabled",
   "email.invalid_header": "Invalid recipient / subject / sender name",
   "email.tls_failed": "TLS connection failed: %v",
@@ -333,12 +317,10 @@
   "email.data_error": "Data write failed: %v",
   "email.write_error": "Email write failed: %v",
   "email.send_error": "Email send failed: %v",
-
   "db.read_failed": "Database read failed (ignored, starting with empty state)",
   "db.parse_failed": "Database parse failed (ignored, starting with empty state)",
   "db.restored": "Restored from database",
   "db.save_failed": "Database save failed",
-
   "server.flag_addr": "Listen address, e.g. :8529 or 0.0.0.0:8529",
   "server.flag_config": "Server config file path (alerts/thresholds/categories)",
   "server.flag_dist": "Agent download directory (platform binaries + plugins.zip); auto-detects ./dist or executable directory if empty",
@@ -353,7 +335,6 @@
   "server.dist_missing": "Agent binaries not found, one-line install unavailable; use -dist to specify a directory containing aiops-agent* and plugins.zip",
   "server.save_failed": "Failed to save state before exit",
   "server.saved_exit": "State saved, server exiting.",
-
   "log.login_failed": "Login failed: %s",
   "log.login_success": "Login succeeded: %s",
   "log.totp_failed": "TOTP verification failed: %s",
@@ -421,11 +402,9 @@
   "log.username_recovered": "Username recovered: %s",
   "log.reset_token_issued": "Password reset token issued: %s",
   "log.observe_terminal": "Observed terminal session %s",
-
   "log.kind.operation": "Operation",
   "log.kind.system": "System",
   "log.kind.plugin": "Plugin",
-
   "common.invalid_json": "Invalid JSON",
   "common.host_not_found": "Host not found",
   "common.invalid_id": "Invalid ID",
@@ -434,9 +413,7 @@
   "common.invalid_to_param": "Invalid 'to' parameter",
   "common.invalid_from_param": "Invalid 'from' parameter",
   "common.from_less_than_to": "'from' must be less than 'to'",
-
   "empty.no_online_hosts": "No online hosts available",
-
   "forward.disabled": "Port forwarding has been disabled by the administrator",
   "forward.invalid_port": "Invalid port number",
   "forward.host_port_required": "host_id and target_port are required",
@@ -451,7 +428,6 @@
   "forward.too_many_sessions": "Too many active sessions, please close unnecessary forwards and retry",
   "forward.tcp_agent_offline": "Agent is offline, connection refused",
   "forward.tcp_closed": "TCP forward closed",
-
   "log.forward_create": "Created port forward %s → %s:%d (local %s)",
   "log.forward_close": "Closed port forward %s → :%d",
   "log.forward_tcp": "TCP forward %s:%d established",
@@ -465,12 +441,10 @@
   "log.forward_reason_timeout": "idle timeout",
   "log.forward_reason_agent_down": "agent disconnected",
   "log.forward_reason_error": "transfer error",
-
   "forward.reason_host_unknown": "Host not registered or never reported",
   "forward.reason_agent_down": "Agent offline for %s min",
   "forward.reason_no_fingerprint": "Agent has no machine fingerprint (forwarding channel cannot be established)",
   "forward.reason_channel_not_ready": "Forwarding channel not ready, please retry",
-
   "terminal_auth.password_too_short": "Terminal password must be at least 8 characters",
   "terminal_auth.password_weak": "Terminal password must contain uppercase, lowercase, digit, and special character",
   "terminal_auth.not_set": "Terminal password not set",
@@ -478,7 +452,8 @@
   "terminal_auth.locked": "Too many terminal password attempts, please try again in 5 minutes",
   "terminal_auth.terminal_verify_required": "Terminal password verification required",
   "terminal_auth.terminal_password_not_set": "Terminal password must be set first",
-
   "log.terminal_password_set": "Terminal password set: %s",
-  "log.terminal_verified": "Terminal password verified: %s"
+  "log.terminal_verified": "Terminal password verified: %s",
+  "agent_update.actor": "Agent update",
+  "platform.self_fault": "Platform self-check"
 }

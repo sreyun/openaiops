@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"aiops-monitor/shared"
 )
 
 // These tests deliberately carry NO build tag. The self-update restart helpers
@@ -377,5 +379,28 @@ func TestWindowsHelperLeavesHealthyAgentAloneOnPreSwapFailure(t *testing.T) {
 		strings.Count(script, guarded)+1 {
 		// +1 for the success path, which restarts on purpose.
 		t.Fatal("an unguarded Restart-AgentService remains on the failure path")
+	}
+}
+
+// 模块助手与服务端救援脚本共用同一段探针。它曾经把「退出码读不出来」当成「不可运行」，
+// 于是两条升级路径会用同一个错判先后把同一次升级判死两遍——见
+// docs/superpowers/plans/2026-08-18-windows-agent-update-version-probe.md。
+func TestWindowsHelperUsesSharedVersionProbe(t *testing.T) {
+	script := buildWindowsUpdateHelperScript(
+		`C:\Program Files\AIOps Agent\aiops-agent.exe`,
+		`C:\Program Files\AIOps Agent\.aiops-agent.update.exe`,
+		`C:\Program Files\AIOps Agent\config.yaml`,
+		`C:\ProgramData\aiops-agent-update\aiops-agent-update.log`,
+		`C:\ProgramData\aiops-agent-update\aiops-agent-update.result`,
+		"",
+	)
+	if !strings.Contains(script, shared.WindowsVersionProbePS) {
+		t.Fatal("模块助手必须内嵌 shared.WindowsVersionProbePS，不要另抄一份")
+	}
+	if !strings.Contains(script, "Test-ProbeRunnable $probe") {
+		t.Fatal("换版前的判定必须走 Test-ProbeRunnable")
+	}
+	if strings.Contains(script, "$probe.ExitCode -ne 0") {
+		t.Fatal("退出码读不出来时是 $null，直接与 0 比较会把可用的二进制判死")
 	}
 }

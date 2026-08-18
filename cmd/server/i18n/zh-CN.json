@@ -18,9 +18,8 @@
   "auth.global_mfa_required": "管理员已启用全局两步验证策略，请完成绑定后登录",
   "auth.unauthorized": "未授权",
   "auth.relay_unauthorized": "中继密钥验证失败",
-    "auth.must_change_password": "管理员已重置您的密码，请立即修改密码",
+  "auth.must_change_password": "管理员已重置您的密码，请立即修改密码",
   "auth.init_not_required": "无需初始化：账户已完成安全设置",
-
   "login.sms_not_available": "短信验证码登录功能即将上线，请使用用户名或手机号+密码登录",
   "login.sms_sent": "验证码已发送，请检查手机短信",
   "login.sms_disabled": "短信通道未启用，请联系管理员在设置中开启短信推送",
@@ -40,7 +39,6 @@
   "login.switch_username": "用户名登录",
   "login.sms_login_btn": "短信验证码登录",
   "login.phone_placeholder": "输入手机号",
-
   "alert.offline": "主机 %s（%s）已失联 %d 秒",
   "alert.cpu_high": "CPU 使用率 %.1f%%（空闲 %.1f%%）",
   "alert.mem_high": "内存使用率 %.1f%%（剩余 %s）",
@@ -94,7 +92,6 @@
   "alert.api_throughput_low": "API 吞吐量降至 %.0f req/s",
   "alert.task_fail": "定时任务执行失败 %d 次",
   "alert.task_timeout": "定时任务超时 %.0f 秒",
-
   "notify.title": "【AIOps】%s",
   "notify.host": "主机",
   "notify.ip": "IP",
@@ -155,7 +152,6 @@
   "notify.alert_subject": "AIOps 告警：%s",
   "notify.email_alert_fired": "🔴 告警触发",
   "notify.email_alert_recovered": "✅ 告警恢复",
-
   "check.unknown_type": "未知检查类型: %s",
   "check.request_failed": "请求失败: %s",
   "check.connect_failed": "连接失败: %s",
@@ -179,7 +175,6 @@
   "check.custom_recovered": "自定义监控恢复：%s",
   "check.self_failed": "服务端健康检查异常（%s）",
   "check.custom_monitor": "自定义监控",
-
   "user.username_exists": "用户名已存在",
   "user.not_found": "用户不存在",
   "user.keep_one_admin": "至少保留一名管理员",
@@ -190,13 +185,11 @@
   "user.invalid_email": "邮箱格式不合法",
   "user.invalid_username_format": "用户名仅限字母/数字/-_.，长度 2–32 位",
   "user.default_display": "管理员",
-
   "config.threshold_range": "阈值 %s 必须在 0-100 之间（当前 %.1f）",
   "config.offline_positive": "离线判定时间必须大于 0（当前 %d 秒）",
   "config.smtp_port_range": "SMTP 端口必须在 1-65535 之间（当前 %d）",
   "config.smtp_password_short": "SMTP 密码至少 4 位",
   "config.no_revert": "没有可回滚的上一版本配置",
-
   "recovery.invalid_email": "邮箱格式不合法",
   "recovery.username_required": "请输入用户名",
   "recovery.no_smtp": "系统未配置邮件服务，请联系管理员",
@@ -218,13 +211,11 @@
   "recovery.email_send_failed": "邮件发送失败，请稍后重试",
   "recovery.email_send_error": "邮件发送失败：%s",
   "recovery.rate_limited": "发送过于频繁，请 60 秒后再试",
-
   "recovery.invalid_purpose": "无效的找回类型",
   "recovery.token_invalid": "重置令牌无效或已过期",
   "recovery.mfa_not_configured": "MFA 未正确配置",
   "recovery.email_username_code_subject": "AIOps — 账户找回验证码",
   "recovery.email_username_code_body": "您的验证码是：<b style=\"font-size:24px;letter-spacing:4px;color:#4c8dff\">%s</b>",
-
   "recovery.email_username_subject": "AIOps — 账户用户名",
   "recovery.email_username_body": "您的登录用户名为：<b style=\"font-size:18px\">%s</b>",
   "recovery.email_disclaimer": "如非本人操作请忽略此邮件。",
@@ -239,7 +230,6 @@
   "recovery.email_mfa_code": "验证码：<b style=\"font-size:24px;letter-spacing:4px;color:#4c8dff\">%s</b>",
   "recovery.email_mfa_validity": "验证码 10 分钟内有效，单次使用。",
   "recovery.email_mfa_disclaimer": "如非本人操作，请立即修改密码。",
-
   "terminal.disabled": "远程终端已被管理员禁用",
   "terminal.ws_required": "需要 WebSocket 升级",
   "terminal.no_channel": "✗ 无法建立终端会话——服务端未找到该主机的反向终端通道。",
@@ -251,7 +241,6 @@
   "terminal.timeout": "Agent 未在预期时间内接入终端通道，已断开。",
   "terminal.timeout_hint_https": "排查：1) 服务是否在跑 2) config.server 是否为 https:// 3) 查看 agent.log 是否有「终端通道已就绪」或指纹 403。",
   "terminal.session_not_found": "会话不存在或已结束",
-
   "playbook.not_found": "剧本不存在",
   "playbook.no_target": "目标主机为空或均已离线——请检查步骤的目标选择与主机在线状态",
   "playbook.exec_not_found": "执行记录不存在",
@@ -270,7 +259,6 @@
   "playbook.sched_bad_weekday": "星期取值非法（应为 0–6）",
   "playbook.sched_bad_kind": "未知的定时类型",
   "playbook.uncategorized": "未分类",
-
   "incident.not_found": "事件不存在",
   "incident.title_required": "事件标题不能为空",
   "incident.comment_required": "评论内容不能为空",
@@ -311,18 +299,14 @@
   "ticket.evt_assign": "指派给 %s",
   "ticket.evt_attach": "上传了 %d 个附件",
   "ticket.unassigned": "未指派",
-  "ticket.unassigned": "未指派",
   "ticket.from_incident": "由事件 #%d 升级生成",
   "log.remediation_saved": "保存自动修复规则「%s」",
   "log.slo_saved": "保存 SLO「%s」",
-
   "check_api.invalid_params": "名称 / 目标 / 类型不合法",
-
   "agent.invalid_token": "无效或缺失的接入 Token",
   "agent.fingerprint_failed": "指纹鉴权失败：未注册或指纹不匹配",
   "agent.fingerprint_required": "指纹信息必填",
   "agent.fingerprint_conflict": "主机指纹与已登记记录冲突，拒绝覆盖身份",
-
   "email.not_configured": "邮件服务未配置或未启用",
   "email.invalid_header": "非法的收件人 / 主题 / 发件人名称",
   "email.tls_failed": "TLS 连接失败: %v",
@@ -333,12 +317,10 @@
   "email.data_error": "数据写入失败: %v",
   "email.write_error": "邮件写入失败: %v",
   "email.send_error": "邮件发送失败: %v",
-
   "db.read_failed": "数据库读取失败(已忽略,将以空状态启动)",
   "db.parse_failed": "数据库解析失败(已忽略,将以空状态启动)",
   "db.restored": "已从数据库恢复",
   "db.save_failed": "数据库落盘失败",
-
   "server.flag_addr": "监听地址，如 :8529 或 0.0.0.0:8529",
   "server.flag_config": "服务端配置文件路径（告警/阈值/分类）",
   "server.flag_dist": "Agent 下载目录（含各平台二进制与 plugins.zip）；留空自动探测 ./dist 或程序所在目录",
@@ -353,7 +335,6 @@
   "server.dist_missing": "未找到 Agent 下载文件，一键安装不可用；请用 -dist 指定含 aiops-agent* 与 plugins.zip 的目录",
   "server.save_failed": "退出前落盘失败",
   "server.saved_exit": "状态已落盘,服务端退出。",
-
   "log.login_failed": "登录失败：%s",
   "log.login_success": "登录成功：%s",
   "log.totp_failed": "动态验证码错误：%s",
@@ -426,11 +407,9 @@
   "log.username_recovered": "用户名找回成功：%s",
   "log.reset_token_issued": "密码重置令牌已签发：%s",
   "log.observe_terminal": "旁观终端会话 %s",
-
   "log.kind.operation": "操作",
   "log.kind.system": "系统",
   "log.kind.plugin": "插件",
-
   "common.invalid_json": "JSON 格式不合法",
   "common.host_not_found": "主机不存在",
   "common.invalid_id": "ID 不合法",
@@ -439,9 +418,7 @@
   "common.invalid_to_param": "无效的 'to' 参数",
   "common.invalid_from_param": "无效的 'from' 参数",
   "common.from_less_than_to": "'from' 必须小于 'to'",
-
   "empty.no_online_hosts": "当前没有在线主机",
-
   "forward.disabled": "端口转发已被管理员禁用",
   "forward.invalid_port": "无效的端口号",
   "forward.host_port_required": "host_id 和 target_port 必填",
@@ -456,7 +433,6 @@
   "forward.too_many_sessions": "活跃会话数过多，请关闭不需要的转发后重试",
   "forward.tcp_agent_offline": "Agent 未在线，连接被拒绝",
   "forward.tcp_closed": "TCP 转发已关闭",
-
   "log.forward_create": "创建端口转发 %s → %s:%d (本地 %s)",
   "log.forward_close": "关闭端口转发 %s → :%d",
   "log.forward_tcp": "TCP 转发 %s:%d 已建立",
@@ -470,12 +446,10 @@
   "log.forward_reason_timeout": "空闲超时",
   "log.forward_reason_agent_down": "Agent 断开",
   "log.forward_reason_error": "传输错误",
-
   "forward.reason_host_unknown": "主机未注册或从未上报",
   "forward.reason_agent_down": "Agent 已离线 %s 分钟",
   "forward.reason_no_fingerprint": "Agent 未采集到机器指纹（无法建立转发通道）",
   "forward.reason_channel_not_ready": "转发通道未就绪，请稍后重试",
-
   "terminal_auth.password_too_short": "终端密码至少需要 8 位字符",
   "terminal_auth.password_weak": "终端密码必须同时包含大写字母、小写字母、数字和特殊字符",
   "terminal_auth.not_set": "尚未设置终端密码",
@@ -483,7 +457,8 @@
   "terminal_auth.locked": "终端密码验证次数过多，请 5 分钟后再试",
   "terminal_auth.terminal_verify_required": "需要验证终端密码",
   "terminal_auth.terminal_password_not_set": "需要先设置终端密码",
-
   "log.terminal_password_set": "设置终端密码：%s",
-  "log.terminal_verified": "终端密码验证通过：%s"
+  "log.terminal_verified": "终端密码验证通过：%s",
+  "agent_update.actor": "Agent 升级",
+  "platform.self_fault": "平台自检"
 }

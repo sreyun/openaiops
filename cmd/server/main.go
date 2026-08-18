@@ -422,20 +422,23 @@ func main() {
 	server.desk.setRecDir(filepath.Join(filepath.Dir(recordingsDirFor(*cfgPath)), "desktop-recordings"))
 	server.term.pg = pg // 终端会话录制永久留存到 PG（入库审计，不受内存 100 条上限影响）
 	server.bindPG(pg)   // load + periodically persist incidents / work orders / sessions
+	// 平台自身故障归口：把包级 panic 钩子接到这台 Server（见 self_fault.go）。
+	// 必须在拉起任何常驻循环之前装配，否则最早那几次 panic 会漏掉。
+	server.bindPlatformFaultSinks()
 
-	go superviseLoop("alert-notifier", func() { notifier.Run(10 * time.Second) })                      // periodic alert evaluation + dedup push
-	go superviseLoop("checks", func() { server.checks.Run(5 * time.Second) })                  // custom HTTP/TCP synthetic checks
-	go superviseLoop("apimon", func() { server.apimon.Run(5 * time.Second) })                  // API 性能监控：按业务系统批量探测接口
-	go superviseLoop("scrapes", func() { server.scrapes.Run(15 * time.Second) })                // 指标抓取：agentless 抓 exporter 摄入 VM
-	go superviseLoop("prom-rules", func() { server.promrules.Run(30 * time.Second) })              // 指标告警规则：PromQL 评估 → 告警 → incident/AI
-	go superviseLoop("playbook-scheduler", func() { server.runScheduler(30 * time.Second) })               // timed playbook triggers (interval/daily/weekly)
-	go superviseLoop("slo-evaluator", func() { server.runSLOEvaluator(60 * time.Second) })            // SLO error-budget evaluation → burn incidents
-	go superviseLoop("ai-inspection", server.ai.runInspectionLoop)                       // scheduled AI/heuristic health inspection
-	go superviseLoop("duty-report", server.runDutyReportLoop)                          // daily AI duty morning report → message center
-	go superviseLoop("vm-writer", server.vm.run)                                     // optional VictoriaMetrics remote-write pump
+	go superviseLoop("alert-notifier", func() { notifier.Run(10 * time.Second) })                         // periodic alert evaluation + dedup push
+	go superviseLoop("checks", func() { server.checks.Run(5 * time.Second) })                             // custom HTTP/TCP synthetic checks
+	go superviseLoop("apimon", func() { server.apimon.Run(5 * time.Second) })                             // API 性能监控：按业务系统批量探测接口
+	go superviseLoop("scrapes", func() { server.scrapes.Run(15 * time.Second) })                          // 指标抓取：agentless 抓 exporter 摄入 VM
+	go superviseLoop("prom-rules", func() { server.promrules.Run(30 * time.Second) })                     // 指标告警规则：PromQL 评估 → 告警 → incident/AI
+	go superviseLoop("playbook-scheduler", func() { server.runScheduler(30 * time.Second) })              // timed playbook triggers (interval/daily/weekly)
+	go superviseLoop("slo-evaluator", func() { server.runSLOEvaluator(60 * time.Second) })                // SLO error-budget evaluation → burn incidents
+	go superviseLoop("ai-inspection", server.ai.runInspectionLoop)                                        // scheduled AI/heuristic health inspection
+	go superviseLoop("duty-report", server.runDutyReportLoop)                                             // daily AI duty morning report → message center
+	go superviseLoop("vm-writer", server.vm.run)                                                          // optional VictoriaMetrics remote-write pump
 	go superviseLoop("agent-auto-update", func() { server.startAgentAutoUpdateScanner(5 * time.Minute) }) // 周期性扫描在线且版本落后的 agent 主动入队升级
-	go superviseLoop("cicd-watcher", func() { server.startCICDFailureWatcher(2 * time.Minute) })     // 勾了「失败告警 / 自动事件」的 CI/CD 连接：红流水线 → 告警 / SRE 事件
-	server.initForecastLearn()                             // 预测台账对比实测 → 校准因子 + AI 自学习记忆
+	go superviseLoop("cicd-watcher", func() { server.startCICDFailureWatcher(2 * time.Minute) })          // 勾了「失败告警 / 自动事件」的 CI/CD 连接：红流水线 → 告警 / SRE 事件
+	server.initForecastLearn()                                                                            // 预测台账对比实测 → 校准因子 + AI 自学习记忆
 	// 启动后自检持久化历史：内存里的 5 分钟环有 30 天，进程活着时会把「VM 里其实
 	// 没有数据」完全掩盖，直到下一次发版重启才暴露成「曲线只剩重启之后」。见
 	// history_selfcheck.go。
