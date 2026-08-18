@@ -622,13 +622,23 @@ func (h *SreyunCore) execGetDutyContext(args map[string]any) (string, error) {
 // runAssistTaskSync runs an assist-class task without SSE — used by Hermes tools.
 // Aligned with streamOrchestratedAssist: routing, A/B, cost recording, action sanitize.
 func (s *Server) runAssistTaskSync(ctx context.Context, task, userMsg, contextText string) (string, error) {
+	return s.runAssistTaskSyncAs(ctx, task, "ai", userMsg, contextText)
+}
+
+// runAssistTaskSyncAs 是带调用方标识的同步 assist 入口。
+//
+// actor 会一路进成本统计（recordAICallActor）与偏好检索，所以后台自动触发的调用必须
+// 能和人点出来的调用分开记——否则「这个月的额度是谁用掉的」在统计里查不出来。
+func (s *Server) runAssistTaskSyncAs(ctx context.Context, task, actor, userMsg, contextText string) (string, error) {
 	cfg := s.cfg.AIConfig()
 	if !cfg.Enabled || cfg.Endpoint == "" || cfg.Model == "" {
 		return "", fmt.Errorf("AI 未配置或未启用")
 	}
 	policy := assistTaskPolicy(task)
 	cfg = applyRoutedModel(cfg, task)
-	actor := "ai"
+	if actor = strings.TrimSpace(actor); actor == "" {
+		actor = "ai"
+	}
 	expID, variant := s.pickAssistExperiment(cfg, task, actor)
 	cfg = s.applyExperimentVariantOn(cfg, expID, variant)
 	safeCtx := sanitizeAssistContext(contextText)

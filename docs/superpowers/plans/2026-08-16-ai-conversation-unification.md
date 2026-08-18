@@ -92,7 +92,7 @@ AI 决策与分析能力」。
 |---|---|---|---|
 | A | SreView 的 AI 标签改为唤起 dock + 预置上下文；删掉自建对话实现 | 低，可单独发 | 部分 |
 | B | 回答下方的动作区（建工单 / 提自愈 / 关联变更），全部复用既有接口 + 审批 | 中 | ✅ 完成 |
-| C | 提示模板与上下文构建归一；两侧 run 追踪落同一张表 | 中，纯后端 | 部分 |
+| C | 提示模板与上下文构建归一；两侧 run 追踪落同一张表 | 中，纯后端 | ✅ 完成 |
 | D | 客观回验回流记忆（工单解决 / 自愈 Verify → memory.verified） | 中 | ✅ 完成 |
 
 建议顺序 A → B → D → C：A 立刻消除「该用哪个」的困惑，B 让闭环第一次真正闭上，
@@ -126,9 +126,9 @@ D 让它自我改进，C 是内部整洁度，收益最慢。
 - 记忆只在**回验之后**才写，不在建工单那一刻写：那时还没有任何证据说明结论是对的。
   采纳本身另记为 `applied` 反馈（`recordAIFollowupAdoption`），只强化、不入库。
 
-**C 的一半已经是现状**：`/ai/assist`（`ai_orchestrator.go`）与 `/hermes/chat`
-（`sre_api.go`）都已 `persistAIRun` 落同一张 `ai_runs`，成本与调用统计本就对得齐。
-剩下的只有「提示模板与上下文构建归一」（`/ai/assist` 没用上 `sreyun.go` 的热加载模板）。
+**C 已完成**：`/ai/assist`（`ai_orchestrator.go`）与 `/hermes/chat`（`sre_api.go`）本就
+都 `persistAIRun` 落同一张 `ai_runs`；提示词装配也已由 `ai_prompt_shared.go` 收成一条
+流水线，热加载模板对两个入口同时生效。
 
 **A 的剩余部分**：Vue `SreView` 的「AI 助手」标签仍是自建对话实现。注意 Vue 控制台
 自 v0.19.61 起已不随产品发布（见 CLAUDE.md），这一条只影响仓库整洁度，不影响用户所见。
@@ -140,3 +140,32 @@ D 让它自我改进，C 是内部整洁度，收益最慢。
   和调用场景（9 处就地按钮 vs 一个对话）都不同，强行合并会让 9 个调用点被迫背上会话语义。
 - 不做「AI 自动执行写操作」。审批门是刻意的，闭环指的是**结论可一键转成待审批的动作**，
   不是绕过人。
+
+### 补记（2026-08-17）：装配流水线的两个漏网入口
+
+C 收口时只覆盖了**人点出来**的两条路径。扫描完成后**自动**跑的两条
+（`security_ai_summary.go` 的 `host_security_diagnosis` / `web_vuln_diagnosis`）仍是
+`buildAssistSystemPrompt` + `aiComplete` 直连——与按钮跑的是同一个 assist 任务，却拿到
+另一份提示词，而且是不利的那一份：
+
+| | 按钮（`/ai/assist`） | 扫描后自动 |
+|---|---|---|
+| 安全边界条款 | ✅ | ❌ |
+| 上下文过滤与不可信围栏（`sanitizeAssistContext`） | ✅ | ❌ |
+| 热加载模板 | ✅ | ❌ |
+| 模型路由 / 成本护栏（`applyRoutedModel`） | ✅ | ❌ |
+| 成本统计（`recordAICallActor`） | ✅ | ❌ |
+
+前两项是安全问题而不只是整洁度问题：喂进去的整段上下文都是扫描器从外部抓回来的字符串
+——主机名、软件包名、CVE 标题、Web 漏洞名与命中的 URL——**一台被拿下的主机把指令写进
+主机名，就是一次直达模型的提示注入**，而这条路径连「以下为不可信材料」都没说过。第五项
+则意味着定时扫描产生的模型开销在 AI 用量统计里根本不存在。
+
+修复：两条都改走 `runAssistTaskSyncAs`（新增的 actor 版 `runAssistTaskSync`），扫描摘要
+作为**上下文**传入而不是用户消息，由共享流水线套围栏并过滤；actor 记为 `auto-scan`，在
+成本统计里与人工调用分开。非阻塞语义不变——整个调用连同检索都在 goroutine 里，失败只记
+日志，绝不改扫描状态。
+
+回归测试 `TestHostSecurityAutoSummaryUsesSharedAssembly` /
+`TestWebSecurityAutoSummaryUsesSharedAssembly`：起 OpenAI 兼容 stub 端点，断言自动路径
+发出的系统提示词以安全边界条款开头、带上热加载模板，且扫描摘要落在不可信围栏内。
