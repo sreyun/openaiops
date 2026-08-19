@@ -1,17 +1,6 @@
 name: CI · Go tests
 
 on:
-  push:
-    tags:
-      - 'v*'
-  pull_request:
-    paths:
-      - "cmd/server/**"
-      - "cmd/agent/**"
-      - "shared/**"
-      - "go.mod"
-      - "go.sum"
-      - ".github/workflows/ci.yml"
   workflow_dispatch:
 
 jobs:
