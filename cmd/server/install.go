@@ -516,35 +516,50 @@ cd "$DIR"
 # atomically. A truncated/corrupted/mismatched download must never overwrite a
 # working agent binary.
 NEW=".aiops-agent.new"
-if ! aiops_fetch "$SERVER/dl/$BIN" "$NEW"; then
-  rm -f "$NEW"
-  _code=$(aiops_http_status "$SERVER/dl/$BIN")
-  echo "[AIOps] ERROR: failed to download $SERVER/dl/$BIN (HTTP ${_code:-unreachable})"
-  aiops_explain_http "$_code" "$SERVER/dl/$BIN"
-  echo "[AIOps] Probe: curl -fsSI \"$SERVER/dl/$BIN\"   # or: wget -S --spider \"$SERVER/dl/$BIN\""
-  exit 1
-fi
-if ! aiops_fetch "$SERVER/dl/$BIN.sha256" ".aiops-agent.sha256"; then
-  rm -f "$NEW" ".aiops-agent.sha256"
-  echo "[AIOps] ERROR: failed to download checksum $SERVER/dl/$BIN.sha256"
-  exit 1
-fi
-EXPECTED=$(awk '{print $1}' ".aiops-agent.sha256")
-rm -f ".aiops-agent.sha256"
-if command -v sha256sum >/dev/null 2>&1; then
-  ACTUAL=$(sha256sum "$NEW" | awk '{print $1}')
-elif command -v shasum >/dev/null 2>&1; then
-  ACTUAL=$(shasum -a 256 "$NEW" | awk '{print $1}')
-else
-  echo "[AIOps] ERROR: sha256sum/shasum not found; refusing an unverified install."
-  rm -f "$NEW"
-  exit 1
-fi
-if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ]; then
+# 校验不过时先"清空重下一次"再判死刑：aiops_fetch 带 -C -，而上一次中断留下的分片
+# 可能来自**另一个版本**，续传出来的文件就是两个版本的拼接。少了这一次重试，用户看到
+# 的是一句无从下手的 "SHA-256 verification failed"，而且每重跑一次都会失败——因为那个
+# 坏分片一直在原地。
+_sha_retry=0
+while :; do
+  if ! aiops_fetch "$SERVER/dl/$BIN" "$NEW"; then
+    rm -f "$NEW"
+    _code=$(aiops_http_status "$SERVER/dl/$BIN")
+    echo "[AIOps] ERROR: failed to download $SERVER/dl/$BIN (HTTP ${_code:-unreachable})"
+    aiops_explain_http "$_code" "$SERVER/dl/$BIN"
+    echo "[AIOps] Probe: curl -fsSI \"$SERVER/dl/$BIN\"   # or: wget -S --spider \"$SERVER/dl/$BIN\""
+    exit 1
+  fi
+  rm -f ".aiops-agent.sha256"
+  if ! aiops_fetch "$SERVER/dl/$BIN.sha256" ".aiops-agent.sha256"; then
+    rm -f "$NEW" ".aiops-agent.sha256"
+    echo "[AIOps] ERROR: failed to download checksum $SERVER/dl/$BIN.sha256"
+    exit 1
+  fi
+  EXPECTED=$(awk '{print $1}' ".aiops-agent.sha256")
+  rm -f ".aiops-agent.sha256"
+  if command -v sha256sum >/dev/null 2>&1; then
+    ACTUAL=$(sha256sum "$NEW" | awk '{print $1}')
+  elif command -v shasum >/dev/null 2>&1; then
+    ACTUAL=$(shasum -a 256 "$NEW" | awk '{print $1}')
+  else
+    echo "[AIOps] ERROR: sha256sum/shasum not found; refusing an unverified install."
+    rm -f "$NEW"
+    exit 1
+  fi
+  if [ -n "$EXPECTED" ] && [ "$EXPECTED" = "$ACTUAL" ]; then
+    break
+  fi
+  if [ "$_sha_retry" = "0" ]; then
+    echo "[AIOps] WARN: SHA-256 不一致 (expected=$EXPECTED actual=$ACTUAL)，多半是上次中断留下的分片；清空后重新完整下载一次"
+    rm -f "$NEW"
+    _sha_retry=1
+    continue
+  fi
   echo "[AIOps] ERROR: agent SHA-256 verification failed."
   rm -f "$NEW"
   exit 1
-fi
+done
 [ -f aiops-agent ] && cp -f aiops-agent aiops-agent.bak 2>/dev/null || true
 mv -f "$NEW" aiops-agent
 chmod +x aiops-agent
@@ -1890,14 +1905,49 @@ echo "[AIOps] installing relay to $DIR (upstream $SERVER)"
 echo "[AIOps] platform $OS/$ARCH → $BIN"
 mkdir -p "$DIR"
 cd "$DIR"
-# resumable + retried download: on flaky/cross-border links, don't re-fetch the
-# whole 7.5MB from scratch. -C - resumes a partial; on a complete file the server
-# returns 416, so fall back to a plain full GET.
-if ! curl -fSL --retry 3 --retry-delay 2 -C - "$SERVER/dl/$BIN" -o aiops-agent; then
-  if ! curl -fsSL "$SERVER/dl/$BIN" -o aiops-agent; then
+# 下载到暂存文件、校验、再原子替换。三件事各自堵一个已经在现场咬过人的坑：
+#
+# 1) 暂存：直接 -o aiops-agent 在**中继已经在跑**时必然失败——内核不允许写正在执行
+#    的映像（ETXTBSY），curl 只说一句 "Can't open 'aiops-agent'"，脚本还会把它误诊成
+#    下载失败并打印 "(HTTP 200)"。于是装过一次的网关再也重装不了，而重装正是补 token、
+#    换上游、升版本的标准手段。rename 对运行中的二进制是允许的：老进程继续用旧 inode。
+# 2) 续传 + 校验兜底：跨境链路上重下 7.5MB 很贵，所以保留 -C -；但残留的分片可能来自
+#    **另一个版本**，续传出来的就是两个版本的拼接。校验不过时先清空重下一次再判死刑，
+#    否则用户看到的是一句无从下手的 "SHA-256 mismatch"，而 rm 掉旧二进制之后网关连
+#    降级回滚都没得回滚。
+# 3) 备份：替换前留一份 .bak，校验失败时不动现役二进制。
+NEW=".aiops-agent.new"
+aiops_relay_fetch_agent() {
+  if curl -fSL --retry 3 --retry-delay 2 -C - "$SERVER/dl/$BIN" -o "$NEW"; then return 0; fi
+  # 416（本地文件已完整）/ 不支持 Range 的前端，都退回一次完整 GET。
+  rm -f "$NEW"
+  curl -fsSL "$SERVER/dl/$BIN" -o "$NEW"
+}
+# 0 = 一致，或没有校验文件/校验工具（保持旧的宽松行为）；1 = 明确不一致。
+aiops_relay_sha_ok() {
+  curl -fsSL "$SERVER/dl/$BIN.sha256" -o ".aiops-agent.sha256" 2>/dev/null || return 0
+  _exp=$(awk '{print $1}' .aiops-agent.sha256 | tr 'A-F' 'a-f')
+  rm -f .aiops-agent.sha256
+  if command -v sha256sum >/dev/null 2>&1; then
+    _act=$(sha256sum "$NEW" | awk '{print $1}')
+  elif command -v shasum >/dev/null 2>&1; then
+    _act=$(shasum -a 256 "$NEW" | awk '{print $1}')
+  else
+    return 0
+  fi
+  [ -z "$_exp" ] && return 0
+  [ "$_exp" = "$_act" ] && return 0
+  echo "[AIOps] SHA-256 不一致: expected=$_exp actual=$_act size=$(wc -c < "$NEW" 2>/dev/null || echo ?)"
+  return 1
+}
+_try=1
+while :; do
+  if ! aiops_relay_fetch_agent; then
+    rm -f "$NEW"
     _code=$(curl -s -o /dev/null -w '%{http_code}' -L --max-time 20 "$SERVER/dl/$BIN" 2>/dev/null || true)
-    echo "[AIOps] ERROR: failed to download $SERVER/dl/$BIN (HTTP ${_code:-unreachable})"
+    echo "[AIOps] ERROR: failed to fetch $SERVER/dl/$BIN (HTTP ${_code:-unreachable})"
     case "$_code" in
+      200) echo "[AIOps] 200 = 服务端给出了文件，失败在本地写入：检查 $DIR 的剩余空间与权限。" ;;
       404) echo "[AIOps] 404 = 服务端上没有这个平台的 Agent 二进制；请用完整 agent dist 重建服务端镜像。" ;;
       502|503|504) echo "[AIOps] $_code = 上游前面的代理连不上真正的服务端；检查上游地址与该机出网方式（含 HTTP_PROXY）。" ;;
       401|403) echo "[AIOps] $_code = 下载被拒绝，安装 token 可能无效或已过期。" ;;
@@ -1905,22 +1955,19 @@ if ! curl -fSL --retry 3 --retry-delay 2 -C - "$SERVER/dl/$BIN" -o aiops-agent; 
     esac
     exit 1
   fi
-fi
-# SHA-256 verify (parity with normal install; refuse replace on mismatch).
-if curl -fsSL "$SERVER/dl/$BIN.sha256" -o ".aiops-agent.sha256" 2>/dev/null; then
-  EXPECTED=$(awk '{print $1}' .aiops-agent.sha256 | tr 'A-F' 'a-f')
-  if command -v sha256sum >/dev/null 2>&1; then
-    ACTUAL=$(sha256sum aiops-agent | awk '{print $1}')
-  elif command -v shasum >/dev/null 2>&1; then
-    ACTUAL=$(shasum -a 256 aiops-agent | awk '{print $1}')
-  else
-    ACTUAL=""
+  if aiops_relay_sha_ok; then break; fi
+  if [ "$_try" = "1" ]; then
+    echo "[AIOps] WARN: 校验未通过，多半是上次中断留下的分片；清空后重新完整下载一次"
+    rm -f "$NEW"
+    _try=2
+    continue
   fi
-  if [ -n "$EXPECTED" ] && [ -n "$ACTUAL" ] && [ "$EXPECTED" != "$ACTUAL" ]; then
-    echo "[AIOps] ERROR: SHA-256 mismatch for $BIN"; rm -f aiops-agent; exit 1
-  fi
-  rm -f .aiops-agent.sha256
-fi
+  echo "[AIOps] ERROR: SHA-256 mismatch for $BIN（已重下一次仍不一致；现役二进制未被改动）"
+  rm -f "$NEW"
+  exit 1
+done
+[ -f aiops-agent ] && cp -f aiops-agent aiops-agent.bak 2>/dev/null || true
+mv -f "$NEW" aiops-agent
 chmod +x aiops-agent
 
 # Write YAML without expanding metacharacters inside AIOPS_RELAY_SECRET.

@@ -201,6 +201,29 @@ func (s *Server) isHTTPS(r *http.Request) bool {
 	return false
 }
 
+// forwardedHTTPS reports whether the request reached the *edge* over TLS: either
+// directly, or at a reverse proxy that said so via X-Forwarded-Proto.
+//
+// 它只喂给 preferHTTPSPublicBase，也就是只对**隐式 80 端口**的地址生效：
+// http://panel.example.com → https://panel.example.com，而 http://10.0.0.9:8529
+// 这种显式端口原样保留。所以 trust_proxy 关着时"忽略转发头"的既有约定没有被推翻——
+// 变的只是"面板在 TLS 后面、地址又没写端口"这一种情形，那里 http 一定是错的。
+//
+// 与 isHTTPS 分开是刻意的：isHTTPS 决定 Cookie 的 Secure 位，那条路径继续受
+// trust_proxy 门禁保护，不在这次改动范围内。这里只用来**生成对外地址**（安装命令、
+// 中继上游），而伪造 X-Forwarded-Proto 在这个用途上无利可图：协议升级不改主机，
+// 最坏是给一台没有 TLS 的服务端生成 https 命令，坏的只是伪造者自己那次安装。
+//
+// 不认它的代价则是实打实的：TLS 由前面的 nginx 终结时 r.TLS 永远是 nil，于是面板
+// 明明是 https，生成的却是 http:// 的安装命令和中继上游——中继回源打到只收 TLS 的
+// 前门被直接断开（EOF），内网全员 502，而网关机自己的上报却一切正常，极难自查。
+func forwardedHTTPS(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	return strings.EqualFold(firstForwardedValue(r.Header.Get("X-Forwarded-Proto")), "https")
+}
+
 // serverURL returns the externally-reachable base URL for agent install scripts.
 // It "follows the browser": the generated install / uninstall command carries the
 // exact address the admin used to reach the panel, which is by definition reachable.
@@ -242,7 +265,7 @@ func (s *Server) serverURL(r *http.Request) string {
 	// If the admin reached the panel over HTTPS, never mint an http:// install URL
 	// for default ports. Reverse proxies that 301 http→https cause Go's default
 	// HTTP client to convert POST /api/v1/agent/register into GET → 404.
-	if s.isHTTPS(r) {
+	if forwardedHTTPS(r) {
 		raw = preferHTTPSPublicBase(raw)
 	}
 	return strings.TrimRight(raw, "/")
