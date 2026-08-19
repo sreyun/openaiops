@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -95,10 +96,10 @@ func TestRunModuleDispatch(t *testing.T) {
 }
 
 func TestModuleArgValidation(t *testing.T) {
-	if _, exit := moduleService(map[string]string{}); exit == 0 {
+	if _, exit := moduleService(context.Background(), map[string]string{}); exit == 0 {
 		t.Error("service without name should fail")
 	}
-	if _, exit := modulePackage(map[string]string{}); exit == 0 {
+	if _, exit := modulePackage(context.Background(), map[string]string{}); exit == 0 {
 		t.Error("package without name should fail")
 	}
 }

@@ -34,14 +34,14 @@ type packetCollector struct {
 }
 
 type conntrackEntry struct {
-	srcIP   string
-	dstIP   string
-	srcPort uint16
-	dstPort uint16
-	proto   uint8
-	state   string
-	bytes   uint64
-	packets uint64
+	srcIP    string
+	dstIP    string
+	srcPort  uint16
+	dstPort  uint16
+	proto    uint8
+	state    string
+	bytes    uint64
+	packets  uint64
 	lastSeen int64
 }
 

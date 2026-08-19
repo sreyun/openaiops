@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -53,91 +54,91 @@ func (a *Agent) runModuleCtx(ctx context.Context, payload string) (out []byte, c
 	case "host_inspect":
 		return moduleHostInspectCtx(ctx, mc.Args)
 	case "disk_usage":
-		return moduleDiskUsage()
+		return moduleDiskUsage(ctx)
 	case "mem_info":
-		return moduleMemInfo()
+		return moduleMemInfo(ctx)
 	case "cpu_load":
-		return moduleCPULoad()
+		return moduleCPULoad(ctx)
 	case "process_top":
-		return moduleProcessTop()
+		return moduleProcessTop(ctx)
 	case "uptime_info":
-		return moduleUptimeInfo()
+		return moduleUptimeInfo(ctx)
 	case "pkg_list":
-		return modulePkgList()
+		return modulePkgList(ctx)
 	case "file_stat":
 		return moduleFileStat(mc.Args)
 	case "file_head":
 		return moduleFileHead(mc.Args)
 	case "service_status":
-		return moduleServiceStatus(mc.Args)
+		return moduleServiceStatus(ctx, mc.Args)
 	case "journal_recent":
-		return moduleJournalRecent(mc.Args)
+		return moduleJournalRecent(ctx, mc.Args)
 	case "dmesg_recent":
-		return moduleDmesgRecent()
+		return moduleDmesgRecent(ctx)
 	case "net_ifaces":
 		return moduleNetIfaces()
 	case "net_listen":
-		return moduleNetListen()
+		return moduleNetListen(ctx)
 	case "net_routes":
-		return moduleNetRoutes()
+		return moduleNetRoutes(ctx)
 	case "net_sockets":
-		return moduleNetSockets()
+		return moduleNetSockets(ctx)
 	case "dns_resolve":
 		return moduleDNSResolve(mc.Args)
 	case "docker_ps":
-		return moduleDockerPS()
+		return moduleDockerPS(ctx)
 	case "docker_stats":
-		return moduleDockerStats()
+		return moduleDockerStats(ctx)
 	case "kube_get":
-		return moduleKubeGet(mc.Args)
+		return moduleKubeGet(ctx, mc.Args)
 	case "hyperv_power":
-		return moduleHyperVPower(mc.Args)
+		return moduleHyperVPower(ctx, mc.Args)
 	case "hyperv_set":
-		return moduleHyperVSet(mc.Args)
+		return moduleHyperVSet(ctx, mc.Args)
 	case "container_action":
-		return moduleContainerAction(mc.Args)
+		return moduleContainerAction(ctx, mc.Args)
 	case "container_logs":
-		return moduleContainerLogs(mc.Args)
+		return moduleContainerLogs(ctx, mc.Args)
 	case "container_exec":
-		return moduleContainerExec(mc.Args)
+		return moduleContainerExec(ctx, mc.Args)
 	case "container_compose_ls":
-		return moduleComposeList(mc.Args)
+		return moduleComposeList(ctx, mc.Args)
 	case "container_compose":
-		return moduleComposeAction(mc.Args)
+		return moduleComposeAction(ctx, mc.Args)
 	case "time_sync":
-		return moduleTimeSync()
+		return moduleTimeSync(ctx)
 	case "users_logged":
-		return moduleUsersLogged()
+		return moduleUsersLogged(ctx)
 	case "security_listen":
-		return moduleSecurityListen()
+		return moduleSecurityListen(ctx)
 	case "host_security_scan":
-		return moduleHostSecurityScan(mc.Args)
+		return moduleHostSecurityScan(ctx, mc.Args)
 	case "clamav_update":
-		return moduleClamavUpdate(mc.Args)
+		return moduleClamavUpdate(ctx, mc.Args)
 	case "auth_failures":
-		return moduleAuthFailures()
+		return moduleAuthFailures(ctx)
 	case "bigdata_jps":
-		return moduleBigdataJPS()
+		return moduleBigdataJPS(ctx)
 	case "java_processes":
-		return moduleJavaProcesses(mc.Args)
+		return moduleJavaProcesses(ctx, mc.Args)
 	case "java_jvm_info":
-		return moduleJavaJVMInfo(mc.Args)
+		return moduleJavaJVMInfo(ctx, mc.Args)
 	case "java_gc_stat":
-		return moduleJavaGCStat(mc.Args)
+		return moduleJavaGCStat(ctx, mc.Args)
 	case "java_thread_dump":
-		return moduleJavaThreadDump(mc.Args)
+		return moduleJavaThreadDump(ctx, mc.Args)
 	case "java_heap_histo":
-		return moduleJavaHeapHisto(mc.Args)
+		return moduleJavaHeapHisto(ctx, mc.Args)
 	case "java_exception_scan":
-		return moduleJavaExceptionScan(mc.Args)
+		return moduleJavaExceptionScan(ctx, mc.Args)
 	case "java_app_inspect":
-		return moduleJavaAppInspect(mc.Args)
+		return moduleJavaAppInspect(ctx, mc.Args)
 	case "bigdata_ports":
-		return moduleBigdataPorts()
+		return moduleBigdataPorts(ctx)
 	case "service":
-		return moduleService(mc.Args)
+		return moduleService(ctx, mc.Args)
 	case "package":
-		return modulePackage(mc.Args)
+		return modulePackage(ctx, mc.Args)
 	case "copy":
 		return moduleCopy(mc.Args)
 	case "agent_update":
@@ -190,7 +191,7 @@ func localIPv4s() []string {
 
 // moduleService 管理系统服务。参数：name（必填）、state（started/stopped/restarted/reloaded，
 // 默认 started）、enabled（true/false，可选，控制开机自启）。按系统选择 systemctl/sc/brew。
-func moduleService(args map[string]string) ([]byte, int) {
+func moduleService(ctx context.Context, args map[string]string) ([]byte, int) {
 	name := strings.TrimSpace(args["name"])
 	if name == "" {
 		return []byte("service 模块缺少 name 参数"), 1
@@ -248,12 +249,12 @@ func moduleService(args map[string]string) ([]byte, int) {
 	default:
 		return []byte("service 模块不支持当前系统: " + runtime.GOOS), 1
 	}
-	return runModuleCmds(cmds)
+	return runModuleCmds(ctx, cmds)
 }
 
 // modulePackage 安装/卸载软件包。参数：name（必填）、state（present/installed/latest=安装，
 // absent/removed=卸载；默认 present）。自动探测系统包管理器。
-func modulePackage(args map[string]string) ([]byte, int) {
+func modulePackage(ctx context.Context, args map[string]string) ([]byte, int) {
 	name := strings.TrimSpace(args["name"])
 	if name == "" {
 		return []byte("package 模块缺少 name 参数"), 1
@@ -264,7 +265,7 @@ func modulePackage(args map[string]string) ([]byte, int) {
 	if err != nil {
 		return []byte(err.Error()), 1
 	}
-	return runModuleCmds([][]string{argv})
+	return runModuleCmds(ctx, [][]string{argv})
 }
 
 // packageArgv 依据系统与已安装的包管理器，返回安装/卸载某包的命令行参数。
@@ -355,12 +356,61 @@ func moduleCopy(args map[string]string) ([]byte, int) {
 	return []byte(fmt.Sprintf("已写入 %s (%d 字节)", dest, len(content))), 0
 }
 
+// moduleCombinedOutput 执行一条已经建好的命令并收集输出。
+//
+// 它只比 cmd.CombinedOutput() 多做一件事：把 exec.ErrWaitDelay 还原成真实结果。设了
+// WaitDelay 之后，「进程自己已经正常退出、但它拉起的后台子进程还攥着 stdout 管道」这种
+// 情况下 Wait 会返回 ErrWaitDelay——那是「输出可能没收全」，不是「命令失败」。不还原的话，
+// 一次成功的 service start（postinst 拉起守护进程是最常见的一种）会被报成失败。
+func moduleCombinedOutput(cmd *exec.Cmd) ([]byte, error) {
+	out, err := cmd.CombinedOutput()
+	if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.Success() {
+		return out, nil
+	}
+	return out, err
+}
+
+// —— 模块步骤的「停止」语义（所有会起进程的模块都照这三条来）——
+//
+//  1. 起进程前先看一眼 ctx：已经停了就别再动这台机器；
+//  2. 进程挂在**会话 ctx 的派生 ctx** 上（模块自带的超时叠加在它上面），停止能真杀掉它；
+//  3. 返回时先判「会话被停止」，再判「本条命令自己超时」——这两件事对运维是不同的结论，
+//     都写成「超时」会把人支去查一个不存在的性能问题。
+//
+// 退出码统一 130，与 shell 步骤（runShellCommandCtx）一致，服务端据此把这步标成「已停止」
+// 而不是「失败」。
+const moduleStopExit = 130
+
+// moduleStopMsg 是停止时回给面板的固定短句；各模块可在前面拼自己的上下文。
+const moduleStopMsg = "（剧本已停止）"
+
+// moduleCtx 归一化 ctx：内部调用点与老测试可能传 nil，而 nil ctx 会让 WithTimeout 直接 panic。
+func moduleCtx(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
+}
+
+// moduleStopped 报告会话是否已被取消（停止剧本 / 会话超时）。
+func moduleStopped(ctx context.Context) bool {
+	return ctx != nil && ctx.Err() != nil
+}
+
 // runModuleCmds 顺序执行一组命令（非 shell，直接 argv），拼接输出；任一失败即中止并返回其退出码。
-func runModuleCmds(cmds [][]string) ([]byte, int) {
+//
+// ctx 必须一路带下来：它是「服务端停止了这条剧本」的唯一信号。少了它，停止只是把
+// 服务端那边的会话关掉，主机上这一串命令会一条接一条跑完——见 runArgv 的注释。
+func runModuleCmds(ctx context.Context, cmds [][]string) ([]byte, int) {
+	ctx = moduleCtx(ctx)
 	var b bytes.Buffer
 	for _, c := range cmds {
+		if moduleStopped(ctx) {
+			b.WriteString("（剧本已停止，后续命令未执行）\n")
+			return b.Bytes(), moduleStopExit
+		}
 		b.WriteString("$ " + strings.Join(c, " ") + "\n")
-		out, exit := runArgv(c)
+		out, exit := runArgv(ctx, c)
 		b.Write(out)
 		if n := len(out); n > 0 && out[n-1] != '\n' {
 			b.WriteByte('\n')
@@ -372,24 +422,62 @@ func runModuleCmds(cmds [][]string) ([]byte, int) {
 	return b.Bytes(), 0
 }
 
+// moduleMaxOutputBytes 是单条模块命令允许回传的输出上限。
+//
+// 8 MiB 对任何一条巡检输出都绰绰有余（journalctl -n 5000 约 1 MiB），而它挡住的是
+// 另一端：一条没有范围限制的命令在繁忙主机上吐出几百 MB，先撑爆 Agent 内存，再把
+// 同样的字节推给服务端。只读巡检把被巡检的机器搞出故障，是最不该发生的事。
+const moduleMaxOutputBytes = 8 << 20
+
 // runArgv 执行单条 argv 命令，返回合并输出与退出码。
-func runArgv(argv []string) ([]byte, int) {
+//
+// 传进来的 ctx 是**会话级**的取消信号（服务端停止剧本 / 会话超时 → runExecSession 里的
+// watchExecSessionCancel 调 cancel）。此前这里用的是 context.Background()，只有一个 5 分钟
+// 的自带超时：于是「停止剧本」对模块步骤是**无效**的——服务端把会话一关就当结束了，主机上
+// 这条 apt-get install / jstack / 全盘扫描照跑不误，而且模块常常是一串命令，每条都重新拿到
+// 一个完整的 5 分钟预算，一次「已停止」可以在后台拖上几十分钟。shell 步骤一直是对的
+// （runShellCommandCtx 收 ctx），只有模块步骤漏了，两者行为不一致比慢更糟：运维按了停止、
+// 界面也显示停了，机器却还在被压。
+//
+// 5 分钟仍作为单条命令的上限叠加在 ctx 之上——会话给 10 分钟，不代表某一条命令可以卡满。
+func runArgv(ctx context.Context, argv []string) ([]byte, int) {
 	if len(argv) == 0 {
 		return nil, 0
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx = moduleCtx(ctx)
+	if moduleStopped(ctx) {
+		return []byte(moduleStopMsg), moduleStopExit
+	}
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd := exec.CommandContext(cctx, argv[0], argv[1:]...)
 	cmd.Env = execEnv()
-	out, err := runCmdEscaped(cmd)
+	// 被杀掉的子进程若把 stdout 交给了自己的子进程（包管理器 postinst 拉起守护进程是最常见
+	// 的一种），cmd.Wait 会一直等那根管道关闭：进程早被杀了，「停止」却还卡在这里等。给
+	// Wait 一个上限，让停止的耗时有界。
+	cmd.WaitDelay = 5 * time.Second
+	out, err := runCmdEscapedCapped(cmd, moduleMaxOutputBytes)
 	exit := 0
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
 			exit = ee.ExitCode()
+		} else if errors.Is(err, exec.ErrWaitDelay) {
+			// 进程已经自己结束了，只是后台子进程还攥着它的 stdout。以进程自己的退出码
+			// 为准，别把「输出没收全」判成「命令失败」。
+			if st := cmd.ProcessState; st != nil {
+				exit = st.ExitCode()
+			}
+			out = append(out, []byte("\n（后台子进程仍持有输出管道，输出可能不完整）")...)
 		} else {
 			exit = -1
 			out = append(out, []byte("\n"+err.Error())...)
 		}
+	}
+	// 会话被取消（而不是本条命令自己超时）：进程已被 CommandContext 杀掉，退出码此时是
+	// 信号值，原样上报会被当成命令失败。统一成 130，与 shell 步骤一致。
+	if moduleStopped(ctx) {
+		out = append(out, []byte("\n（剧本已停止，命令被中止）")...)
+		return out, moduleStopExit
 	}
 	return out, exit
 }

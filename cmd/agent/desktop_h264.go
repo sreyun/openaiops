@@ -53,8 +53,8 @@ type deskEncoderKind struct {
 }
 
 var (
-	deskEncOnce   sync.Once
-	deskEncH264   []deskEncoderKind
+	deskEncOnce sync.Once
+	deskEncH264 []deskEncoderKind
 	deskEncH265 []deskEncoderKind
 )
 

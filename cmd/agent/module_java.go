@@ -12,6 +12,7 @@ package main
 // 因此不能用 min/max 内建、slices/maps 标准库、for-range-int 这些 1.21+ 特性。
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -38,7 +39,7 @@ import (
 // 所以顺序是：PATH → JAVA_HOME → **从正在运行的 java 进程反推**。最后一条最有用：
 // 目标 JVM 用哪个 JDK 起来的，它的 bin 目录里就有配套的工具，版本也必然匹配
 // （jstack 连不同大版本的 JVM 会直接失败）。
-func javaTool(name string) string {
+func javaTool(ctx context.Context, name string) string {
 	if runtime.GOOS == "windows" && !strings.HasSuffix(name, ".exe") {
 		name += ".exe"
 	}
@@ -50,7 +51,7 @@ func javaTool(name string) string {
 			return p
 		}
 	}
-	for _, dir := range javaBinDirsFromRunningJVMs() {
+	for _, dir := range javaBinDirsFromRunningJVMs(ctx) {
 		if p := filepath.Join(dir, name); javaToolAt(p) {
 			return p
 		}
@@ -73,7 +74,7 @@ func javaToolAt(p string) bool {
 }
 
 // javaBinDirsFromRunningJVMs 从正在运行的 java 进程反查它们的 <jdk>/bin 目录。
-func javaBinDirsFromRunningJVMs() []string {
+func javaBinDirsFromRunningJVMs(ctx context.Context) []string {
 	seen := map[string]bool{}
 	var out []string
 	add := func(exePath string) {
@@ -111,7 +112,7 @@ func javaBinDirsFromRunningJVMs() []string {
 		}
 	case "windows":
 		// Get-Process 的 Path 属性即映像路径；拿不到（权限不足/进程已退）时静默跳过。
-		out2, _ := runArgv([]string{"powershell", "-NoProfile", "-NonInteractive", "-Command",
+		out2, _ := runArgv(ctx, []string{"powershell", "-NoProfile", "-NonInteractive", "-Command",
 			"Get-Process java -EA 0 | Select-Object -ExpandProperty Path -Unique"})
 		for _, line := range strings.Split(string(out2), "\n") {
 			line = strings.TrimSpace(line)
@@ -135,9 +136,9 @@ type jvmProc struct {
 
 // listJVMs 列出本机 JVM 进程。jps 不可用时回退到进程表——JRE-only 的机器上
 // jps 根本不存在，但巡检"这台机器上跑着哪些 Java 应用"依然要能回答。
-func listJVMs() []jvmProc {
-	if jps := javaTool("jps"); jps != "" {
-		out, _ := runArgv([]string{jps, "-lvm"})
+func listJVMs(ctx context.Context) []jvmProc {
+	if jps := javaTool(ctx, "jps"); jps != "" {
+		out, _ := runArgv(ctx, []string{jps, "-lvm"})
 		var res []jvmProc
 		for _, line := range strings.Split(string(out), "\n") {
 			line = strings.TrimSpace(line)
@@ -167,10 +168,10 @@ func listJVMs() []jvmProc {
 			return res
 		}
 	}
-	return listJVMsFromProcTable()
+	return listJVMsFromProcTable(ctx)
 }
 
-func listJVMsFromProcTable() []jvmProc {
+func listJVMsFromProcTable(ctx context.Context) []jvmProc {
 	var res []jvmProc
 	switch runtime.GOOS {
 	case "linux":
@@ -197,7 +198,7 @@ func listJVMsFromProcTable() []jvmProc {
 			res = append(res, jvmProc{PID: pid, Main: javaMainFromArgv(parts), Args: strings.Join(parts[1:], " ")})
 		}
 	case "windows":
-		out, _ := runArgv([]string{"powershell", "-NoProfile", "-NonInteractive", "-Command",
+		out, _ := runArgv(ctx, []string{"powershell", "-NoProfile", "-NonInteractive", "-Command",
 			"Get-CimInstance Win32_Process -Filter \"Name='java.exe'\" | ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }"})
 		for _, line := range strings.Split(string(out), "\n") {
 			line = strings.TrimSpace(line)
@@ -219,7 +220,7 @@ func listJVMsFromProcTable() []jvmProc {
 			res = append(res, jvmProc{PID: cols[0], Main: javaMainFromArgv(argv), Args: cmdline})
 		}
 	default:
-		out, _ := runArgv([]string{"ps", "-axo", "pid,command"})
+		out, _ := runArgv(ctx, []string{"ps", "-axo", "pid,command"})
 		for _, line := range strings.Split(string(out), "\n") {
 			fields := strings.Fields(line)
 			if len(fields) < 2 {
@@ -329,13 +330,13 @@ func javaToolMissing(name string) ([]byte, int) {
 // 为什么解析而不是回传原始 jps：一行 jps -lvm 输出常常是几百字符的参数串，人眼扫不出
 // -Xmx 是多少；而"堆给了多大、用的哪个收集器、OOM 时会不会留下现场"恰恰是每次 Java
 // 巡检都要回答的三个问题。
-func moduleJavaProcesses(args map[string]string) ([]byte, int) {
-	jvms := listJVMs()
+func moduleJavaProcesses(ctx context.Context, args map[string]string) ([]byte, int) {
+	jvms := listJVMs(ctx)
 	var b strings.Builder
 	b.WriteString("# java_processes: 本机 JVM 进程清单（只读）\n")
 	if len(jvms) == 0 {
 		b.WriteString("未发现运行中的 JVM 进程。\n")
-		if javaTool("jps") == "" {
+		if javaTool(ctx, "jps") == "" {
 			b.WriteString("提示：本机也没有 jps（可能只装了 JRE），清单已回退到进程表扫描。\n")
 		}
 		return []byte(b.String()), 0
@@ -411,12 +412,12 @@ func parseJVMFlags(argline string) jvmFlags {
 // 对判断"现在有没有问题"几乎无用——一个跑了三个月的进程累计 5 万次 YGC 完全正常。
 // 真正有判断力的是这段窗口内的**增量**：这几秒里 Full GC 发生了几次、总共停顿多久、
 // 老年代在 Full GC 之后是否降不下去（内存泄漏的典型形态）。
-func moduleJavaGCStat(args map[string]string) ([]byte, int) {
-	jstat := javaTool("jstat")
+func moduleJavaGCStat(ctx context.Context, args map[string]string) ([]byte, int) {
+	jstat := javaTool(ctx, "jstat")
 	if jstat == "" {
 		return javaToolMissing("jstat")
 	}
-	jvms := listJVMs()
+	jvms := listJVMs(ctx)
 	pid, err := resolveJVMPID(args, jvms)
 	if err != nil {
 		return []byte(err.Error()), 1
@@ -436,7 +437,7 @@ func moduleJavaGCStat(args map[string]string) ([]byte, int) {
 		count = 30
 	}
 
-	out, exit := runArgv([]string{jstat, "-gcutil", pid, strconv.Itoa(interval), strconv.Itoa(count)})
+	out, exit := runArgv(ctx, []string{jstat, "-gcutil", pid, strconv.Itoa(interval), strconv.Itoa(count)})
 	raw := string(out)
 	if exit != 0 {
 		return []byte(javaAttachHint("jstat", pid, raw)), 1
@@ -582,24 +583,27 @@ func javaAttachHint(tool, pid, raw string) string {
 // 一份线程转储动辄几千行，直接回传等于把问题原样丢给人。而排障真正要的四件事都能算出来：
 // 死锁、线程状态分布、卡在同一个栈顶的线程堆（那就是阻塞点）、以及线程池是否已经打满。
 // 默认只回摘要，args.full=1 才附原文。
-func moduleJavaThreadDump(args map[string]string) ([]byte, int) {
-	jstack := javaTool("jstack")
+func moduleJavaThreadDump(ctx context.Context, args map[string]string) ([]byte, int) {
+	jstack := javaTool(ctx, "jstack")
 	if jstack == "" {
 		return javaToolMissing("jstack")
 	}
-	jvms := listJVMs()
+	jvms := listJVMs(ctx)
 	pid, err := resolveJVMPID(args, jvms)
 	if err != nil {
 		return []byte(err.Error()), 1
 	}
 	argv := []string{jstack, pid}
 	if strings.TrimSpace(args["force"]) == "1" {
+		if !jvmPIDDiscovered(pid, jvms) {
+			return []byte(javaForceRefusal(pid, jvms)), 1
+		}
 		// -F 走的是强制 attach（目标无响应时的最后手段），会让 JVM 暂停更久，故须显式要求。
 		argv = []string{jstack, "-l", "-F", pid}
 	} else if strings.TrimSpace(args["locks"]) != "0" {
 		argv = []string{jstack, "-l", pid} // -l 附带锁信息，死锁与持锁关系全靠它
 	}
-	out, exit := runArgv(argv)
+	out, exit := runArgv(ctx, argv)
 	raw := string(out)
 	if exit != 0 && !strings.Contains(raw, "Full thread dump") {
 		return []byte(javaAttachHint("jstack", pid, raw)), 1
@@ -773,12 +777,12 @@ func sortedCounts(m map[string]int) []countKV {
 // **live 参数是有生产影响的**：jmap -histo:live 会先做一次 Full GC 再统计，在大堆上
 // 是秒级 STW 停顿。默认因此关闭——只读巡检不该自己制造一次停顿。需要排除待回收对象的
 // 干扰时才显式打开，并且应当在低峰执行。
-func moduleJavaHeapHisto(args map[string]string) ([]byte, int) {
-	jmap := javaTool("jmap")
+func moduleJavaHeapHisto(ctx context.Context, args map[string]string) ([]byte, int) {
+	jmap := javaTool(ctx, "jmap")
 	if jmap == "" {
 		return javaToolMissing("jmap")
 	}
-	jvms := listJVMs()
+	jvms := listJVMs(ctx)
 	pid, err := resolveJVMPID(args, jvms)
 	if err != nil {
 		return []byte(err.Error()), 1
@@ -796,7 +800,7 @@ func moduleJavaHeapHisto(args map[string]string) ([]byte, int) {
 		topN = 100
 	}
 
-	out, exit := runArgv([]string{jmap, spec, pid})
+	out, exit := runArgv(ctx, []string{jmap, spec, pid})
 	raw := string(out)
 	if exit != 0 && !strings.Contains(raw, "#instances") {
 		return []byte(javaAttachHint("jmap", pid, raw)), 1
@@ -831,29 +835,29 @@ func moduleJavaHeapHisto(args map[string]string) ([]byte, int) {
 // java_jvm_info：运行时参数与版本
 // ---------------------------------------------------------------------------
 
-func moduleJavaJVMInfo(args map[string]string) ([]byte, int) {
-	jinfo := javaTool("jinfo")
+func moduleJavaJVMInfo(ctx context.Context, args map[string]string) ([]byte, int) {
+	jinfo := javaTool(ctx, "jinfo")
 	if jinfo == "" {
 		return javaToolMissing("jinfo")
 	}
-	jvms := listJVMs()
+	jvms := listJVMs(ctx)
 	pid, err := resolveJVMPID(args, jvms)
 	if err != nil {
 		return []byte(err.Error()), 1
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "# java_jvm_info: pid=%s（只读，取运行时生效值而非启动参数）\n", pid)
-	flags, exit := runArgv([]string{jinfo, "-flags", pid})
+	flags, exit := runArgv(ctx, []string{jinfo, "-flags", pid})
 	if exit != 0 {
 		return []byte(javaAttachHint("jinfo", pid, string(flags))), 1
 	}
 	b.WriteString("\n--- 生效的 JVM 参数 ---\n" + string(flags))
 	if strings.TrimSpace(args["sysprops"]) == "1" {
-		props, _ := runArgv([]string{jinfo, "-sysprops", pid})
+		props, _ := runArgv(ctx, []string{jinfo, "-sysprops", pid})
 		b.WriteString("\n--- 系统属性 ---\n" + truncRunes(string(props), 8000))
 	}
-	if java := javaTool("java"); java != "" {
-		ver, _ := runArgv([]string{java, "-version"})
+	if java := javaTool(ctx, "java"); java != "" {
+		ver, _ := runArgv(ctx, []string{java, "-version"})
 		b.WriteString("\n--- java -version（Agent 侧 PATH 上的 JDK，未必等于目标进程） ---\n" + string(ver))
 	}
 	return []byte(b.String()), 0
@@ -874,6 +878,14 @@ func javaLogCandidates(args map[string]string, jvms []jvmProc) []string {
 	add := func(p string) {
 		p = strings.TrimSpace(p)
 		if p == "" || seen[p] {
+			return
+		}
+		// 敏感路径闸门：这个模块读的是**调用方指定的任意文件**，和 file_head 是同一类
+		// 能力，就必须过同一道闸。少了这一句，一个标注"只读"的巡检模块可以拿 args.path
+		// 指到 /etc/shadow 或 Agent 自己的 config.yaml（安装 token + relay_secret）。
+		// 自动发现出来的路径同样要过：JVM 的 -Dlogging.file.name 是进程启动参数，
+		// 谁能起进程谁就能写它。
+		if agentDeniedPath(p) {
 			return
 		}
 		if st, err := os.Stat(p); err == nil && !st.IsDir() {
@@ -910,8 +922,17 @@ func javaLogCandidates(args map[string]string, jvms []jvmProc) []string {
 // `java.lang.XxxException: message`），按异常类聚合计数并记住最后一次出现的时间行，
 // 于是"哪个异常在刷屏、最近还在不在发生"一眼可见。OOM / StackOverflow 单独提级——
 // 它们不是业务异常，是进程级事故。
-func moduleJavaExceptionScan(args map[string]string) ([]byte, int) {
-	jvms := listJVMs()
+func moduleJavaExceptionScan(ctx context.Context, args map[string]string) ([]byte, int) {
+	// 显式指定的路径被闸门挡下时要**说出来**。跟着自动发现一起静默跳过，调用方看到的
+	// 会是"未找到可扫描的日志文件"，于是他去查日志路径对不对——而真正的原因是这条路径
+	// 根本不允许读。拒绝要看得见，否则下一个人还会再走一遍同样的弯路。
+	if p := strings.TrimSpace(args["path"]); p != "" && agentDeniedPath(p) {
+		return []byte("拒绝读取敏感路径: " + p + "\n" +
+			"java_exception_scan 是只读巡检模块，与 file_head 共用同一份敏感路径清单" +
+			"（系统凭据、私钥、/proc/<pid>/environ、Agent 自身的 config.yaml 等）。\n" +
+			"处理：改用应用自己的日志文件路径。"), 1
+	}
+	jvms := listJVMs(ctx)
 	logs := javaLogCandidates(args, jvms)
 	var b strings.Builder
 	b.WriteString("# java_exception_scan: 应用日志异常聚合（只读）\n")
@@ -925,8 +946,11 @@ func moduleJavaExceptionScan(args map[string]string) ([]byte, int) {
 	if tailBytes < 64*1024 {
 		tailBytes = 64 * 1024
 	}
-	if tailBytes > 64*1024*1024 {
-		tailBytes = 64 * 1024 * 1024
+	// 上限与模块输出上限同一个数：readFileTail 会把这么多字节整块读进内存，再复制成
+	// 字符串按行切分——tail_kb=65536 就是一次 128 MB 的瞬时占用，而这些机器很多只有
+	// 1 GB 内存。巡检不能是把被巡检的机器压垮的那一方。
+	if tailBytes > moduleMaxOutputBytes {
+		tailBytes = moduleMaxOutputBytes
 	}
 
 	exCount := map[string]int{}
@@ -991,6 +1015,35 @@ func moduleJavaExceptionScan(args map[string]string) ([]byte, int) {
 	return []byte(b.String()), 0
 }
 
+// jvmPIDDiscovered 判断 pid 是否就是本机发现的某个 JVM 进程。
+func jvmPIDDiscovered(pid string, jvms []jvmProc) bool {
+	for _, j := range jvms {
+		if j.PID == pid {
+			return true
+		}
+	}
+	return false
+}
+
+// javaForceRefusal 是 force=1 打在一个"不是本机已发现的 JVM"的 pid 上时的拒绝理由。
+//
+// 为什么单独为 -F 设这道闸：普通 attach（jstack/jmap/jstat 不带 -F）打错 pid 只会连不上，
+// 一句报错就完了；-F 走的是 Serviceability Agent，在 Linux 上是 **PTRACE_ATTACH**——
+// 目标进程会被就地挂起，而且不管它是不是 JVM。对着一个 PostgreSQL 或中间件的 pid 跑一次，
+// 就是把生产进程按停几秒。更糟的是 runArgv 到点会 SIGKILL 掉 jstack：tracer 在挂起状态下
+// 被杀，目标有很大概率停在 T 态起不来，而现场看到的现象是"某个进程莫名不动了"，
+// 没有人会把它和一次"只读巡检"联系起来。
+//
+// 所以 pid 必须先出现在本机的 JVM 清单里。清单认不出来的 JVM（jsvc 之类的包装启动）
+// 会被这条挡住——那是刻意的取舍：不带 -F 的常规转储仍然照跑，只是不给强制挂起的权力。
+func javaForceRefusal(pid string, jvms []jvmProc) string {
+	return fmt.Sprintf("拒绝对 pid=%s 使用 force=1：这个 pid 不在本机发现的 JVM 清单里。\n"+
+		"jstack -F 走 Serviceability Agent（Linux 上即 ptrace attach），会**就地挂起目标进程**，"+
+		"且不校验对方是不是 JVM；巡检超时把 jstack 杀掉时，目标还可能停在 T 态起不来。\n"+
+		"处理：先用 java_processes 确认目标 pid；确实是 JVM 但清单认不出（例如 jsvc 包装启动）时，"+
+		"改用不带 force 的常规转储。\n%s", pid, jvmCandidateList(jvms))
+}
+
 // javaExceptionClassOf 从一行日志里认出异常首行的异常类名，非异常行返回 ""。
 // 只认「包名.类名Exception/Error」后面跟冒号或行尾的形态，避免把栈帧行（at xxx）
 // 和随口提到异常名的业务日志算进来。
@@ -1051,13 +1104,13 @@ func readFileTail(path string, n int64) (string, error) {
 // 分开的模块适合"我已经知道要看 GC"；而巡检的前提恰恰是**还不知道问题在哪**，
 // 所以需要一次把进程、参数、GC、线程、异常都过一遍，并把各段的「发现:」汇总到末尾。
 // 末尾那份汇总就是 AI 诊断与人工判读共同的入口。
-func moduleJavaAppInspect(args map[string]string) ([]byte, int) {
-	jvms := listJVMs()
+func moduleJavaAppInspect(ctx context.Context, args map[string]string) ([]byte, int) {
+	jvms := listJVMs(ctx)
 	var b strings.Builder
 	b.WriteString("===== Java 应用巡检报告（只读）=====\n\n")
 
 	b.WriteString("【1/5 进程与启动参数】\n")
-	procOut, _ := moduleJavaProcesses(args)
+	procOut, _ := moduleJavaProcesses(ctx, args)
 	b.Write(procOut)
 
 	if len(jvms) == 0 {
@@ -1068,7 +1121,7 @@ func moduleJavaAppInspect(args map[string]string) ([]byte, int) {
 	if err != nil {
 		fmt.Fprintf(&b, "\n【目标进程未确定】%v\n后续 GC/线程/运行时参数各项跳过；请用 args.pid 或 args.name 指定后重跑。\n", err)
 		b.WriteString("\n【5/5 异常日志】\n")
-		exOut, _ := moduleJavaExceptionScan(args)
+		exOut, _ := moduleJavaExceptionScan(ctx, args)
 		b.Write(exOut)
 		return []byte(b.String()), 0
 	}
@@ -1079,19 +1132,19 @@ func moduleJavaAppInspect(args map[string]string) ([]byte, int) {
 	sub["pid"] = pid
 
 	b.WriteString("\n【2/5 运行时参数】\n")
-	infoOut, _ := moduleJavaJVMInfo(sub)
+	infoOut, _ := moduleJavaJVMInfo(ctx, sub)
 	b.Write(infoOut)
 
 	b.WriteString("\n【3/5 GC 健康度】\n")
-	gcOut, _ := moduleJavaGCStat(sub)
+	gcOut, _ := moduleJavaGCStat(ctx, sub)
 	b.Write(gcOut)
 
 	b.WriteString("\n【4/5 线程与阻塞】\n")
-	tdOut, _ := moduleJavaThreadDump(sub)
+	tdOut, _ := moduleJavaThreadDump(ctx, sub)
 	b.Write(tdOut)
 
 	b.WriteString("\n【5/5 异常日志】\n")
-	exOut, _ := moduleJavaExceptionScan(sub)
+	exOut, _ := moduleJavaExceptionScan(ctx, sub)
 	b.Write(exOut)
 
 	// 汇总各段的「发现:」——AI 诊断与人工判读都从这里起步。

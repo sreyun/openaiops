@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"runtime"
 	"strings"
 	"testing"
@@ -63,7 +64,7 @@ func TestWinCIMDiskUsageLive(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("windows only")
 	}
-	out, exit := winCIMDiskUsageText()
+	out, exit := winCIMDiskUsageText(context.Background())
 	if exit != 0 {
 		t.Fatalf("disk_usage exit=%d out=%s", exit, out)
 	}

@@ -12,11 +12,11 @@ import (
 )
 
 const (
-	fimMaxFiles       = 80
-	fimMaxHashBytes   = 2 << 20 // 2 MiB
-	fimMaxTextBytes   = 64 << 10
-	fimMaxDiffLines   = 200
-	fimMaxDiffBytes   = 48 << 10
+	fimMaxFiles     = 80
+	fimMaxHashBytes = 2 << 20 // 2 MiB
+	fimMaxTextBytes = 64 << 10
+	fimMaxDiffLines = 200
+	fimMaxDiffBytes = 48 << 10
 )
 
 type hostSecFileInv struct {

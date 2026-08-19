@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -17,16 +18,16 @@ import (
 
 // hostSecurityReport is the structured payload returned by host_security_scan.
 type hostSecurityReport struct {
-	CollectedAt int64            `json:"collected_at"`
-	Hostname    string           `json:"hostname"`
-	OS          string           `json:"os"`
-	Arch        string           `json:"arch"`
-	Kernel      string           `json:"kernel,omitempty"`
-	Distro      string           `json:"distro,omitempty"`
-	PkgMgr      string           `json:"pkg_mgr,omitempty"`
-	Packages    []hostSecPkg     `json:"packages"`
-	Listeners   []string         `json:"listeners"`
-	Processes   []string         `json:"processes"`
+	CollectedAt   int64             `json:"collected_at"`
+	Hostname      string            `json:"hostname"`
+	OS            string            `json:"os"`
+	Arch          string            `json:"arch"`
+	Kernel        string            `json:"kernel,omitempty"`
+	Distro        string            `json:"distro,omitempty"`
+	PkgMgr        string            `json:"pkg_mgr,omitempty"`
+	Packages      []hostSecPkg      `json:"packages"`
+	Listeners     []string          `json:"listeners"`
+	Processes     []string          `json:"processes"`
 	Hardening     []hostSecFinding  `json:"hardening"`
 	FileHashes    []hostSecHash     `json:"file_hashes"`
 	FileInventory []hostSecFileInv  `json:"file_inventory,omitempty"`
@@ -157,7 +158,7 @@ func clamavFreshnessFinding(age int, updated time.Time) (hostSecFinding, bool) {
 	return hostSecFinding{}, false
 }
 
-func moduleHostSecurityScan(args map[string]string) ([]byte, int) {
+func moduleHostSecurityScan(ctx context.Context, args map[string]string) ([]byte, int) {
 	ensureCommonBinPATH()
 	rep := hostSecurityReport{
 		CollectedAt: time.Now().Unix(),
@@ -183,8 +184,8 @@ func moduleHostSecurityScan(args map[string]string) ([]byte, int) {
 	}
 
 	rep.Packages = collectHostPackages(rep.PkgMgr, rep.Distro, 800)
-	rep.Listeners = collectListenLines(120)
-	rep.Processes = collectProcessLines(40)
+	rep.Listeners = collectListenLines(ctx, 120)
+	rep.Processes = collectProcessLines(ctx, 40)
 	rep.Firewall = collectFirewallStatus()
 	rep.Hardening = collectHardeningFindings()
 	rep.Hardening = append(rep.Hardening, firewallFindings(rep.Firewall)...)
@@ -405,8 +406,8 @@ func ecosystemFor(mgr, distro string) string {
 	}
 }
 
-func collectListenLines(limit int) []string {
-	raw, _ := moduleNetListen()
+func collectListenLines(ctx context.Context, limit int) []string {
+	raw, _ := moduleNetListen(ctx)
 	out := []string{}
 	for _, ln := range strings.Split(string(raw), "\n") {
 		ln = strings.TrimSpace(ln)
@@ -421,8 +422,8 @@ func collectListenLines(limit int) []string {
 	return out
 }
 
-func collectProcessLines(limit int) []string {
-	raw, _ := moduleProcessTop()
+func collectProcessLines(ctx context.Context, limit int) []string {
+	raw, _ := moduleProcessTop(ctx)
 	out := []string{}
 	for i, ln := range strings.Split(string(raw), "\n") {
 		ln = strings.TrimSpace(ln)

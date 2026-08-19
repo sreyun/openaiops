@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -13,18 +15,18 @@ import (
 
 // —— 只读运维模块：禁止改配置/启停服务/写文件。异常时返回可读错误与非零退出码。——
 
-func moduleDiskUsage() ([]byte, int) {
+func moduleDiskUsage(ctx context.Context) ([]byte, int) {
 	switch runtime.GOOS {
 	case "windows":
-		return winCIMDiskUsageText()
+		return winCIMDiskUsageText(ctx)
 	case "darwin":
-		return runModuleCmds([][]string{{"df", "-hP"}})
+		return runModuleCmds(ctx, [][]string{{"df", "-hP"}})
 	default:
-		return runModuleCmds([][]string{{"df", "-hT"}})
+		return runModuleCmds(ctx, [][]string{{"df", "-hT"}})
 	}
 }
 
-func moduleMemInfo() ([]byte, int) {
+func moduleMemInfo(ctx context.Context) ([]byte, int) {
 	var b strings.Builder
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
@@ -45,18 +47,18 @@ func moduleMemInfo() ([]byte, int) {
 			return []byte(b.String()), 0
 		}
 	case "darwin":
-		out, exit := runModuleCmds([][]string{{"vm_stat"}, {"sysctl", "-n", "hw.memsize"}})
+		out, exit := runModuleCmds(ctx, [][]string{{"vm_stat"}, {"sysctl", "-n", "hw.memsize"}})
 		b.Write(out)
 		return []byte(b.String()), exit
 	case "windows":
-		out, exit := winCIMMemInfoText()
+		out, exit := winCIMMemInfoText(ctx)
 		b.Write(out)
 		return []byte(b.String()), exit
 	}
 	return []byte(b.String()), 0
 }
 
-func moduleCPULoad() ([]byte, int) {
+func moduleCPULoad(ctx context.Context) ([]byte, int) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "cpus=%d\ngoos=%s\ngoarch=%s\n", runtime.NumCPU(), runtime.GOOS, runtime.GOARCH)
 	switch runtime.GOOS {
@@ -72,59 +74,59 @@ func moduleCPULoad() ([]byte, int) {
 		}
 		return []byte(b.String()), 0
 	case "darwin":
-		out, exit := runModuleCmds([][]string{{"sysctl", "-n", "vm.loadavg"}, {"sysctl", "-n", "hw.ncpu"}})
+		out, exit := runModuleCmds(ctx, [][]string{{"sysctl", "-n", "vm.loadavg"}, {"sysctl", "-n", "hw.ncpu"}})
 		b.Write(out)
 		return []byte(b.String()), exit
 	case "windows":
-		out, exit := winCIMCPULoadText()
+		out, exit := winCIMCPULoadText(ctx)
 		b.Write(out)
 		return []byte(b.String()), exit
 	}
 	return []byte(b.String()), 0
 }
 
-func moduleProcessTop() ([]byte, int) {
+func moduleProcessTop(ctx context.Context) ([]byte, int) {
 	switch runtime.GOOS {
 	case "windows":
-		return runModuleCmds([][]string{{"cmd", "/c", "tasklist /FO LIST"}})
+		return runModuleCmds(ctx, [][]string{{"cmd", "/c", "tasklist /FO LIST"}})
 	case "darwin":
-		return runModuleCmds([][]string{{"ps", "-axo", "pid,pcpu,pmem,rss,comm"}})
+		return runModuleCmds(ctx, [][]string{{"ps", "-axo", "pid,pcpu,pmem,rss,comm"}})
 	default:
-		return runModuleCmds([][]string{{"ps", "-eo", "pid,pcpu,pmem,rss,comm"}})
+		return runModuleCmds(ctx, [][]string{{"ps", "-eo", "pid,pcpu,pmem,rss,comm"}})
 	}
 }
 
-func moduleUptimeInfo() ([]byte, int) {
+func moduleUptimeInfo(ctx context.Context) ([]byte, int) {
 	switch runtime.GOOS {
 	case "windows":
-		return runModuleCmds([][]string{{"cmd", "/c", "net statistics workstation"}})
+		return runModuleCmds(ctx, [][]string{{"cmd", "/c", "net statistics workstation"}})
 	default:
-		return runModuleCmds([][]string{{"uptime"}, {"who"}})
+		return runModuleCmds(ctx, [][]string{{"uptime"}, {"who"}})
 	}
 }
 
-func modulePkgList() ([]byte, int) {
+func modulePkgList(ctx context.Context) ([]byte, int) {
 	switch runtime.GOOS {
 	case "linux":
 		switch {
 		case have("dpkg"):
-			return runModuleCmds([][]string{{"dpkg", "-l"}})
+			return runModuleCmds(ctx, [][]string{{"dpkg", "-l"}})
 		case have("rpm"):
-			return runModuleCmds([][]string{{"rpm", "-qa"}})
+			return runModuleCmds(ctx, [][]string{{"rpm", "-qa"}})
 		case have("apk"):
-			return runModuleCmds([][]string{{"apk", "info"}})
+			return runModuleCmds(ctx, [][]string{{"apk", "info"}})
 		}
 		return []byte("未找到 dpkg/rpm/apk"), 1
 	case "darwin":
 		if have("brew") {
-			return runModuleCmds([][]string{{"brew", "list", "--versions"}})
+			return runModuleCmds(ctx, [][]string{{"brew", "list", "--versions"}})
 		}
 		return []byte("未找到 brew"), 1
 	case "windows":
 		if have("winget") {
-			return runModuleCmds([][]string{{"winget", "list"}})
+			return runModuleCmds(ctx, [][]string{{"winget", "list"}})
 		}
-		return winCIMPkgListText()
+		return winCIMPkgListText(ctx)
 	}
 	return []byte("不支持的系统"), 1
 }
@@ -176,63 +178,149 @@ func moduleFileHead(args map[string]string) ([]byte, int) {
 	return buf[:nr], 0
 }
 
+// agentDeniedPath 是读文件类模块（file_stat / file_head / java_exception_scan）的最后
+// 一道闸——服务端 deniedSensitivePath 已经拦过一次，但那一层信任的是"服务端不会被绕过"，
+// 这一层不作这个假设。
+//
+// 清单里除了系统凭据，还必须包含 **Agent 自己的安装目录**：config.yaml 里放着安装
+// token 与 relay_secret，agent_state.json 里放着主机身份。少了这一条，一个"只读"巡检
+// 就能把整个车队的安装 token 读走——那是能让任意机器注册进面板的凭据，比读 /etc/shadow
+// 的现实危害更直接。/proc/*/environ 同理：进程环境变量里全是数据库口令与云 AK。
+//
+// 匹配前先做路径规范化（反斜杠转正、去 . 与 ..、小写），否则 /etc/./shadow 或
+// C:\Windows\..\Windows\System32\config\SAM 这类写法可以一路走过去。
 func agentDeniedPath(p string) bool {
-	p = strings.ToLower(strings.TrimSpace(p))
+	if agentDeniedPathLiteral(p) {
+		return true
+	}
+	// 符号链接：/tmp/x -> /etc/shadow 的写法在字面判定里什么都不像。这道闸是给"以 root
+	// 运行的 Agent"设的，而宿主机上的普通用户完全可以自己造一个软链，再等一次只读巡检
+	// 顺着它把只有 root 能读的文件读走——典型的 confused deputy。文件不存在时
+	// EvalSymlinks 返回错误，那也没什么可读的，按不命中处理。
+	if real, err := filepath.EvalSymlinks(strings.TrimSpace(p)); err == nil {
+		return agentDeniedPathLiteral(real)
+	}
+	return false
+}
+
+// agentDeniedPathLiteral 按字面（规范化后）判定，不解析软链。
+func agentDeniedPathLiteral(p string) bool {
+	raw := strings.TrimSpace(p)
+	if raw == "" {
+		return false
+	}
+	norm := strings.ToLower(filepath.ToSlash(filepath.Clean(strings.ReplaceAll(raw, "\\", "/"))))
 	deny := []string{
-		"/etc/shadow", "/etc/gshadow", "/etc/sudoers",
+		"/etc/shadow", "/etc/gshadow", "/etc/sudoers", "/etc/master.passwd",
 		".ssh/", ".gnupg/", ".aws/", ".kube/config",
 		"/root/.bash_history",
+		"/system32/config/sam", "/system32/config/security",
 	}
 	for _, d := range deny {
-		if strings.Contains(p, d) {
+		if strings.Contains(norm, d) {
 			return true
+		}
+	}
+	// 私钥与凭据文件（按文件名收口，避免整目录误伤）。
+	base := path.Base(norm)
+	for _, suf := range []string{".pem", ".key", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", ".kdbx"} {
+		if strings.HasSuffix(base, suf) || base == suf {
+			return true
+		}
+	}
+	// /proc/<pid>/environ、/proc/self/environ：进程环境变量即凭据。
+	if strings.HasPrefix(norm, "/proc/") && strings.HasSuffix(norm, "/environ") {
+		return true
+	}
+	// Agent 自己的安装目录（token / relay_secret / 主机身份）。
+	if agentOwnSecretPath(norm) {
+		return true
+	}
+	return false
+}
+
+// agentOwnSecretPath 判断路径是否落在 Agent 自己的安装目录里。
+// 取当前进程可执行文件所在目录，而不是写死 /opt/aiops-agent —— 安装目录可被
+// AIOPS_DIR 改写，非 root 安装还会落在 $HOME/.aiops-agent 下。
+func agentOwnSecretPath(norm string) bool {
+	for _, f := range []string{"config.yaml", "config.json", "agent_state.json"} {
+		if strings.HasSuffix(norm, "/"+f) || norm == f {
+			if exe, err := os.Executable(); err == nil {
+				dir := strings.ToLower(filepath.ToSlash(filepath.Dir(exe)))
+				if strings.HasPrefix(norm, dir+"/") {
+					return true
+				}
+			}
+			// 兜底：即使拿不到自身路径，默认安装目录也必须挡住。
+			if strings.Contains(norm, "/aiops-agent/") || strings.Contains(norm, "/.aiops-agent/") {
+				return true
+			}
 		}
 	}
 	return false
 }
 
-func moduleServiceStatus(args map[string]string) ([]byte, int) {
+func moduleServiceStatus(ctx context.Context, args map[string]string) ([]byte, int) {
 	name := strings.TrimSpace(args["name"])
 	if name == "" {
 		return []byte("service_status 缺少 name"), 1
 	}
 	switch runtime.GOOS {
 	case "linux":
-		return runModuleCmds([][]string{
+		return runModuleCmds(ctx, [][]string{
 			{"systemctl", "is-active", name},
 			{"systemctl", "status", name, "--no-pager", "-l"},
 		})
 	case "windows":
-		return runModuleCmds([][]string{{"sc", "query", name}})
+		return runModuleCmds(ctx, [][]string{{"sc", "query", name}})
 	case "darwin":
-		return runModuleCmds([][]string{{"brew", "services", "info", name}})
+		return runModuleCmds(ctx, [][]string{{"brew", "services", "info", name}})
 	}
 	return []byte("不支持的系统"), 1
 }
 
-func moduleJournalRecent(args map[string]string) ([]byte, int) {
+// moduleJournalLines 把 lines 参数收敛成一个**纯数字且有上限**的字符串。
+//
+// 两件事都必须做，缺一不可：
+//   - 必须是数字：Windows 分支把它拼进 "cmd /c wevtutil …" 的命令行，一个
+//     lines="1 & whoami" 就是一次任意命令执行——而 journal_recent 是标注为**只读**的
+//     模块，只读巡检（含 AI 闭环）本不该有改动宿主机的能力。这是越权，不只是脏数据。
+//   - 必须有上限：journalctl -n 999999999 会把整个 journal（繁忙主机上是 GB 级）读进
+//     内存再回传，足以把 1G 内存的小机器上的 Agent 直接撑爆。
+func moduleJournalLines(v string) string {
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || n <= 0 {
+		return "80"
+	}
+	if n > 5000 {
+		n = 5000
+	}
+	return strconv.Itoa(n)
+}
+
+func moduleJournalRecent(ctx context.Context, args map[string]string) ([]byte, int) {
 	n := "80"
 	if v := strings.TrimSpace(args["lines"]); v != "" {
-		n = v
+		n = moduleJournalLines(v)
 	}
 	switch runtime.GOOS {
 	case "linux":
 		if have("journalctl") {
-			return runModuleCmds([][]string{{"journalctl", "-n", n, "--no-pager", "-o", "short-iso"}})
+			return runModuleCmds(ctx, [][]string{{"journalctl", "-n", n, "--no-pager", "-o", "short-iso"}})
 		}
-		return runModuleCmds([][]string{{"tail", "-n", n, "/var/log/messages"}, {"tail", "-n", n, "/var/log/syslog"}})
+		return runModuleCmds(ctx, [][]string{{"tail", "-n", n, "/var/log/messages"}, {"tail", "-n", n, "/var/log/syslog"}})
 	case "darwin":
-		return runModuleCmds([][]string{{"log", "show", "--last", "30m", "--style", "compact"}})
+		return runModuleCmds(ctx, [][]string{{"log", "show", "--last", "30m", "--style", "compact"}})
 	case "windows":
-		return runModuleCmds([][]string{{"cmd", "/c", "wevtutil qe System /c:" + n + " /f:text"}})
+		return runModuleCmds(ctx, [][]string{{"cmd", "/c", "wevtutil qe System /c:" + n + " /f:text"}})
 	}
 	return []byte("不支持的系统"), 1
 }
 
-func moduleDmesgRecent() ([]byte, int) {
+func moduleDmesgRecent(ctx context.Context) ([]byte, int) {
 	switch runtime.GOOS {
 	case "linux", "darwin":
-		return runModuleCmds([][]string{{"dmesg", "-T"}})
+		return runModuleCmds(ctx, [][]string{{"dmesg", "-T"}})
 	default:
 		return []byte("当前系统无 dmesg"), 1
 	}
@@ -254,50 +342,50 @@ func moduleNetIfaces() ([]byte, int) {
 	return []byte(b.String()), 0
 }
 
-func moduleNetListen() ([]byte, int) {
+func moduleNetListen(ctx context.Context) ([]byte, int) {
 	switch runtime.GOOS {
 	case "windows":
-		return runModuleCmds([][]string{{"cmd", "/c", "netstat -ano"}})
+		return runModuleCmds(ctx, [][]string{{"cmd", "/c", "netstat -ano"}})
 	case "darwin":
 		// macOS netstat has no Linux-style -p PID; prefer lsof for TCP listeners.
 		if have("lsof") {
-			out, code := runModuleCmds([][]string{{"lsof", "-nP", "-iTCP", "-sTCP:LISTEN"}})
+			out, code := runModuleCmds(ctx, [][]string{{"lsof", "-nP", "-iTCP", "-sTCP:LISTEN"}})
 			if code == 0 && len(strings.TrimSpace(string(out))) > 0 {
 				return out, 0
 			}
 		}
-		return runModuleCmds([][]string{{"netstat", "-anv", "-p", "tcp"}, {"netstat", "-anv", "-p", "udp"}})
+		return runModuleCmds(ctx, [][]string{{"netstat", "-anv", "-p", "tcp"}, {"netstat", "-anv", "-p", "udp"}})
 	default:
 		if have("ss") {
-			return runModuleCmds([][]string{{"ss", "-lntup"}})
+			return runModuleCmds(ctx, [][]string{{"ss", "-lntup"}})
 		}
-		return runModuleCmds([][]string{{"netstat", "-lntp"}})
+		return runModuleCmds(ctx, [][]string{{"netstat", "-lntp"}})
 	}
 }
 
-func moduleNetRoutes() ([]byte, int) {
+func moduleNetRoutes(ctx context.Context) ([]byte, int) {
 	switch runtime.GOOS {
 	case "windows":
-		return runModuleCmds([][]string{{"route", "print"}})
+		return runModuleCmds(ctx, [][]string{{"route", "print"}})
 	case "darwin":
-		return runModuleCmds([][]string{{"netstat", "-rn"}})
+		return runModuleCmds(ctx, [][]string{{"netstat", "-rn"}})
 	default:
 		if have("ip") {
-			return runModuleCmds([][]string{{"ip", "route"}})
+			return runModuleCmds(ctx, [][]string{{"ip", "route"}})
 		}
-		return runModuleCmds([][]string{{"route", "-n"}})
+		return runModuleCmds(ctx, [][]string{{"route", "-n"}})
 	}
 }
 
-func moduleNetSockets() ([]byte, int) {
+func moduleNetSockets(ctx context.Context) ([]byte, int) {
 	switch runtime.GOOS {
 	case "windows":
-		return runModuleCmds([][]string{{"cmd", "/c", "netstat -an"}})
+		return runModuleCmds(ctx, [][]string{{"cmd", "/c", "netstat -an"}})
 	default:
 		if have("ss") {
-			return runModuleCmds([][]string{{"ss", "-s"}, {"ss", "-ant"}})
+			return runModuleCmds(ctx, [][]string{{"ss", "-s"}, {"ss", "-ant"}})
 		}
-		return runModuleCmds([][]string{{"netstat", "-an"}})
+		return runModuleCmds(ctx, [][]string{{"netstat", "-an"}})
 	}
 }
 
@@ -318,24 +406,24 @@ func moduleDNSResolve(args map[string]string) ([]byte, int) {
 	return []byte(b.String()), 0
 }
 
-func moduleDockerPS() ([]byte, int) {
+func moduleDockerPS(ctx context.Context) ([]byte, int) {
 	cli := containerCLI()
 	if cli == "" {
 		// Soft-skip: no runtime is common on bare hosts; exit 0 so playbooks don't fail.
 		return []byte("skip: 未找到 docker/podman，跳过容器列表\n"), 0
 	}
-	return runModuleCmds([][]string{{cli, "ps", "-a", "--format", "table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}"}})
+	return runModuleCmds(ctx, [][]string{{cli, "ps", "-a", "--format", "table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}"}})
 }
 
-func moduleDockerStats() ([]byte, int) {
+func moduleDockerStats(ctx context.Context) ([]byte, int) {
 	cli := containerCLI()
 	if cli == "" {
 		return []byte("skip: 未找到 docker/podman，跳过容器资源\n"), 0
 	}
-	return runModuleCmds([][]string{{cli, "stats", "--no-stream", "--format", "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}"}})
+	return runModuleCmds(ctx, [][]string{{cli, "stats", "--no-stream", "--format", "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}"}})
 }
 
-func moduleKubeGet(args map[string]string) ([]byte, int) {
+func moduleKubeGet(ctx context.Context, args map[string]string) ([]byte, int) {
 	if !have("kubectl") {
 		return []byte("skip: 未找到 kubectl，跳过 K8s 查询\n"), 0
 	}
@@ -349,10 +437,10 @@ func moduleKubeGet(args map[string]string) ([]byte, int) {
 			return []byte("非法 resource 参数"), 1
 		}
 	}
-	return runModuleCmds([][]string{{"kubectl", "get", res, "-A", "-o", "wide"}})
+	return runModuleCmds(ctx, [][]string{{"kubectl", "get", res, "-A", "-o", "wide"}})
 }
 
-func moduleTimeSync() ([]byte, int) {
+func moduleTimeSync(ctx context.Context) ([]byte, int) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "now=%s\n", time.Now().Format(time.RFC3339Nano))
 	fmt.Fprintf(&b, "unix=%d\n", time.Now().Unix())
@@ -361,56 +449,56 @@ func moduleTimeSync() ([]byte, int) {
 	switch runtime.GOOS {
 	case "linux":
 		if have("timedatectl") {
-			out, _ := runModuleCmds([][]string{{"timedatectl", "status"}})
+			out, _ := runModuleCmds(ctx, [][]string{{"timedatectl", "status"}})
 			b.Write(out)
 		}
 	}
 	return []byte(b.String()), 0
 }
 
-func moduleUsersLogged() ([]byte, int) {
+func moduleUsersLogged(ctx context.Context) ([]byte, int) {
 	switch runtime.GOOS {
 	case "windows":
-		return runModuleCmds([][]string{{"query", "user"}})
+		return runModuleCmds(ctx, [][]string{{"query", "user"}})
 	default:
-		return runModuleCmds([][]string{{"who"}, {"w"}})
+		return runModuleCmds(ctx, [][]string{{"who"}, {"w"}})
 	}
 }
 
-func moduleSecurityListen() ([]byte, int) {
+func moduleSecurityListen(ctx context.Context) ([]byte, int) {
 	// 与 net_listen 相同数据源，附加说明头
-	out, exit := moduleNetListen()
+	out, exit := moduleNetListen(ctx)
 	head := []byte("# security_listen: 对外监听端口（只读）\n")
 	return append(head, out...), exit
 }
 
-func moduleAuthFailures() ([]byte, int) {
+func moduleAuthFailures(ctx context.Context) ([]byte, int) {
 	switch runtime.GOOS {
 	case "linux":
 		if have("journalctl") {
-			return runModuleCmds([][]string{{"journalctl", "-n", "50", "--no-pager", "-u", "sshd", "-g", "Failed|Invalid|authentication failure"}})
+			return runModuleCmds(ctx, [][]string{{"journalctl", "-n", "50", "--no-pager", "-u", "sshd", "-g", "Failed|Invalid|authentication failure"}})
 		}
-		return runModuleCmds([][]string{{"grep", "-E", "Failed|Invalid|authentication failure", "/var/log/auth.log"}, {"tail", "-n", "50", "/var/log/secure"}})
+		return runModuleCmds(ctx, [][]string{{"grep", "-E", "Failed|Invalid|authentication failure", "/var/log/auth.log"}, {"tail", "-n", "50", "/var/log/secure"}})
 	case "darwin":
-		return runModuleCmds([][]string{{"log", "show", "--last", "1h", "--predicate", "eventMessage CONTAINS \"Authentication\"", "--style", "compact"}})
+		return runModuleCmds(ctx, [][]string{{"log", "show", "--last", "1h", "--predicate", "eventMessage CONTAINS \"Authentication\"", "--style", "compact"}})
 	default:
 		return []byte("当前系统暂无统一认证失败日志接口"), 1
 	}
 }
 
-func moduleBigdataJPS() ([]byte, int) {
+func moduleBigdataJPS(ctx context.Context) ([]byte, int) {
 	if !have("jps") {
 		return []byte("未找到 jps（需 JDK）"), 1
 	}
-	return runModuleCmds([][]string{{"jps", "-lvm"}})
+	return runModuleCmds(ctx, [][]string{{"jps", "-lvm"}})
 }
 
-func moduleBigdataPorts() ([]byte, int) {
+func moduleBigdataPorts(ctx context.Context) ([]byte, int) {
 	// 常见 Hadoop/Spark/Kafka/ES 端口探测（只看本机监听）
 	ports := []string{"8020", "8088", "9000", "9870", "9864", "2181", "9092", "9200", "9300", "7077", "8080", "18080"}
 	var b strings.Builder
 	b.WriteString("# bigdata_ports: 检查本机是否监听常见大数据端口\n")
-	listenOut, _ := moduleNetListen()
+	listenOut, _ := moduleNetListen(ctx)
 	listen := string(listenOut)
 	for _, p := range ports {
 		hit := strings.Contains(listen, ":"+p) || strings.Contains(listen, "."+p+" ")

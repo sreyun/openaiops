@@ -85,17 +85,17 @@ type deskInput interface {
 }
 
 type deskQuality struct {
-	Scale         float64  `json:"scale"`
-	Quality       int      `json:"quality"`
-	FPS           int      `json:"fps"`
-	Codec         string   `json:"codec"` // jpeg | h264 | h265
-	Monitor       int      `json:"monitor"`
-	ClientW       int      `json:"client_w,omitempty"`
-	ClientH       int      `json:"client_h,omitempty"`
-	DPR           float64  `json:"dpr,omitempty"`
-	Sharpness     float64  `json:"sharpness,omitempty"`
-	AutoScale     bool     `json:"auto_scale,omitempty"`
-	ClientCodecs  []string `json:"client_codecs,omitempty"` // browser MSE capabilities
+	Scale        float64  `json:"scale"`
+	Quality      int      `json:"quality"`
+	FPS          int      `json:"fps"`
+	Codec        string   `json:"codec"` // jpeg | h264 | h265
+	Monitor      int      `json:"monitor"`
+	ClientW      int      `json:"client_w,omitempty"`
+	ClientH      int      `json:"client_h,omitempty"`
+	DPR          float64  `json:"dpr,omitempty"`
+	Sharpness    float64  `json:"sharpness,omitempty"`
+	AutoScale    bool     `json:"auto_scale,omitempty"`
+	ClientCodecs []string `json:"client_codecs,omitempty"` // browser MSE capabilities
 }
 
 func defaultDeskQuality() deskQuality {
@@ -1232,16 +1232,16 @@ func readDeskFrames(r io.Reader, inp deskInput, lang string, q *deskQuality, qMu
 					applyMonitor(mon)
 				}
 				ack, _ := json.Marshal(map[string]any{
-					"quality_ack": true,
-					"scale":       applied.Scale,
+					"quality_ack":  true,
+					"scale":        applied.Scale,
 					"encode_scale": eff,
-					"quality":     applied.Quality,
-					"fps":         applied.FPS,
-					"codec":       applied.Codec,
-					"auto_scale":  applied.AutoScale,
-					"client_w":    applied.ClientW,
-					"client_h":    applied.ClientH,
-					"sharpness":   applied.Sharpness,
+					"quality":      applied.Quality,
+					"fps":          applied.FPS,
+					"codec":        applied.Codec,
+					"auto_scale":   applied.AutoScale,
+					"client_w":     applied.ClientW,
+					"client_h":     applied.ClientH,
+					"sharpness":    applied.Sharpness,
 				})
 				select {
 				case fileTxChan <- deskTxFrame('S', ack):

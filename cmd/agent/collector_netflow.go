@@ -166,11 +166,11 @@ func (fa *flowAggregator) flush() ([]shared.FlowRecord, shared.NetFlowStats) {
 
 // netflowReceiver is the NetFlow UDP listener + aggregator.
 type netflowReceiver struct {
-	cfg     NetFlowConfig
-	hostID  string
-	fp      string
-	agg     *flowAggregator
-	conn    net.PacketConn
+	cfg    NetFlowConfig
+	hostID string
+	fp     string
+	agg    *flowAggregator
+	conn   net.PacketConn
 
 	// v9 template cache (sourceID+templateID → template)。仅 read-loop 单协程访问，
 	// v9TemplateCount 用普通 int 计数即可（无需原子）。缓存有上限，防构造报文循环换

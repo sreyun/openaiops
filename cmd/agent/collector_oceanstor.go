@@ -446,7 +446,7 @@ func (oc *oceanStorCollector) collectOne(t OceanStorTarget) shared.HardwareSnaps
 				Name:         name,
 				Model:        osStr(e, "MODEL"),
 				SerialNumber: osStr(e, "SERIALNUM", "ELABEL"),
-				Location: osStr(e, "LOCATION"),
+				Location:     osStr(e, "LOCATION"),
 				// LOGICTYPE/TYPE 是华为的内部数字编码，没有可靠的公开枚举可查，
 				// 直接显示 "0"/"1" 对运维毫无意义 —— 宁可不展示。框的性质
 				// （控制框 / 硬盘框）MODEL 里本来就写着。

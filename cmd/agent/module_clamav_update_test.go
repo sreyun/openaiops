@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -82,7 +83,7 @@ func TestClamavUpdateReportsMissingBinary(t *testing.T) {
 	if findFreshclamBin() != "" {
 		t.Skip("freshclam is installed on this machine")
 	}
-	out, code := moduleClamavUpdate(map[string]string{})
+	out, code := moduleClamavUpdate(context.Background(), map[string]string{})
 	if code == 0 {
 		t.Fatal("missing freshclam must be reported as a failure")
 	}
@@ -94,7 +95,7 @@ func TestClamavUpdateReportsMissingBinary(t *testing.T) {
 // TestClamavUpdateRejectsBadProxyBeforeRunning makes sure a malformed proxy
 // fails fast instead of being written into a config file.
 func TestClamavUpdateRejectsBadProxyBeforeRunning(t *testing.T) {
-	out, code := moduleClamavUpdate(map[string]string{"proxy": "socks5://p:1080"})
+	out, code := moduleClamavUpdate(context.Background(), map[string]string{"proxy": "socks5://p:1080"})
 	if code == 0 {
 		t.Fatal("unsupported proxy scheme should be rejected")
 	}

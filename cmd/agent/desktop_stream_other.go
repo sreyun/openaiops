@@ -25,7 +25,7 @@ func deskPreferredCodec() string { return "" }
 func deskNeedsRawH264() bool     { return false }
 
 func deskLegacyCaptureHost() bool { return false }
-func deskAVFScreenIndex() int    { return -1 }
+func deskAVFScreenIndex() int     { return -1 }
 
 func deskClipboardSupported() bool { return false }
 

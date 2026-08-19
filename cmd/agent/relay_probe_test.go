@@ -220,3 +220,71 @@ func TestRelayInstallScriptWithoutTokenStaysEmpty(t *testing.T) {
 		t.Fatalf("中继无 token 时不应补 token，实际 %q", gotToken)
 	}
 }
+
+// 只读模块的 lines 参数必须收敛成纯数字且有上限。
+//
+// 不做数字校验时，Windows 分支把它拼进 "cmd /c wevtutil …"——lines="1 & whoami" 就是
+// 一次任意命令执行，而 journal_recent 标注的是**只读**。不做上限时，
+// journalctl -n 999999999 会把整个 journal 读进内存再回传，足以撑爆小内存机器。
+func TestModuleJournalLinesIsClampedNumeric(t *testing.T) {
+	cases := map[string]string{
+		"":               "80",
+		"abc":            "80",
+		"0":              "80",
+		"-5":             "80",
+		"1 & whoami":     "80",
+		"200":            "200",
+		"999999999":      "5000",
+		"  120  ":        "120",
+		"5000; rm -rf /": "80",
+	}
+	for in, want := range cases {
+		if got := moduleJournalLines(in); got != want {
+			t.Errorf("moduleJournalLines(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// 输出上限：超出后必须截断并留下明确标记，而不是把几百 MB 收进内存再回传。
+func TestCappedBufferTruncatesWithNotice(t *testing.T) {
+	c := &cappedBuffer{max: 16}
+	n, err := c.Write([]byte(strings.Repeat("x", 100)))
+	if err != nil || n != 100 {
+		t.Fatalf("写入方必须看到全量写入（否则命令会收到 EPIPE 死掉）: n=%d err=%v", n, err)
+	}
+	out := string(c.Bytes())
+	if len(out) <= 16 && !strings.Contains(out, "截断") {
+		t.Fatalf("截断标记缺失: %q", out)
+	}
+	if strings.Count(out, "x") != 16 {
+		t.Fatalf("上限未生效，实际保留 %d 字节", strings.Count(out, "x"))
+	}
+	// 二次取用不应重复追加标记。
+	if a, b := string(c.Bytes()), string(c.Bytes()); a != b {
+		t.Fatal("重复调用 Bytes() 追加了多次截断标记")
+	}
+}
+
+// Agent 自己的 config.yaml 里是安装 token 与 relay_secret：只读巡检读走它，等于拿到
+// 能让任意机器注册进面板的凭据。这条比 /etc/shadow 更现实，必须挡住。
+func TestAgentDeniedPathCoversOwnSecretsAndEquivalents(t *testing.T) {
+	for _, p := range []string{
+		"/opt/aiops-agent/config.yaml",
+		"/root/.aiops-agent/agent_state.json",
+		"/etc/./shadow",
+		"/proc/self/environ",
+		"/proc/1234/environ",
+		"/home/u/.ssh/id_rsa",
+		"/tmp/backup/server.key",
+		`C:\Windows\..\Windows\System32\config\SAM`,
+	} {
+		if !agentDeniedPath(p) {
+			t.Errorf("敏感路径未被拦截: %s", p)
+		}
+	}
+	for _, p := range []string{"/var/log/messages", "/etc/hosts", "/opt/app/application.yaml"} {
+		if agentDeniedPath(p) {
+			t.Errorf("普通路径被误伤: %s", p)
+		}
+	}
+}

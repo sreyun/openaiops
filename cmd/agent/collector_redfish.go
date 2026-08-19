@@ -829,9 +829,9 @@ func (rc *redfishCollector) collectFirmware(client *http.Client, t RedfishTarget
 	out := make([]shared.FirmwareInfo, 0, len(fw.Members))
 	for _, m := range fw.Members {
 		var f struct {
-			Name    string `json:"Name"`
-			Version string `json:"Version"`
-			Updateable *bool `json:"Updateable"`
+			Name       string `json:"Name"`
+			Version    string `json:"Version"`
+			Updateable *bool  `json:"Updateable"`
 		}
 		if rc.rfGetRaw(client, t.URL, t.Username, password, m.ID, &f) != nil {
 			continue
@@ -1095,13 +1095,13 @@ func (rc *redfishCollector) collectGPUsViaPCIe(client *http.Client, t RedfishTar
 			continue
 		}
 		var dev struct {
-			Name         string        `json:"Name"`
-			Model        string        `json:"Model"`
-			Manufacturer string        `json:"Manufacturer"`
-			SerialNumber string        `json:"SerialNumber"`
-			Status       redfishStatus `json:"Status"`
-			PCIeFunctions odataRef     `json:"PCIeFunctions"` // 集合链接
-			Links        struct {
+			Name          string        `json:"Name"`
+			Model         string        `json:"Model"`
+			Manufacturer  string        `json:"Manufacturer"`
+			SerialNumber  string        `json:"SerialNumber"`
+			Status        redfishStatus `json:"Status"`
+			PCIeFunctions odataRef      `json:"PCIeFunctions"` // 集合链接
+			Links         struct {
 				PCIeFunctions []odataRef `json:"PCIeFunctions"` // 直挂数组
 			} `json:"Links"`
 		}

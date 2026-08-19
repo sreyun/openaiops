@@ -14,7 +14,7 @@ import (
 const (
 	tiocSPTLCK  = 0x40045431 // TIOCSPTLCK
 	tiocGPTN    = 0x80045430 // TIOCGPTN
-	ptyWinszReq = 0x5414      // TIOCSWINSZ
+	ptyWinszReq = 0x5414     // TIOCSWINSZ
 )
 
 func ptyOpen() (*os.File, string, error) {

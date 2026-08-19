@@ -15,6 +15,7 @@ import (
 // Agent runtime log retention (install directory):
 //   - active file + rotated backups = serviceLogMaxFiles
 //   - each file capped at serviceLogMaxBytes
+//
 // Rolling overwrite keeps disk use bounded (~70 MiB worst case).
 const (
 	serviceLogMaxBytes = 10 << 20 // 10 MiB per file

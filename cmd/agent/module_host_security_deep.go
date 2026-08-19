@@ -435,8 +435,8 @@ func collectSensitivePermFindings() []hostSecFinding {
 		}
 		fs = append(fs, hostSecFinding{
 			Level: c.Level, ID: "perm." + strings.ReplaceAll(strings.TrimPrefix(c.Path, "/"), "/", "_"),
-			Title:  "敏感文件权限过宽 — " + c.Path,
-			Detail: fmt.Sprintf("当前 %04o，建议不超过 %04o", uint32(perm), uint32(c.Max)),
+			Title:   "敏感文件权限过宽 — " + c.Path,
+			Detail:  fmt.Sprintf("当前 %04o，建议不超过 %04o", uint32(perm), uint32(c.Max)),
 			Suggest: fmt.Sprintf("chmod %04o %s", uint32(c.Max), c.Path),
 		})
 	}
@@ -472,7 +472,7 @@ func collectContainerExposureFindings() []hostSecFinding {
 		if fi.Mode().Perm()&0o006 != 0 {
 			fs = append(fs, hostSecFinding{
 				Level: "critical", ID: "docker_sock_world", Title: "Docker socket 全局可访问",
-				Detail: fmt.Sprintf("/var/run/docker.sock mode=%04o", uint32(fi.Mode().Perm())),
+				Detail:  fmt.Sprintf("/var/run/docker.sock mode=%04o", uint32(fi.Mode().Perm())),
 				Suggest: "访问 docker.sock 等同 root：改为 root:docker 0660，并审查 docker 组成员",
 			})
 		}

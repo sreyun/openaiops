@@ -22,10 +22,10 @@ type SecurityModule struct {
 
 // OSDistInfo holds the detected Linux distribution identity.
 type OSDistInfo struct {
-	ID        string // e.g. "kylin", "uos", "centos"
-	Name      string // e.g. "Kylin Linux Advanced Server"
-	Version   string // e.g. "V10"
-	IDLike    string // e.g. "centos rhel fedora"
+	ID         string // e.g. "kylin", "uos", "centos"
+	Name       string // e.g. "Kylin Linux Advanced Server"
+	Version    string // e.g. "V10"
+	IDLike     string // e.g. "centos rhel fedora"
 	PrettyName string
 }
 

@@ -144,7 +144,11 @@ func buildFreshclamConfig(base string, proxyHost string, proxyPort int) string {
 //
 //	proxy       optional http proxy (host:port or http://host:port)
 //	timeout_sec optional, clamped to [60, 3600]
-func moduleClamavUpdate(args map[string]string) ([]byte, int) {
+//
+// ctx 是会话级取消信号：freshclam 是所有模块里跑得最久的一个（默认 15 分钟，可放到 60），
+// 少了它，「停止剧本」之后这台机器还会继续拉整套病毒库。
+func moduleClamavUpdate(ctx context.Context, args map[string]string) ([]byte, int) {
+	ctx = moduleCtx(ctx)
 	// Validate arguments before touching the host: a malformed proxy is the
 	// caller's mistake and should read the same on every machine, whether or
 	// not ClamAV happens to be installed there.
@@ -194,10 +198,14 @@ func moduleClamavUpdate(args map[string]string) ([]byte, int) {
 
 	before := clamavDBFreshness()
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	if moduleStopped(ctx) {
+		return []byte("clamav_update " + moduleStopMsg), moduleStopExit
+	}
+	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-	raw, runErr := cmd.CombinedOutput()
+	cmd := exec.CommandContext(cctx, argv[0], argv[1:]...)
+	cmd.WaitDelay = 5 * time.Second
+	raw, runErr := moduleCombinedOutput(cmd)
 	out := strings.TrimSpace(string(raw))
 
 	var b strings.Builder
@@ -216,7 +224,13 @@ func moduleClamavUpdate(args map[string]string) ([]byte, int) {
 			after.Format("2006-01-02 15:04:05"), int(time.Since(after).Hours()/24))
 	}
 
-	if ctx.Err() != nil {
+	// 先分辨「运维按了停止」和「freshclam 自己跑超时」：后者要提示改 proxy/timeout_sec，
+	// 前者什么都不用改，把这句提示贴给一次主动停止只会误导人。
+	if moduleStopped(ctx) {
+		b.WriteString("更新已中止" + moduleStopMsg + "\n")
+		return []byte(b.String()), moduleStopExit
+	}
+	if cctx.Err() != nil {
 		b.WriteString("更新超时。若主机需要经代理出网，请在参数中填写 proxy，或调大 timeout_sec。\n")
 		return []byte(b.String()), 1
 	}

@@ -24,8 +24,8 @@ func TestNormalizeDistroMajor(t *testing.T) {
 		"Alibaba Cloud Linux 3.2104":      "3",
 		"Debian GNU/Linux 12 (bookworm)":  "12",
 		// Must not steal major via a stray "v10" token on non-Kylin text.
-		"openEuler 22.03 with libv10":     "22",
-		"":                                "",
+		"openEuler 22.03 with libv10": "22",
+		"":                            "",
 	}
 	for in, want := range cases {
 		if got := normalizeDistroMajor(in); got != want {

@@ -21,7 +21,10 @@ func containerCLI() string {
 }
 
 // moduleContainerAction start/stop/restart a container by id or name.
-func moduleContainerAction(args map[string]string) ([]byte, int) {
+//
+// ctx 是会话级取消信号，见 modules.go 的「模块步骤的停止语义」。
+func moduleContainerAction(ctx context.Context, args map[string]string) ([]byte, int) {
+	ctx = moduleCtx(ctx)
 	cli := containerCLI()
 	if cli == "" {
 		return []byte("未找到 docker 或 podman"), 1
@@ -39,11 +42,18 @@ func moduleContainerAction(args map[string]string) ([]byte, int) {
 	default:
 		return []byte("未知 action: " + action + "（start|stop|restart）"), 1
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	if moduleStopped(ctx) {
+		return []byte("container_action " + moduleStopMsg), moduleStopExit
+	}
+	cctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, cli, action, id)
-	out, err := cmd.CombinedOutput()
-	if ctx.Err() == context.DeadlineExceeded {
+	cmd := exec.CommandContext(cctx, cli, action, id)
+	cmd.WaitDelay = 5 * time.Second
+	out, err := moduleCombinedOutput(cmd)
+	if moduleStopped(ctx) {
+		return []byte("container_action 已中止" + moduleStopMsg), moduleStopExit
+	}
+	if cctx.Err() == context.DeadlineExceeded {
 		return []byte("container_action 超时"), 1
 	}
 	if err != nil {
@@ -57,7 +67,8 @@ func moduleContainerAction(args map[string]string) ([]byte, int) {
 }
 
 // moduleContainerLogs returns recent container logs.
-func moduleContainerLogs(args map[string]string) ([]byte, int) {
+func moduleContainerLogs(ctx context.Context, args map[string]string) ([]byte, int) {
+	ctx = moduleCtx(ctx)
 	cli := containerCLI()
 	if cli == "" {
 		return []byte("未找到 docker 或 podman"), 1
@@ -75,10 +86,18 @@ func moduleContainerLogs(args map[string]string) ([]byte, int) {
 			tail = n
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	if moduleStopped(ctx) {
+		return []byte("container_logs " + moduleStopMsg), moduleStopExit
+	}
+	cctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, cli, "logs", "--tail", strconv.Itoa(tail), id).CombinedOutput()
-	if ctx.Err() == context.DeadlineExceeded {
+	cmd := exec.CommandContext(cctx, cli, "logs", "--tail", strconv.Itoa(tail), id)
+	cmd.WaitDelay = 5 * time.Second
+	out, err := moduleCombinedOutput(cmd)
+	if moduleStopped(ctx) {
+		return []byte("container_logs 已中止" + moduleStopMsg), moduleStopExit
+	}
+	if cctx.Err() == context.DeadlineExceeded {
 		return []byte("container_logs 超时"), 1
 	}
 	if err != nil {
@@ -93,7 +112,8 @@ func moduleContainerLogs(args map[string]string) ([]byte, int) {
 
 // moduleContainerExec runs a non-interactive short command inside a container.
 // Args: id|name, command (shell string), optional timeout_sec (5~60, default 20).
-func moduleContainerExec(args map[string]string) ([]byte, int) {
+func moduleContainerExec(ctx context.Context, args map[string]string) ([]byte, int) {
+	ctx = moduleCtx(ctx)
 	cli := containerCLI()
 	if cli == "" {
 		return []byte("未找到 docker 或 podman"), 1
@@ -118,12 +138,19 @@ func moduleContainerExec(args map[string]string) ([]byte, int) {
 			timeoutSec = n
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
+	if moduleStopped(ctx) {
+		return []byte("container_exec " + moduleStopMsg), moduleStopExit
+	}
+	cctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
 	defer cancel()
 	// Non-interactive: docker exec -i is not needed; avoid -t (TTY).
-	cmd := exec.CommandContext(ctx, cli, "exec", id, "sh", "-c", cmdStr)
-	out, err := cmd.CombinedOutput()
-	if ctx.Err() == context.DeadlineExceeded {
+	cmd := exec.CommandContext(cctx, cli, "exec", id, "sh", "-c", cmdStr)
+	cmd.WaitDelay = 5 * time.Second
+	out, err := moduleCombinedOutput(cmd)
+	if moduleStopped(ctx) {
+		return []byte("container_exec 已中止" + moduleStopMsg), moduleStopExit
+	}
+	if cctx.Err() == context.DeadlineExceeded {
 		return []byte("container_exec 超时"), 1
 	}
 	if len(out) > 256*1024 {

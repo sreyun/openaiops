@@ -14,7 +14,7 @@ import (
 
 func firmwareRoutes(hits *int32) map[string]string {
 	return map[string]string{
-		"/redfish/v1": `{"UpdateService":{"@odata.id":"/redfish/v1/UpdateService"}}`,
+		"/redfish/v1":               `{"UpdateService":{"@odata.id":"/redfish/v1/UpdateService"}}`,
 		"/redfish/v1/UpdateService": `{"FirmwareInventory":{"@odata.id":"/redfish/v1/UpdateService/FirmwareInventory"}}`,
 		"/redfish/v1/UpdateService/FirmwareInventory": `{"Members":[
 			{"@odata.id":"/redfish/v1/UpdateService/FirmwareInventory/BIOS"},
@@ -84,9 +84,9 @@ func TestFirmwareFollowsUpdateServiceLink(t *testing.T) {
 	// 固件挂在非标准路径上：只有跟随 ServiceRoot→UpdateService→FirmwareInventory 才找得到
 	base := huaweiRoutes()
 	custom := map[string]string{
-		"/redfish/v1":                  `{"UpdateService":{"@odata.id":"/redfish/v1/UpdateSvc"}}`,
-		"/redfish/v1/UpdateSvc":        `{"FirmwareInventory":{"@odata.id":"/redfish/v1/UpdateSvc/FwInv"}}`,
-		"/redfish/v1/UpdateSvc/FwInv":  `{"Members":[{"@odata.id":"/redfish/v1/UpdateSvc/FwInv/1"}]}`,
+		"/redfish/v1":                   `{"UpdateService":{"@odata.id":"/redfish/v1/UpdateSvc"}}`,
+		"/redfish/v1/UpdateSvc":         `{"FirmwareInventory":{"@odata.id":"/redfish/v1/UpdateSvc/FwInv"}}`,
+		"/redfish/v1/UpdateSvc/FwInv":   `{"Members":[{"@odata.id":"/redfish/v1/UpdateSvc/FwInv/1"}]}`,
 		"/redfish/v1/UpdateSvc/FwInv/1": `{"Name":"iBMC","Version":"6.22.00.00"}`,
 	}
 	var hits int32

@@ -9,7 +9,7 @@ import (
 // CmdPolicyConfig controls playbook / remediation shell command safety.
 // Mode: "advisory" = log-only for allowlist miss (still blocks danger); "strict" = reject non-allowlisted.
 type CmdPolicyConfig struct {
-	Mode            string   `json:"mode,omitempty"`              // advisory | strict (default strict for auto-remediation path)
+	Mode            string   `json:"mode,omitempty"`             // advisory | strict (default strict for auto-remediation path)
 	AllowPrefixes   []string `json:"allow_prefixes,omitempty"`   // optional extra allow prefixes
 	DenyPatterns    []string `json:"deny_patterns,omitempty"`    // extra deny regexes
 	DisableBuiltins bool     `json:"disable_builtins,omitempty"` // if true, only AllowPrefixes (dangerous)
@@ -52,6 +52,10 @@ func evaluateDiagCommand(command string) (bool, string) {
 		"kubectl get", "kubectl describe", "wc", "sort", "uniq", "cut", "tr", "nl", "tac",
 		"column", "date", "hostname", "uname", "who", "w",
 	}
+	// 保留这份子串清单只为给出"命中了哪一条"的可读理由；真正的判定用
+	// deniedSensitivePath——它会先把路径规范化。少了规范化，cat /etc//shadow 与
+	// cat /etc/../etc/shadow 都能一路走过去：只读诊断通道读到 /etc/shadow，
+	// 比读不到更糟的是没人知道它读过。
 	deniedPaths := []string{
 		"/etc/shadow", "/etc/gshadow", "/etc/master.passwd",
 		".ssh/", ".gnupg/", ".aws/", ".kube/config",
@@ -74,6 +78,17 @@ func evaluateDiagCommand(command string) (bool, string) {
 		for _, dp := range deniedPaths {
 			if strings.Contains(segLower, dp) {
 				return false, fmt.Sprintf("诊断命令包含敏感路径 %q，已拦截", dp)
+			}
+		}
+		// 逐个"看起来像路径"的参数做规范化判定：等价写法（/etc//shadow、
+		// /etc/../etc/shadow）、私钥文件、/proc/<pid>/environ，以及 Agent 自己的
+		// config.yaml（内含安装 token 与 relay_secret，读走即可让任意机器注册进面板）。
+		for _, tok := range strings.Fields(seg) {
+			if !strings.ContainsAny(tok, `/\`) {
+				continue
+			}
+			if deniedSensitivePath(strings.Trim(tok, `"'`)) {
+				return false, fmt.Sprintf("诊断命令包含敏感路径 %q，已拦截", tok)
 			}
 		}
 	}

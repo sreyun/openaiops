@@ -72,9 +72,9 @@ const (
 
 // ZMODEM header prefixes
 var (
-	hexHeaderPrefix   = []byte{ZPAD, ZPAD, ZDLE, ZHEX}   // **\x18B
-	bin16Prefix       = []byte{ZPAD, ZDLE, ZBIN}          // *\x18A
-	bin32Prefix       = []byte{ZPAD, ZDLE, ZBIN32}        // *\x18C
+	hexHeaderPrefix = []byte{ZPAD, ZPAD, ZDLE, ZHEX} // **\x18B
+	bin16Prefix     = []byte{ZPAD, ZDLE, ZBIN}       // *\x18A
+	bin32Prefix     = []byte{ZPAD, ZDLE, ZBIN32}     // *\x18C
 )
 
 // HasZmodemHeader checks if data contains a ZMODEM header prefix.
@@ -180,7 +180,8 @@ func parseHexFrame(data []byte) (*ZmFrame, int, error) {
 
 // parseBinFrame parses a binary ZMODEM header.
 // Format: *\x18A [type][flags:4] [payload...] [crc:2]  (bin-16)
-//         *\x18C [type][flags:4] [payload...] [crc:4]  (bin-32)
+//
+//	*\x18C [type][flags:4] [payload...] [crc:4]  (bin-32)
 //
 // For ZDATA frames, also extracts subpacket data from the bytes following
 // the binary header. ZDATA subpackets are: ZDLE [subType] [data] [CRC16:2].
@@ -422,11 +423,11 @@ func crc16Xmodem(data []byte) uint16 {
 type zmState int
 
 const (
-	zmIdle    zmState = iota
-	zmInit    zmState = iota // waiting for ZRQINIT
-	zmFile    zmState = iota // file info received
-	zmData    zmState = iota // receiving/sending data
-	zmEnd     zmState = iota // session ending
+	zmIdle zmState = iota
+	zmInit zmState = iota // waiting for ZRQINIT
+	zmFile zmState = iota // file info received
+	zmData zmState = iota // receiving/sending data
+	zmEnd  zmState = iota // session ending
 )
 
 // ZmSession manages a ZMODEM file transfer session.

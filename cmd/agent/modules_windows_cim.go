@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -61,15 +62,15 @@ const winPSModelScript = `[Console]::OutputEncoding=[Text.Encoding]::UTF8; $Erro
 const winPSPkgScript = `[Console]::OutputEncoding=[Text.Encoding]::UTF8; $ErrorActionPreference='SilentlyContinue'; $pkgs=@(); try { $pkgs=@(Get-Package -ErrorAction SilentlyContinue | Select-Object -First 200) } catch {}; if ($pkgs -and $pkgs.Count -gt 0) { foreach ($p in $pkgs) { Write-Output ((([string]$p.Name) + [char]9 + ([string]$p.Version))) } } else { Write-Output '未找到已安装软件包（Get-Package 为空）' }`
 
 type winBasicsCache struct {
-	mu       sync.Mutex
-	expiry   time.Time
-	disk     []winDiskRow
-	memTot   uint64
-	memFree  uint64
-	cpuLoad  float64
-	model    string
+	mu        sync.Mutex
+	expiry    time.Time
+	disk      []winDiskRow
+	memTot    uint64
+	memFree   uint64
+	cpuLoad   float64
+	model     string
 	bootStamp string // yyyyMMddHHmmss from CIM
-	rawOK    bool
+	rawOK     bool
 }
 
 var winBasics = &winBasicsCache{}
@@ -153,7 +154,7 @@ func winCollectBootStamp() string {
 	return winBasics.bootStamp
 }
 
-func winCIMDiskUsageText() ([]byte, int) {
+func winCIMDiskUsageText(ctx context.Context) ([]byte, int) {
 	winEnsureBasics()
 	if rows := winBasics.disk; len(rows) > 0 {
 		var b strings.Builder
@@ -169,7 +170,7 @@ func winCIMDiskUsageText() ([]byte, int) {
 		b.WriteByte('\n')
 		return []byte(b.String()), 0
 	}
-	fb, exit := runModuleCmds([][]string{{"cmd", "/c", "wmic logicaldisk get Caption,FreeSpace,Size /format:list"}})
+	fb, exit := runModuleCmds(ctx, [][]string{{"cmd", "/c", "wmic logicaldisk get Caption,FreeSpace,Size /format:list"}})
 	if exit == 0 && !winLooksEmptyOrFailed(string(fb)) {
 		return fb, 0
 	}
@@ -186,7 +187,7 @@ func winCIMDiskUsageText() ([]byte, int) {
 	return []byte(b.String()), 1
 }
 
-func winCIMMemInfoText() ([]byte, int) {
+func winCIMMemInfoText(ctx context.Context) ([]byte, int) {
 	winEnsureBasics()
 	if winBasics.memTot > 0 {
 		var b strings.Builder
@@ -202,10 +203,10 @@ func winCIMMemInfoText() ([]byte, int) {
 		b.WriteByte('\n')
 		return []byte(b.String()), 0
 	}
-	return runModuleCmds([][]string{{"cmd", "/c", "wmic OS get FreePhysicalMemory,TotalVisibleMemorySize /format:list"}})
+	return runModuleCmds(ctx, [][]string{{"cmd", "/c", "wmic OS get FreePhysicalMemory,TotalVisibleMemorySize /format:list"}})
 }
 
-func winCIMCPULoadText() ([]byte, int) {
+func winCIMCPULoadText(ctx context.Context) ([]byte, int) {
 	winEnsureBasics()
 	if winBasics.cpuLoad > 0 || winBasics.rawOK {
 		var b strings.Builder
@@ -221,10 +222,10 @@ func winCIMCPULoadText() ([]byte, int) {
 		b.WriteByte('\n')
 		return []byte(b.String()), 0
 	}
-	return runModuleCmds([][]string{{"cmd", "/c", "wmic cpu get LoadPercentage,NumberOfCores /format:list"}})
+	return runModuleCmds(ctx, [][]string{{"cmd", "/c", "wmic cpu get LoadPercentage,NumberOfCores /format:list"}})
 }
 
-func winCIMPkgListText() ([]byte, int) {
+func winCIMPkgListText(ctx context.Context) ([]byte, int) {
 	out := winRunPS(25, winPSPkgScript)
 	if !winLooksEmptyOrFailed(out) && !strings.Contains(out, "Get-Package 为空") {
 		var b strings.Builder

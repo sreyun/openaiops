@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,10 +12,23 @@ import (
 	"time"
 )
 
-func composeCLI() (bin string, argsPrefix []string) {
+// composeCLI 探测可用的 compose 实现。
+//
+// 探测本身也要能被打断：原来这里是裸 exec.Command(...).Run()，既没有超时也不认取消——
+// docker 客户端在守护进程僵住时可以挂上几分钟，于是「停止剧本」连一步都退不出来。
+func composeCLI(ctx context.Context) (bin string, argsPrefix []string) {
+	ctx = moduleCtx(ctx)
+	probe := func(name string, args ...string) bool {
+		pctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(pctx, name, args...)
+		cmd.WaitDelay = 5 * time.Second
+		_, err := moduleCombinedOutput(cmd)
+		return err == nil
+	}
 	// Prefer "docker compose" (v2 plugin), then standalone docker-compose, then podman-compose.
 	if _, err := exec.LookPath("docker"); err == nil {
-		if err := exec.Command("docker", "compose", "version").Run(); err == nil {
+		if probe("docker", "compose", "version") {
 			return "docker", []string{"compose"}
 		}
 	}
@@ -25,7 +39,7 @@ func composeCLI() (bin string, argsPrefix []string) {
 		return "podman-compose", nil
 	}
 	if _, err := exec.LookPath("podman"); err == nil {
-		if err := exec.Command("podman", "compose", "version").Run(); err == nil {
+		if probe("podman", "compose", "version") {
 			return "podman", []string{"compose"}
 		}
 	}
@@ -33,18 +47,38 @@ func composeCLI() (bin string, argsPrefix []string) {
 }
 
 // moduleComposeList lists compose projects on the host.
-func moduleComposeList(args map[string]string) ([]byte, int) {
-	bin, prefix := composeCLI()
+func moduleComposeList(ctx context.Context, args map[string]string) ([]byte, int) {
+	ctx = moduleCtx(ctx)
+	// 停止检查要在探测 CLI 之前：ctx 已取消时探测命令根本起不来，落到 bin=="" 分支就会
+	// 把一次「已停止」报成「这台机器没装 compose」。
+	if moduleStopped(ctx) {
+		return []byte("container_compose_ls " + moduleStopMsg), moduleStopExit
+	}
+	bin, prefix := composeCLI(ctx)
 	if bin == "" {
 		return []byte("skip: 未找到 docker compose / podman-compose，跳过 Compose 列表\n"), 0
 	}
+	// 列表查询原来也是裸 exec.Command：没超时、不认取消。30s 对一次 ls 足够宽。
+	run := func(cmdArgs []string) ([]byte, error) {
+		lctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(lctx, bin, cmdArgs...)
+		cmd.WaitDelay = 5 * time.Second
+		return moduleCombinedOutput(cmd)
+	}
 	cmdArgs := append(append([]string{}, prefix...), "ls", "-a", "--format", "json")
-	out, err := exec.Command(bin, cmdArgs...).CombinedOutput()
+	out, err := run(cmdArgs)
 	if err != nil {
+		if moduleStopped(ctx) {
+			return []byte("container_compose_ls 已中止" + moduleStopMsg), moduleStopExit
+		}
 		// Older compose may not support ls --format json; fall back to plain ls.
 		cmdArgs = append(append([]string{}, prefix...), "ls", "-a")
-		out2, err2 := exec.Command(bin, cmdArgs...).CombinedOutput()
+		out2, err2 := run(cmdArgs)
 		if err2 != nil {
+			if moduleStopped(ctx) {
+				return []byte("container_compose_ls 已中止" + moduleStopMsg), moduleStopExit
+			}
 			msg := strings.TrimSpace(string(out))
 			if msg == "" {
 				msg = err.Error()
@@ -73,8 +107,13 @@ func moduleComposeList(args map[string]string) ([]byte, int) {
 
 // moduleComposeAction runs compose up/down/ps/logs/pull/restart for a project or file.
 // Args: action, project|name, file (compose yaml path), services (optional), timeout_sec.
-func moduleComposeAction(args map[string]string) ([]byte, int) {
-	bin, prefix := composeCLI()
+func moduleComposeAction(ctx context.Context, args map[string]string) ([]byte, int) {
+	ctx = moduleCtx(ctx)
+	// 同 moduleComposeList：先判停止，再探测 CLI。
+	if moduleStopped(ctx) {
+		return []byte("compose " + moduleStopMsg), moduleStopExit
+	}
+	bin, prefix := composeCLI(ctx)
 	if bin == "" {
 		return []byte("未找到 docker compose / docker-compose / podman-compose"), 1
 	}
@@ -146,34 +185,32 @@ func moduleComposeAction(args map[string]string) ([]byte, int) {
 			timeout = time.Duration(n) * time.Second
 		}
 	}
-	cmd := exec.Command(bin, cmdArgs...)
-	done := make(chan struct {
-		out []byte
-		err error
-	}, 1)
-	go func() {
-		out, err := cmd.CombinedOutput()
-		done <- struct {
-			out []byte
-			err error
-		}{out, err}
-	}()
-	select {
-	case r := <-done:
-		if r.err != nil {
-			msg := strings.TrimSpace(string(r.out))
-			if msg == "" {
-				msg = r.err.Error()
-			}
-			return []byte(msg), 1
-		}
-		out := r.out
-		if len(out) > 512*1024 {
-			out = append(out[:512*1024], []byte("\n…[truncated]")...)
-		}
-		return out, 0
-	case <-time.After(timeout):
-		_ = cmd.Process.Kill()
+	if moduleStopped(ctx) {
+		return []byte("compose " + action + " " + moduleStopMsg), moduleStopExit
+	}
+	// 原来这里是 goroutine + time.After + Process.Kill()：超时能杀进程，但「停止剧本」杀不动，
+	// 而且超时分支一走，那个 goroutine 还挂在 CombinedOutput 上直到进程真的收尸。改成挂在会话
+	// ctx 派生出的 cctx 上，超时与停止走同一条杀进程路径，WaitDelay 兜住管道不肯关的情况。
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	cmd := exec.CommandContext(cctx, bin, cmdArgs...)
+	cmd.WaitDelay = 5 * time.Second
+	out, err := moduleCombinedOutput(cmd)
+	if moduleStopped(ctx) {
+		return []byte(fmt.Sprintf("compose %s 已中止%s", action, moduleStopMsg)), moduleStopExit
+	}
+	if cctx.Err() == context.DeadlineExceeded {
 		return []byte(fmt.Sprintf("compose %s 超时", action)), 1
 	}
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			msg = err.Error()
+		}
+		return []byte(msg), 1
+	}
+	if len(out) > 512*1024 {
+		out = append(out[:512*1024], []byte("\n…[truncated]")...)
+	}
+	return out, 0
 }

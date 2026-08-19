@@ -95,8 +95,8 @@ const (
 	tokenAdjustDefault  = 0x0080
 	tokenAdjustSessID   = 0x0100
 	maximumAllowed      = 0x02000000
-	securityImpersonate = 2 // SecurityImpersonation
-	tokenPrimary        = 1 // TokenPrimary
+	securityImpersonate = 2  // SecurityImpersonation
+	tokenPrimary        = 1  // TokenPrimary
 	tokenSessionID      = 12 // TokenSessionId (TOKEN_INFORMATION_CLASS)
 
 	createUnicodeEnv   = 0x00000400
@@ -181,6 +181,7 @@ func isRDPStation(name string) bool {
 //  4. Disconnected RDP (virtual desktop may still render)
 //  5. Any disconnected session
 //  6. Physical console / fallback
+//
 // Session 0 is always skipped.
 func activeUserSession() uint32 {
 	var pInfo unsafe.Pointer

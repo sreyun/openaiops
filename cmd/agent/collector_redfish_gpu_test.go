@@ -11,9 +11,9 @@ import "testing"
 // **Systems 下、单数 PCIeDevice**；且 iDRAC8 明确不上报 Model/PartNumber。
 func idrac8Routes() map[string]string {
 	return map[string]string{
-		"/redfish/v1/Systems":  `{"Members":[{"@odata.id":"/redfish/v1/Systems/System.Embedded.1"}]}`,
-		"/redfish/v1/Chassis":  `{"Members":[{"@odata.id":"/redfish/v1/Chassis/System.Embedded.1"}]}`,
-		"/redfish/v1/Managers": `{"Members":[{"@odata.id":"/redfish/v1/Managers/iDRAC.Embedded.1"}]}`,
+		"/redfish/v1/Systems":                   `{"Members":[{"@odata.id":"/redfish/v1/Systems/System.Embedded.1"}]}`,
+		"/redfish/v1/Chassis":                   `{"Members":[{"@odata.id":"/redfish/v1/Chassis/System.Embedded.1"}]}`,
+		"/redfish/v1/Managers":                  `{"Members":[{"@odata.id":"/redfish/v1/Managers/iDRAC.Embedded.1"}]}`,
 		"/redfish/v1/Managers/iDRAC.Embedded.1": `{"Model":"iDRAC8","FirmwareVersion":"2.70.70.70"}`,
 		"/redfish/v1/Systems/System.Embedded.1": `{
 			"Status":{"Health":"OK","State":"Enabled"},

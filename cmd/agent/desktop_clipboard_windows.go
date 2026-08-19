@@ -9,17 +9,17 @@ import (
 )
 
 var (
-	procEnumDisplayMonitors = modUser32.NewProc("EnumDisplayMonitors")
-	procGetMonitorInfoW     = modUser32.NewProc("GetMonitorInfoW")
-	procOpenClipboard       = modUser32.NewProc("OpenClipboard")
-	procCloseClipboard      = modUser32.NewProc("CloseClipboard")
-	procEmptyClipboard      = modUser32.NewProc("EmptyClipboard")
-	procGetClipboardData    = modUser32.NewProc("GetClipboardData")
-	procSetClipboardData    = modUser32.NewProc("SetClipboardData")
+	procEnumDisplayMonitors        = modUser32.NewProc("EnumDisplayMonitors")
+	procGetMonitorInfoW            = modUser32.NewProc("GetMonitorInfoW")
+	procOpenClipboard              = modUser32.NewProc("OpenClipboard")
+	procCloseClipboard             = modUser32.NewProc("CloseClipboard")
+	procEmptyClipboard             = modUser32.NewProc("EmptyClipboard")
+	procGetClipboardData           = modUser32.NewProc("GetClipboardData")
+	procSetClipboardData           = modUser32.NewProc("SetClipboardData")
 	procIsClipboardFormatAvailable = modUser32.NewProc("IsClipboardFormatAvailable")
-	procGlobalAlloc         = modkernel32.NewProc("GlobalAlloc")
-	procGlobalLock          = modkernel32.NewProc("GlobalLock")
-	procGlobalUnlock        = modkernel32.NewProc("GlobalUnlock")
+	procGlobalAlloc                = modkernel32.NewProc("GlobalAlloc")
+	procGlobalLock                 = modkernel32.NewProc("GlobalLock")
+	procGlobalUnlock               = modkernel32.NewProc("GlobalUnlock")
 )
 
 type rectWin struct {

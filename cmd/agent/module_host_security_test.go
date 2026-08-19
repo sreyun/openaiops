@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"runtime"
@@ -43,7 +44,7 @@ func TestEnsureCommonBinPATH(t *testing.T) {
 }
 
 func TestModuleHostSecurityScanClamAVOff(t *testing.T) {
-	raw, code := moduleHostSecurityScan(map[string]string{"clamav": "0"})
+	raw, code := moduleHostSecurityScan(context.Background(), map[string]string{"clamav": "0"})
 	if code != 0 {
 		t.Fatalf("exit %d: %s", code, raw)
 	}
@@ -66,7 +67,7 @@ func TestModuleHostSecurityScanClamAVOff(t *testing.T) {
 }
 
 func TestModuleHostSecurityJSONShape(t *testing.T) {
-	raw, code := moduleHostSecurityScan(map[string]string{"clamav": "false"})
+	raw, code := moduleHostSecurityScan(context.Background(), map[string]string{"clamav": "false"})
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}

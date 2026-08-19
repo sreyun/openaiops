@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"path"
 	"regexp"
 	"strings"
 )
@@ -62,9 +63,9 @@ var knownPlaybookModules = map[string]playbookModuleMeta{
 	"java_processes":      {Name: "java_processes", ReadOnly: true, Domain: "java", Desc: "JVM 进程清单与启动参数判读（堆上限/收集器/OOM 转储开关；args.full=1 附原始参数）"},
 	"java_jvm_info":       {Name: "java_jvm_info", ReadOnly: true, Domain: "java", Desc: "JVM 运行时生效参数（jinfo；args.pid|name 指定进程，args.sysprops=1 附系统属性）"},
 	"java_gc_stat":        {Name: "java_gc_stat", ReadOnly: true, Domain: "java", Desc: "GC 健康度：多次采样算窗口内 YGC/FGC 增量与老年代回收效果（args.interval_ms/count）"},
-	"java_thread_dump":    {Name: "java_thread_dump", ReadOnly: true, Domain: "java", Desc: "线程转储判读：死锁检测、状态分布、栈顶聚类、线程池饱和（args.full=1 附原文）"},
+	"java_thread_dump":    {Name: "java_thread_dump", ReadOnly: true, Domain: "java", Desc: "线程转储判读：死锁检测、状态分布、栈顶聚类、线程池饱和（args.full=1 附原文；args.force=1 会挂起目标进程，且只对已发现的 JVM 生效）"},
 	"java_heap_histo":     {Name: "java_heap_histo", ReadOnly: true, Domain: "java", Desc: "堆对象直方图 Top-N（args.top；**args.live=1 会触发 Full GC 停顿**，默认关闭）"},
-	"java_exception_scan": {Name: "java_exception_scan", ReadOnly: true, Domain: "java", Desc: "应用日志异常按类聚合，OOM/StackOverflow 提级（args.path 指定日志，默认自动发现）"},
+	"java_exception_scan": {Name: "java_exception_scan", ReadOnly: true, Domain: "java", Desc: "应用日志异常按类聚合，OOM/StackOverflow 提级（args.path 指定日志，默认自动发现；与 file_head 共用敏感路径闸门）"},
 	"java_app_inspect":    {Name: "java_app_inspect", ReadOnly: true, Domain: "java", Desc: "一站式 Java 巡检：进程/参数/GC/线程/异常五项串跑并汇总「发现」，可直接交 AI 诊断"},
 
 	// —— 大数据运维（只读）——
@@ -97,22 +98,9 @@ func validatePlaybookModule(st PlaybookStep) error {
 			return fmt.Errorf("模块 %s 缺少必填参数 %s", mod, meta.RequiredArg)
 		}
 	}
-	if mod == "file_head" || mod == "file_stat" {
-		path := ""
-		if st.Args != nil {
-			path = st.Args["path"]
-		}
-		if deniedSensitivePath(path) {
-			return fmt.Errorf("模块 %s 拒绝访问敏感路径", mod)
-		}
-	}
-	if mod == "copy" {
-		dest := ""
-		if st.Args != nil {
-			dest = st.Args["dest"]
-		}
-		if deniedSensitivePath(dest) {
-			return fmt.Errorf("copy 拒绝写入敏感路径")
+	for _, k := range pathLikeModuleArgs {
+		if deniedSensitivePath(st.Args[k]) {
+			return fmt.Errorf("模块 %s 的参数 %s 指向敏感路径，已拒绝", mod, k)
 		}
 	}
 	if mod == "host_inspect" && st.Args != nil {
@@ -124,18 +112,52 @@ func validatePlaybookModule(st PlaybookStep) error {
 	return nil
 }
 
+// pathLikeModuleArgs 列出所有"值是宿主机路径"的模块参数名。
+//
+// 敏感路径闸门必须挂在**参数**上，不能挂在模块名上。原来这里只查 file_head / file_stat
+// 的 path 与 copy 的 dest，于是 java_exception_scan 的 args.path——Agent 拿到它就直接
+// 读那个文件——整个绕过了闸门。按模块名挂载的闸门有一个必然的失效方式：下一个带路径
+// 参数的模块只要作者没想起来在这里补一行，洞就又开了，而且没有任何信号。
+// 按参数名判定，新模块默认被覆盖；漏的是"起了个新参数名"，比漏一整个模块窄得多。
+var pathLikeModuleArgs = []string{"path", "dest", "src", "file", "log_path", "config"}
+
+// deniedSensitivePath 在**保存/下发之前**挡住敏感路径。Agent 侧 agentDeniedPath 是同一
+// 份清单的最后一道闸；两边都要有：这一层给出可读的报错，那一层不信任"服务端没被绕过"。
+//
+// 除系统凭据外必须包含 Agent 自己的安装目录：config.yaml 里是安装 token 与 relay_secret，
+// 读走它等于拿到能让任意机器注册进面板的凭据——一个"只读"巡检不该有这个能力。
+// /proc/<pid>/environ 同理（进程环境变量里是数据库口令与云 AK）。
+//
+// 匹配前统一分隔符并 Clean，否则 /etc/./shadow、C:\Windows\..\System32\config\SAM
+// 这类等价写法可以绕过。
 func deniedSensitivePath(p string) bool {
-	p = strings.ToLower(strings.TrimSpace(p))
-	if p == "" {
+	raw := strings.TrimSpace(p)
+	if raw == "" {
 		return false
 	}
+	norm := strings.ToLower(path.Clean(strings.ReplaceAll(raw, "\\", "/")))
 	deny := []string{
 		"/etc/shadow", "/etc/gshadow", "/etc/sudoers", "/etc/master.passwd",
 		".ssh/", ".gnupg/", ".aws/", ".kube/config",
-		"/root/.bash_history", "\\sam", "\\system32\\config\\sam",
+		"/root/.bash_history",
+		"/system32/config/sam", "/system32/config/security",
 	}
 	for _, d := range deny {
-		if strings.Contains(p, d) {
+		if strings.Contains(norm, d) {
+			return true
+		}
+	}
+	base := path.Base(norm)
+	for _, suf := range []string{".pem", ".key", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", ".kdbx"} {
+		if strings.HasSuffix(base, suf) || base == suf {
+			return true
+		}
+	}
+	if strings.HasPrefix(norm, "/proc/") && strings.HasSuffix(norm, "/environ") {
+		return true
+	}
+	for _, f := range []string{"config.yaml", "config.json", "agent_state.json"} {
+		if base == f && (strings.Contains(norm, "/aiops-agent/") || strings.Contains(norm, "/.aiops-agent/")) {
 			return true
 		}
 	}

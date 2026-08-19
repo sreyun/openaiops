@@ -614,7 +614,7 @@ func deskNeedsRawH264() bool {
 }
 
 func deskLegacyCaptureHost() bool { return false }
-func deskAVFScreenIndex() int    { return -1 }
+func deskAVFScreenIndex() int     { return -1 }
 
 func linuxVKName(vk int) string {
 	switch vk {

@@ -25,7 +25,7 @@ func runSafe(name string, fn func()) {
 //   - collector_windows.go (Win32 API via syscall.NewLazyDLL)
 //   - collector_darwin.go  (sysctl + system tools)
 //   - collector_other.go   (stub; base metrics come from a core plugin such as
-//                            plugins/core_metrics.py via psutil)
+//     plugins/core_metrics.py via psutil)
 type Collector interface {
 	Collect() (shared.Metrics, error)
 	Supported() bool

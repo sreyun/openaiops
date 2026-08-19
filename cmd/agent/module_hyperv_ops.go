@@ -13,7 +13,8 @@ import (
 
 // moduleHyperVPower starts/stops/restarts a Hyper-V guest on this host.
 // Args: action=start|stop|restart|force_stop; vm_id (GUID) preferred; name fallback.
-func moduleHyperVPower(args map[string]string) ([]byte, int) {
+func moduleHyperVPower(ctx context.Context, args map[string]string) ([]byte, int) {
+	ctx = moduleCtx(ctx)
 	action := strings.ToLower(strings.TrimSpace(args["action"]))
 	vmID := strings.TrimSpace(args["vm_id"])
 	name := strings.TrimSpace(args["name"])
@@ -37,7 +38,7 @@ func moduleHyperVPower(args map[string]string) ([]byte, int) {
 	default:
 		return []byte("未知 action: " + action), 1
 	}
-	return runHyperVOpsPS(ps, 120*time.Second)
+	return runHyperVOpsPS(ctx, ps, 120*time.Second)
 }
 
 // moduleHyperVSet updates processor count and/or memory settings.
@@ -49,7 +50,8 @@ func moduleHyperVPower(args map[string]string) ([]byte, int) {
 //
 // Changing CPU/memory while Running usually fails on Hyper-V; we preflight and
 // return a clear Chinese error so the UI can prompt to shut down first.
-func moduleHyperVSet(args map[string]string) ([]byte, int) {
+func moduleHyperVSet(ctx context.Context, args map[string]string) ([]byte, int) {
+	ctx = moduleCtx(ctx)
 	vmID := strings.TrimSpace(args["vm_id"])
 	name := strings.TrimSpace(args["name"])
 	if vmID == "" && name == "" {
@@ -155,7 +157,7 @@ if ($st -ne 'Off' -and $st -ne 'Saved') {
 	}
 
 	parts = append(parts, `'ok config ' + $vm.Name`)
-	return runHyperVOpsPS(strings.Join(parts, "; "), 120*time.Second)
+	return runHyperVOpsPS(ctx, strings.Join(parts, "; "), 120*time.Second)
 }
 
 func hypervVMSelectPS(vmID, name string) string {
@@ -167,12 +169,20 @@ func hypervVMSelectPS(vmID, name string) string {
 	return fmt.Sprintf(`$ErrorActionPreference='Stop'; $vm=Get-VM -Name '%s' -ErrorAction Stop`, n)
 }
 
-func runHyperVOpsPS(script string, timeout time.Duration) ([]byte, int) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+func runHyperVOpsPS(ctx context.Context, script string, timeout time.Duration) ([]byte, int) {
+	ctx = moduleCtx(ctx)
+	if moduleStopped(ctx) {
+		return []byte("hyperv 操作" + moduleStopMsg), moduleStopExit
+	}
+	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script)
-	out, err := cmd.CombinedOutput()
-	if ctx.Err() == context.DeadlineExceeded {
+	cmd := exec.CommandContext(cctx, "powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script)
+	cmd.WaitDelay = 5 * time.Second
+	out, err := moduleCombinedOutput(cmd)
+	if moduleStopped(ctx) {
+		return []byte("hyperv 操作已中止" + moduleStopMsg), moduleStopExit
+	}
+	if cctx.Err() == context.DeadlineExceeded {
 		return []byte("hyperv 操作超时"), 1
 	}
 	if err != nil {

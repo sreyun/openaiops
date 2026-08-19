@@ -17,7 +17,7 @@ import (
 // pluginOutput is the JSON contract every plugin prints to stdout. All fields
 // are optional:
 //   - base:    base system metrics (used only when the native collector is
-//              unsupported, e.g. on Windows/macOS via psutil)
+//     unsupported, e.g. on Windows/macOS via psutil)
 //   - metrics: custom named gauges (mysql.connections, nginx.rps, ...)
 //   - events:  discrete findings from the Python/AI/automation layer
 type pluginOutput struct {

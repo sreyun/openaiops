@@ -1432,6 +1432,7 @@ func deskPreferredCodec() string {
 	return ""
 }
 func deskNeedsRawH264() bool { return deskWorkerMode }
+
 // deskLegacyCaptureHost is true on pre–Windows 10 kernels (Server 2012/R2, Win8/8.1)
 // where full-res JPEG @15fps routinely stalls the reverse channel.
 func deskLegacyCaptureHost() bool {
@@ -1444,4 +1445,4 @@ func deskLegacyCaptureHost() bool {
 	}
 	return false
 }
-func deskAVFScreenIndex() int    { return -1 }
+func deskAVFScreenIndex() int { return -1 }
