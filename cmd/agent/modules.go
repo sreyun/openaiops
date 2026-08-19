@@ -118,6 +118,20 @@ func (a *Agent) runModuleCtx(ctx context.Context, payload string) (out []byte, c
 		return moduleAuthFailures()
 	case "bigdata_jps":
 		return moduleBigdataJPS()
+	case "java_processes":
+		return moduleJavaProcesses(mc.Args)
+	case "java_jvm_info":
+		return moduleJavaJVMInfo(mc.Args)
+	case "java_gc_stat":
+		return moduleJavaGCStat(mc.Args)
+	case "java_thread_dump":
+		return moduleJavaThreadDump(mc.Args)
+	case "java_heap_histo":
+		return moduleJavaHeapHisto(mc.Args)
+	case "java_exception_scan":
+		return moduleJavaExceptionScan(mc.Args)
+	case "java_app_inspect":
+		return moduleJavaAppInspect(mc.Args)
 	case "bigdata_ports":
 		return moduleBigdataPorts()
 	case "service":

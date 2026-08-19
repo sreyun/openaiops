@@ -1019,12 +1019,18 @@ function renderExecResult(exec, opts) {
   window._lastExecResult = exec; // 供「AI 复盘」按钮取用
   $("execResultTitle").textContent = translateExecStatus(exec.status);
   // 有任何主机未成功 → 显示「AI 复盘」按钮（执行中不显示）
+  const done = exec.status !== "running" && exec.status !== "pending_approval";
   const rb = $("execRetroBtn");
   if (rb) {
-    const done = exec.status !== "running" && exec.status !== "pending_approval";
     const hasFail = exec.status === "failed" || exec.status === "partial" || exec.status === "cancelled" || Object.values(exec.host_results || {}).some(r => r.status !== "success");
     rb.style.display = (done && hasFail) ? "" : "none";
   }
+  // 「AI 诊断」与「生成修复剧本」对**成功**的执行同样有意义：只读巡检跑完全绿，
+  // 不等于机器健康——巡检产出的是数据，判断要靠这一步。
+  const db = $("execDiagnoseBtn");
+  if (db) db.style.display = done ? "" : "none";
+  const mb = $("execRemediateBtn");
+  if (mb) mb.style.display = done ? "" : "none";
   const cb = $("execCancelBtn");
   if (cb) {
     const canStop = exec.status === "running" || exec.status === "pending_approval";
@@ -1343,6 +1349,43 @@ function playbookToText(pb) {
   });
   return s;
 }
+/**
+ * 把执行结果整理成**诊断**用的上下文。
+ *
+ * 与 execResultToText 的区别是关键的：那一份只保留失败步骤的输出（复盘只关心哪里错了），
+ * 而只读巡检的价值全在成功步骤的正文里——把它裁掉，诊断就等于对着一片空白作答。
+ * 整体上限 24000 字符：巡检报告很长，但撑爆上下文会让模型把结论截在半路。
+ */
+function execResultToDiagnosisText(exec) {
+  let s = `execution_id=${exec.id || ""}\n剧本：${exec.playbook_name || ""}\n整体状态：${exec.status}\n`;
+  const hosts = Object.values(exec.host_results || {});
+  s += `主机数：${hosts.length}\n`;
+  hosts.slice(0, 20).forEach(r => {
+    s += `\n主机 ${r.hostname || ""}（${r.status}）：`;
+    if (r.reason) s += `\n  原因：${r.reason}`;
+    const steps = r.steps || [];
+    steps.slice(0, 12).forEach(st => {
+      s += `\n  - 步骤[${st.name}] ${st.status}`;
+      const out = String(st.output || "").trim();
+      if (out) s += "\n" + out.slice(0, 4000).split("\n").map(l => "    " + l).join("\n");
+    });
+    if (!steps.length && r.output) {
+      s += "\n" + String(r.output).slice(0, 4000).split("\n").map(l => "    " + l).join("\n");
+    }
+  });
+  return s.slice(0, 24000);
+}
+
+/**
+ * Java 相关的执行走 JVM 专项诊断——通用提示词面对 GC/线程数据只会给出正确但无用的话。
+ */
+function execIsJava(exec) {
+  const name = `${exec.playbook_id || ""} ${exec.playbook_name || ""}`.toLowerCase();
+  if (name.indexOf("java") >= 0 || name.indexOf("jvm") >= 0) return true;
+  return Object.values(exec.host_results || {}).some(r =>
+    (r.steps || []).some(st => String(st.output || "").indexOf("# java_") >= 0));
+}
+
 // 把执行结果整理为聚焦失败的复盘文本
 function execResultToText(exec) {
   let s = `剧本：${exec.playbook_name || ""}\n整体状态：${exec.status}\n操作者：${exec.operator || ""}\n`;
@@ -1376,6 +1419,60 @@ safeAddEventListener("execRetroBtn", "click", () => {
     mode: "analyze",
     context: execResultToText(exec)
   });
+});
+
+// AI 诊断：只读巡检的闭环出口——结论分级 / 逐项异常与证据 / 根因 / 修复建议 / 后续指引
+safeAddEventListener("execDiagnoseBtn", "click", () => {
+  const exec = window._lastExecResult;
+  if (!exec) { toast(I18N.t("exec.no_result", "暂无执行结果"), "err"); return; }
+  const java = execIsJava(exec);
+  openAIAssist({
+    task: java ? "java_diagnosis" : "inspect_diagnosis",
+    title: java
+      ? I18N.t("exec.ai_diagnose_java_title", "AI 诊断 · JVM 专项")
+      : I18N.t("exec.ai_diagnose_title", "AI 诊断 · 巡检结果研判"),
+    mode: "analyze",
+    context: execResultToDiagnosisText(exec)
+  });
+});
+
+/**
+ * 诊断结论 → 修复剧本草稿。
+ *
+ * 刻意回填到剧本编辑器，而不是生成后直接执行：修复动作必须经人逐条核对，再走既有的
+ * 审批与执行链路。定义在这里而不是各页面内联，是因为巡检页（host-inspect.js）要用
+ * 同一条通路——闭环只应该有一个出口。
+ */
+function openRemediationDraft(contextText, title) {
+  if (typeof openAIAssist !== "function") {
+    if (typeof toast === "function") toast(I18N.t("assist.unavailable", "AI 面板未就绪"), "err");
+    return;
+  }
+  openAIAssist({
+    task: "inspect_remediation",
+    title: title || I18N.t("exec.ai_remediate_title", "生成修复剧本草稿"),
+    mode: "analyze",
+    context: contextText,
+    applyLabel: I18N.t("sre.pbgen_apply", "回填到编辑器"),
+    applyTo: (text) => {
+      try {
+        const jsonText = extractFirstCodeBlock(text) || text;
+        const pb = JSON.parse(jsonText);
+        pb.id = ""; // 作为新剧本回填，保存时另建
+        openPlaybookModal(pb);
+        if (typeof toast === "function") toast(I18N.t("exec.remediate_done", "已生成修复剧本草稿，请逐步核对命令与目标后再保存"), "ok");
+      } catch (e) {
+        if (typeof toast === "function") toast(I18N.t("sre.pbgen_bad_json", "AI 输出不是合法剧本 JSON，请查看后手动填写"), "err");
+      }
+    }
+  });
+}
+window.openRemediationDraft = openRemediationDraft;
+
+safeAddEventListener("execRemediateBtn", "click", () => {
+  const exec = window._lastExecResult;
+  if (!exec) { toast(I18N.t("exec.no_result", "暂无执行结果"), "err"); return; }
+  openRemediationDraft(execResultToDiagnosisText(exec));
 });
 
 // AI 辅助：根据自然语言生成整份剧本（名称+描述+步骤），一键回填编辑器

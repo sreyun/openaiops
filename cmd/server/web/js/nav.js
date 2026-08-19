@@ -1070,10 +1070,26 @@ safeAddEventListener("purgeOfflineBtn", "click", purgeOffline);
   safeAddEventListener("voiceCallProvider", "change", function() { if (typeof updateVoiceProviderFields === "function") updateVoiceProviderFields(); });
   // 个人信息
   safeAddEventListener("ddProfile", "click", function() { openProfile(); wrap.classList.remove("open"); });
+  // 关于我们
+  safeAddEventListener("ddAbout", "click", function() { openAbout(); wrap.classList.remove("open"); });
   // 退出登录
   safeAddEventListener("ddLogout", "click", function() { logout(); wrap.classList.remove("open"); });
   // 初始化主题标签
 })();
+// 关于我们：静态文案（与 Android「设置 → 关于我们」同源）+ 运行中的服务端版本号。
+// 版本号来自 /summary（未注入 ldflags 时为占位串 "AIOps"，此时显示 "—"）。
+function openAbout() {
+  const ver = $("aboutVersion");
+  if (ver) {
+    ver.textContent = "—";
+    fetch(`${API}/summary`)
+      .then(r => r.json())
+      .then(s => { if (s && s.version && s.version !== "AIOps") ver.textContent = s.version; })
+      .catch(() => {});
+  }
+  openMask("aboutMask");
+}
+
 // 旧的 profileBtn 直接打开个人信息 — 已被上面的下拉菜单替代
 // #usersBtn 已废弃（用户管理并入个人信息四 Tab），仅保留 openUsers() 重定向入口
 safeAddEventListener("profileTabs", "click", function (e) {

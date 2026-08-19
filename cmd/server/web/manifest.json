@@ -1,8 +1,10 @@
 {
-  "name": "AIOps",
+  "id": "/",
+  "name": "AIOps 运维控制台",
   "short_name": "AIOps",
   "description": "主机监控运维平台",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
   "orientation": "any",
   "background_color": "#f5f7fa",

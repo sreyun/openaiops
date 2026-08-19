@@ -350,6 +350,47 @@ aiops_fetch() {
 }
 
 # True only when systemd is the real init (not a container that merely has systemctl on PATH).
+# 取一个 URL 的 HTTP 状态码；取不到（连不上/无工具）时回显空串。
+# 存在的理由：下载失败后必须告诉人**真实的**状态码。原来这里把任何下载失败都解释成
+# 「多半是服务端镜像里缺这个平台的二进制」，于是中继回源失败（502）时，装机的人照着
+# 那个方向去查镜像构建，第一步就走错了。
+aiops_http_status() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -s -o /dev/null -w '%{http_code}' -L --max-time 20 "$1" 2>/dev/null || true
+    return 0
+  fi
+  if command -v wget >/dev/null 2>&1; then
+    wget -S --spider -T 20 -t 1 "$1" 2>&1 | awk '/^  HTTP\//{c=$2} END{print c}' || true
+    return 0
+  fi
+  echo ""
+}
+
+# 按真实状态码给出对症的下一步。
+aiops_explain_http() {
+  # $1=code $2=url
+  case "$1" in
+    404)
+      echo "[AIOps] 404 = 服务端上没有这个平台的 Agent 二进制。"
+      echo "[AIOps] Fix: rebuild server with full agent dist (production Dockerfile, or updated Dockerfile.dev that cross-compiles darwin/linux/windows agents)."
+      ;;
+    502|503|504)
+      echo "[AIOps] $1 = 面板地址前面有一层代理（多半是 Agent 中继模式或反向代理），它连不上真正的服务端。"
+      echo "[AIOps] Fix: 到那台中继/反代机器上看日志（中继会打印「Relay 回源失败」并附真实原因）；"
+      echo "[AIOps]      若中继机需经 HTTP 代理才能出网，要给中继进程设置 HTTP_PROXY/HTTPS_PROXY/NO_PROXY。"
+      ;;
+    401|403)
+      echo "[AIOps] $1 = 下载被拒绝，通常是安装 token 无效或已过期。请到控制台重新获取安装命令。"
+      ;;
+    000|"")
+      echo "[AIOps] 连不上 $2 —— 检查网络可达性、防火墙与端口，以及面板地址是否正确。"
+      ;;
+    *)
+      echo "[AIOps] 服务端返回 $1，请据此排查。"
+      ;;
+  esac
+}
+
 aiops_has_systemd() {
   command -v systemctl >/dev/null 2>&1 || return 1
   if [ -r /proc/1/comm ] && [ "$(cat /proc/1/comm 2>/dev/null)" = "systemd" ]; then
@@ -477,8 +518,9 @@ cd "$DIR"
 NEW=".aiops-agent.new"
 if ! aiops_fetch "$SERVER/dl/$BIN" "$NEW"; then
   rm -f "$NEW"
-  echo "[AIOps] ERROR: failed to download $SERVER/dl/$BIN (HTTP 404 usually means the server image was built without this platform binary)."
-  echo "[AIOps] Fix: rebuild server with full agent dist (production Dockerfile, or updated Dockerfile.dev that cross-compiles darwin/linux/windows agents)."
+  _code=$(aiops_http_status "$SERVER/dl/$BIN")
+  echo "[AIOps] ERROR: failed to download $SERVER/dl/$BIN (HTTP ${_code:-unreachable})"
+  aiops_explain_http "$_code" "$SERVER/dl/$BIN"
   echo "[AIOps] Probe: curl -fsSI \"$SERVER/dl/$BIN\"   # or: wget -S --spider \"$SERVER/dl/$BIN\""
   exit 1
 fi
@@ -1853,8 +1895,14 @@ cd "$DIR"
 # returns 416, so fall back to a plain full GET.
 if ! curl -fSL --retry 3 --retry-delay 2 -C - "$SERVER/dl/$BIN" -o aiops-agent; then
   if ! curl -fsSL "$SERVER/dl/$BIN" -o aiops-agent; then
-    echo "[AIOps] ERROR: failed to download $SERVER/dl/$BIN (HTTP 404 usually means the server image lacks this platform binary)."
-    echo "[AIOps] Fix: rebuild server with full agent dist (production Dockerfile or updated Dockerfile.dev)."
+    _code=$(curl -s -o /dev/null -w '%{http_code}' -L --max-time 20 "$SERVER/dl/$BIN" 2>/dev/null || true)
+    echo "[AIOps] ERROR: failed to download $SERVER/dl/$BIN (HTTP ${_code:-unreachable})"
+    case "$_code" in
+      404) echo "[AIOps] 404 = 服务端上没有这个平台的 Agent 二进制；请用完整 agent dist 重建服务端镜像。" ;;
+      502|503|504) echo "[AIOps] $_code = 上游前面的代理连不上真正的服务端；检查上游地址与该机出网方式（含 HTTP_PROXY）。" ;;
+      401|403) echo "[AIOps] $_code = 下载被拒绝，安装 token 可能无效或已过期。" ;;
+      *) echo "[AIOps] 检查 $SERVER 的可达性与端口。" ;;
+    esac
     exit 1
   fi
 fi

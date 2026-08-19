@@ -614,6 +614,7 @@ function showInspFleetSummary(batch) {
           </select>
         </div>
         <button type="button" class="btn sm ai-assist-btn" id="inspAIFleetBtn">🤖 ${esc(inspT("inspect.ai_fleet", "汇总分析"))}</button>
+        <button type="button" class="btn sm ai-assist-btn" id="inspAIFleetFixBtn">🛠 ${esc(inspT("inspect.ai_fix", "生成修复剧本"))}</button>
       </div>
     </div>
     <div class="insp-advice">
@@ -667,6 +668,8 @@ function showInspFleetSummary(batch) {
     try { full = await inspFetchFullBatch(batch.id); } catch (_) {}
     inspExportBatch(full, fmt);
   };
+  const fleetFixBtn = view.querySelector("#inspAIFleetFixBtn");
+  if (fleetFixBtn) fleetFixBtn.onclick = () => openInspectRemediation(inspectFleetContext(batch));
   const aiBtn = view.querySelector("#inspAIFleetBtn");
   if (aiBtn) aiBtn.onclick = async () => {
     let full = batch;
@@ -727,6 +730,7 @@ function showInspReport(batch, item) {
           <select id="inspExportHostFmt"><option value="excel">Excel</option><option value="markdown">Markdown</option><option value="pdf">PDF</option></select>
         </div>
         <button type="button" class="btn sm ai-assist-btn" id="inspAIAnalyzeBtn">🤖 ${inspT("inspect.ai_analyze", "AI 分析")}</button>
+        <button type="button" class="btn sm ai-assist-btn" id="inspAIFixBtn">🛠 ${inspT("inspect.ai_fix", "生成修复剧本")}</button>
       </div>
     </div>
     <div class="insp-metrics">
@@ -758,6 +762,8 @@ function showInspReport(batch, item) {
   };
   const aiBtn = view.querySelector("#inspAIAnalyzeBtn");
   if (aiBtn) aiBtn.onclick = () => openInspectAIAssist(batch, item, rep);
+  const fixBtn = view.querySelector("#inspAIFixBtn");
+  if (fixBtn) fixBtn.onclick = () => openInspectRemediation(inspectHostContext(batch, item, rep));
   const expBtn = view.querySelector("#inspExportHostBtn");
   if (expBtn) expBtn.onclick = () => {
     const fmt = ($("inspExportHostFmt") || {}).value || "excel";
@@ -923,11 +929,22 @@ async function inspExportBatch(batch, fmt) {
   } catch (e) { toast(String(e.message || e), "err"); }
 }
 
-function openInspectAIAssist(batch, item, rep) {
-  if (typeof openAIAssist !== "function") {
+/**
+ * 「生成修复剧本」——巡检闭环的最后一段。
+ *
+ * 复用 sre.js 的 openRemediationDraft：草稿回填到剧本编辑器，由人逐条核对后再走审批。
+ * 闭环只应该有一个出口，所以这里不自己实现回填。
+ */
+function openInspectRemediation(ctxText) {
+  if (typeof window.openRemediationDraft !== "function") {
     if (typeof toast === "function") toast(inspT("assist.unavailable", "AI 面板未就绪"), "err");
     return;
   }
+  window.openRemediationDraft(ctxText, inspT("inspect.ai_fix_title", "生成修复剧本草稿 · 基于巡检结果"));
+}
+
+/** 单机体检上下文。诊断与修复共用同一份事实，避免两处各整理一遍导致结论对不上。 */
+function inspectHostContext(batch, item, rep) {
   const h = (rep && rep.host) || {};
   const m = (rep && rep.metrics) || {};
   const res = (rep && rep.result) || {};
@@ -952,20 +969,26 @@ function openInspectAIAssist(batch, item, rep) {
     findingLines
   ].join("\n");
   if (ctx.length > 12000) ctx = ctx.slice(0, 12000) + "\n…（已截断）";
+  return { ctx: ctx, hostName: hostName };
+}
+
+function openInspectAIAssist(batch, item, rep) {
+  if (typeof openAIAssist !== "function") {
+    if (typeof toast === "function") toast(inspT("assist.unavailable", "AI 面板未就绪"), "err");
+    return;
+  }
+  const built = inspectHostContext(batch, item, rep);
   openAIAssist({
     task: "host_inspect_analysis",
-    title: inspT("inspect.ai_title", "AI · 主机体检分析") + " · " + hostName,
+    title: inspT("inspect.ai_title", "AI · 主机体检分析") + " · " + built.hostName,
     mode: "analyze",
-    context: ctx,
+    context: built.ctx,
     hint: inspT("inspect.ai_hint", "正在结合体检 findings 与指标生成研判…")
   });
 }
 
-function openInspectFleetAI(batch) {
-  if (typeof openAIAssist !== "function") {
-    toast(inspT("assist.unavailable", "AI 面板未就绪"), "err");
-    return;
-  }
+/** 多机汇总上下文。 */
+function inspectFleetContext(batch) {
   const agg = inspAggregateBatch(batch);
   const lines = [
     `批次：${batch.id} · 主机 ${batch.host_count} · 完成 ${batch.done_count}`,
@@ -977,11 +1000,19 @@ function openInspectFleetAI(batch) {
     "【跨主机高频问题】",
     ...agg.findings.slice(0, 40).map(f => `- [${f.level}] x${f.hosts.length} ${f.message} :: ${f.hosts.slice(0, 6).join(",")}`),
   ];
+  return lines.join("\n").slice(0, 14000);
+}
+
+function openInspectFleetAI(batch) {
+  if (typeof openAIAssist !== "function") {
+    toast(inspT("assist.unavailable", "AI 面板未就绪"), "err");
+    return;
+  }
   openAIAssist({
     task: "host_inspect_analysis",
     title: inspT("inspect.ai_fleet_title", "AI · 多机巡检汇总"),
     mode: "analyze",
-    context: lines.join("\n").slice(0, 14000),
+    context: inspectFleetContext(batch),
     hint: inspT("inspect.ai_fleet_hint", "正在汇总多机问题并生成改进建议…")
   });
 }

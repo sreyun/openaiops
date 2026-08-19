@@ -222,6 +222,10 @@
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
               <span data-i18n="profile.title">个人信息</span>
             </button>
+            <button class="user-dropdown-item" id="ddAbout">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+              <span data-i18n="about.title">关于我们</span>
+            </button>
             <div class="user-dropdown-sep"></div>
             <button class="user-dropdown-item danger" id="ddLogout">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
@@ -2531,6 +2535,48 @@
   </div>
 </div>
 
+<!-- ===== 关于我们弹窗（文案与 Android「设置 → 关于我们」同源）===== -->
+<div class="mask" id="aboutMask" data-close>
+  <div class="modal">
+    <div class="modal-head">
+      <h3 data-i18n="about.title">关于我们</h3>
+      <button class="btn ghost close" data-close-btn aria-label="关闭">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="about-hero">
+        <div class="about-logo" aria-hidden="true">AI</div>
+        <div class="about-hero-txt">
+          <div class="about-name" data-i18n="about.product">智能运维 AIOps</div>
+          <div class="about-meta">
+            <span data-i18n="about.version">版本</span>
+            <span class="mono" id="aboutVersion">—</span>
+          </div>
+        </div>
+      </div>
+      <p class="about-intro" data-i18n="about.intro">智能运维（AIOps）是面向企业基础设施的一体化智能运维平台，覆盖主机监控、网络流量、告警治理、自动化巡检与 AI 辅助诊断，帮助运维团队更快发现、定位并处理故障。</p>
+      <div class="about-caps">
+        <span class="tag" data-i18n="about.cap_monitor">主机监控</span>
+        <span class="tag" data-i18n="about.cap_netflow">网络流量</span>
+        <span class="tag" data-i18n="about.cap_alert">告警治理</span>
+        <span class="tag" data-i18n="about.cap_inspect">自动化巡检</span>
+        <span class="tag" data-i18n="about.cap_ai">AI 辅助诊断</span>
+      </div>
+      <div class="subhead" data-i18n="about.links">相关链接</div>
+      <div class="about-links">
+        <a class="about-link" href="https://aiops.sreyun.com" target="_blank" rel="noopener noreferrer">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+          <span data-i18n="about.website">访问官网 https://aiops.sreyun.com</span>
+        </a>
+        <a class="about-link" href="https://github.com/sreyun/openaiops" target="_blank" rel="noopener noreferrer">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/></svg>
+          <span data-i18n="about.repo_github">开源仓库 github.com/sreyun/openaiops</span>
+        </a>
+      </div>
+      <div class="hint about-copy" data-i18n="about.copyright">© 智能运维 AIOps · 基于 MIT 开源协议发布</div>
+    </div>
+  </div>
+</div>
+
 <!-- ===== On-call / 变更 简易编辑弹窗 ===== -->
 <div class="mask" id="oncallEditMask" data-close>
   <div class="modal">
@@ -3271,6 +3317,8 @@
     <div class="modal-head">
       <h3 id="execResultTitle">执行结果</h3>
       <button type="button" class="btn sm danger" id="execCancelBtn" style="display:none;margin-left:auto">停止执行</button>
+      <button type="button" class="btn sm ai-assist-btn" id="execDiagnoseBtn" style="display:none"><span class="ai-assist-btn-ic">🤖</span><span data-i18n="exec.ai_diagnose">AI 诊断</span></button>
+      <button type="button" class="btn sm ai-assist-btn" id="execRemediateBtn" style="display:none"><span class="ai-assist-btn-ic">🛠</span><span data-i18n="exec.ai_remediate">生成修复剧本</span></button>
       <button type="button" class="btn sm ai-assist-btn" id="execRetroBtn" style="display:none"><span class="ai-assist-btn-ic">🤖</span>AI 复盘</button>
       <button class="btn ghost close" data-close-btn aria-label="关闭">✕</button>
     </div>

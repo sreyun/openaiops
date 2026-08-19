@@ -1,0 +1,132 @@
+{
+  "id": "java",
+  "name": "内置 Java 应用运维包",
+  "version": "1.0.0",
+  "playbooks": [
+    {
+      "id": "java-app-inspect",
+      "name": "Java 应用巡检（只读）",
+      "description": "一站式巡检：JVM 进程与启动参数、运行时生效参数、GC 健康度、线程与阻塞、应用日志异常，末尾汇总「发现」。执行完成后在执行详情里点「AI 诊断」，可直接得到结论分级、根因推断、修复建议与后续指引。",
+      "steps": [
+        {
+          "name": "Java 应用巡检",
+          "module": "java_app_inspect",
+          "target": "all",
+          "timeout_sec": 180,
+          "register": "java_inspect",
+          "ignore_exit": true,
+          "continue_on_error": true
+        }
+      ]
+    },
+    {
+      "id": "java-perf-analyze",
+      "name": "Java 性能分析（只读·GC/线程/堆）",
+      "description": "面向「应用变慢/CPU 高/停顿」的性能取证：先看进程与堆参数，再用 12 次采样计算 GC 增量（约 12 秒窗口），随后抓线程转储做栈顶聚类，最后取堆对象 Top-30。全部只读，不触发 Full GC。",
+      "steps": [
+        {
+          "name": "JVM 进程与堆参数",
+          "module": "java_processes",
+          "target": "all",
+          "timeout_sec": 60,
+          "register": "jvms",
+          "ignore_exit": true,
+          "continue_on_error": true
+        },
+        {
+          "name": "GC 健康度（12 秒窗口）",
+          "module": "java_gc_stat",
+          "target": "all",
+          "timeout_sec": 90,
+          "register": "gc",
+          "ignore_exit": true,
+          "continue_on_error": true,
+          "args": { "interval_ms": "1000", "count": "12" }
+        },
+        {
+          "name": "线程与阻塞分析",
+          "module": "java_thread_dump",
+          "target": "all",
+          "timeout_sec": 90,
+          "register": "threads",
+          "ignore_exit": true,
+          "continue_on_error": true
+        },
+        {
+          "name": "堆对象 Top-30（不触发 Full GC）",
+          "module": "java_heap_histo",
+          "target": "all",
+          "timeout_sec": 120,
+          "register": "heap",
+          "ignore_exit": true,
+          "continue_on_error": true,
+          "args": { "top": "30", "live": "0" }
+        }
+      ]
+    },
+    {
+      "id": "java-exception-analyze",
+      "name": "Java 异常分析（只读）",
+      "description": "面向「报错/异常刷屏/疑似 OOM」：按异常类聚合应用日志（OOM 与 StackOverflow 提级为进程级事故），并同时取线程转储与系统日志，用于区分「业务异常」与「JVM 或宿主机层面的故障」。",
+      "steps": [
+        {
+          "name": "应用日志异常聚合",
+          "module": "java_exception_scan",
+          "target": "all",
+          "timeout_sec": 120,
+          "register": "exceptions",
+          "ignore_exit": true,
+          "continue_on_error": true,
+          "args": { "tail_kb": "4096" }
+        },
+        {
+          "name": "线程转储（判死锁/阻塞）",
+          "module": "java_thread_dump",
+          "target": "all",
+          "timeout_sec": 90,
+          "register": "threads",
+          "ignore_exit": true,
+          "continue_on_error": true
+        },
+        {
+          "name": "系统日志（判 OOMKilled / 宿主机层面）",
+          "module": "journal_recent",
+          "target": "all",
+          "timeout_sec": 60,
+          "ignore_exit": true,
+          "continue_on_error": true
+        }
+      ]
+    },
+    {
+      "id": "java-middleware-ports",
+      "name": "Java 中间件端口与进程（只读）",
+      "description": "确认本机 Java 应用与常见中间件的监听面：JVM 进程清单 + 监听端口 + 大数据/中间件常用端口探测。用于「服务起没起来/端口被谁占了/暴露面是否符合预期」。",
+      "steps": [
+        {
+          "name": "JVM 进程清单",
+          "module": "java_processes",
+          "target": "all",
+          "timeout_sec": 60,
+          "ignore_exit": true,
+          "continue_on_error": true
+        },
+        {
+          "name": "监听端口",
+          "module": "net_listen",
+          "target": "all",
+          "timeout_sec": 30,
+          "continue_on_error": true
+        },
+        {
+          "name": "中间件常用端口探测",
+          "module": "bigdata_ports",
+          "target": "all",
+          "timeout_sec": 30,
+          "ignore_exit": true,
+          "continue_on_error": true
+        }
+      ]
+    }
+  ]
+}

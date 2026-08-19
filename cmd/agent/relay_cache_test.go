@@ -7,6 +7,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -177,5 +178,43 @@ func TestRelayPublicScheme(t *testing.T) {
 	fwd.Header.Set("X-Forwarded-Proto", "https, http")
 	if relayPublicScheme(fwd) != "https" {
 		t.Fatal("TLS-terminated relay must advertise https in the rewritten install script")
+	}
+}
+
+// 中继回源的连接池必须认环境代理。
+//
+// 这一条来自现网：install.sh 拿得到、/dl 下的二进制拿不到（502），同一个上游、同一台
+// 中继机。原因是两条回源路径对代理的处理不一致——serveRelayInstallScript 用的
+// relayClient 走 http.DefaultTransport（天然认 HTTP_PROXY），而 /dl 的缓存回源与直连
+// 代理都走 relayTransport，Proxy 字段为 nil 即"永远直连"。
+//
+// 中继机恰恰是最可能挂代理的那台：它被选作网关就是因为只有它能出网，而企业里"能出网"
+// 常常等于"经由 HTTP 代理出网"。
+func TestRelayTransportHonorsProxyEnv(t *testing.T) {
+	if relayTransport.Proxy == nil {
+		t.Fatal("relayTransport.Proxy 为 nil：中继在需要走 HTTP 代理出网的机器上永远回源失败")
+	}
+	// 断言的是**函数身份**而不是"设个 HTTP_PROXY 看它选中没有"：
+	// http.ProxyFromEnvironment 只在首次调用时读一次环境变量并缓存，同进程内后续改 env
+	// 不生效（对长驻的中继进程无影响，但会让那种写法的测试变成看运行顺序的抛硬币）。
+	want := reflect.ValueOf(http.ProxyFromEnvironment).Pointer()
+	got := reflect.ValueOf(relayTransport.Proxy).Pointer()
+	if got != want {
+		t.Fatal("relayTransport.Proxy 不是 http.ProxyFromEnvironment：回源不会遵循 HTTP_PROXY/HTTPS_PROXY/NO_PROXY")
+	}
+}
+
+// 回源下载是**持着该产物的锁**跑的：没有超时的话，一个卡死的上游连接会把这个产物的
+// 所有 /dl 请求永久挡住——内网所有机器同时装不上 Agent，且没有任何机制能把它解开。
+func TestRelayDLClientHasBoundedTimeout(t *testing.T) {
+	if relayDLClient.Timeout <= 0 {
+		t.Fatal("relayDLClient 没有超时：卡死的回源会永久占住产物锁")
+	}
+	if relayDLClient.Transport != relayTransport {
+		t.Fatal("relayDLClient 必须复用 relayTransport，否则代理与连接池设置又会分叉")
+	}
+	// 跨境慢链路上的多 MB 二进制需要宽裕的窗口，太短会把正常下载判成失败。
+	if relayDLClient.Timeout < 2*time.Minute {
+		t.Fatalf("回源超时 %v 过短，慢链路上的正常下载会被误杀", relayDLClient.Timeout)
 	}
 }

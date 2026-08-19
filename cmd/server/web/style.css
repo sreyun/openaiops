@@ -6267,3 +6267,32 @@ html.embed-mode body {
    此前它被 slice(0,120) 截断，而表格里没有任何下钻可以看到剩下的部分——
    与「Windows 升级失败详情被截到 160 字」是同一个缺陷：证据在最后一步被切掉。 */
 .sec-detail{ white-space:pre-wrap; word-break:break-word; max-width:520px; }
+
+/* ===== 关于我们弹窗 =====
+   文案与 Android 端「设置 → 关于我们」同源（产品简介 + 官网入口），
+   版本号由 openAbout() 从 /api/v1/summary 填入。 */
+.about-hero{display:flex; align-items:center; gap:12px; margin-bottom:14px}
+.about-logo{
+  width:44px; height:44px; border-radius:12px; flex:none;
+  background:linear-gradient(135deg,var(--accent),var(--accent2));
+  display:flex; align-items:center; justify-content:center;
+  font-weight:800; font-size:16px; color:#fff; letter-spacing:.3px;
+}
+.about-hero-txt{display:flex; flex-direction:column; gap:3px; min-width:0}
+.about-name{font-size:15px; font-weight:650; color:var(--txt)}
+.about-meta{font-size:12px; color:var(--muted); display:flex; gap:6px; align-items:baseline}
+.about-meta .mono{font-family:var(--mono, ui-monospace, Menlo, Consolas, monospace); color:var(--txt2)}
+.about-intro{margin:0; font-size:13px; line-height:1.75; color:var(--txt2)}
+.about-caps{display:flex; flex-wrap:wrap; gap:6px; margin-top:12px}
+.about-caps .tag{
+  font-size:11px; font-weight:500; color:var(--muted);
+  background:var(--panel2); border:1px solid var(--line); border-radius:5px; padding:2px 8px;
+}
+.about-links{display:flex; flex-direction:column; gap:2px}
+.about-link{
+  display:flex; align-items:center; gap:8px; padding:7px 8px; margin:0 -8px;
+  border-radius:7px; font-size:13px; color:var(--accent); text-decoration:none;
+}
+.about-link:hover{background:var(--accent-soft)}
+.about-link svg{width:15px; height:15px; flex:none}
+.about-copy{margin-top:14px; padding-top:12px; border-top:1px solid var(--line)}

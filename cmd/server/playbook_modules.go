@@ -47,11 +47,25 @@ var knownPlaybookModules = map[string]playbookModuleMeta{
 	"time_sync":    {Name: "time_sync", ReadOnly: true, Domain: "sre", Desc: "系统时间与时区"},
 
 	// —— 安全运维（只读）——
-	"users_logged":        {Name: "users_logged", ReadOnly: true, Domain: "security", Desc: "当前登录会话"},
-	"security_listen":     {Name: "security_listen", ReadOnly: true, Domain: "security", Desc: "对外监听端口（安全视角）"},
-	"host_security_scan":  {Name: "host_security_scan", ReadOnly: true, Domain: "security", Desc: "主机安全扫描（包清单/加固/IOC/ClamAV 可选）"},
-	"auth_failures":       {Name: "auth_failures", ReadOnly: true, Domain: "security", Desc: "近期认证失败摘要（若可得）"},
-	"clamav_update":       {Name: "clamav_update", ReadOnly: false, Domain: "security", Desc: "更新 ClamAV 病毒库（freshclam；args.proxy=host:port 走代理，timeout_sec 可调）"},
+	"users_logged":       {Name: "users_logged", ReadOnly: true, Domain: "security", Desc: "当前登录会话"},
+	"security_listen":    {Name: "security_listen", ReadOnly: true, Domain: "security", Desc: "对外监听端口（安全视角）"},
+	"host_security_scan": {Name: "host_security_scan", ReadOnly: true, Domain: "security", Desc: "主机安全扫描（包清单/加固/IOC/ClamAV 可选）"},
+	"auth_failures":      {Name: "auth_failures", ReadOnly: true, Domain: "security", Desc: "近期认证失败摘要（若可得）"},
+	"clamav_update":      {Name: "clamav_update", ReadOnly: false, Domain: "security", Desc: "更新 ClamAV 病毒库（freshclam；args.proxy=host:port 走代理，timeout_sec 可调）"},
+
+	// —— Java 应用运维（只读）——
+	//
+	// 这几个模块都做**判读**而不是回传原始命令输出：一份 jstack 是几千行栈、一次 jstat
+	// 只给自启动以来的累计值，两者原样回传对排障几乎没有价值。Agent 侧会算出窗口内的
+	// GC 增量、线程状态分布与栈顶聚类、异常按类聚合，并以「发现:」行标出可疑点——
+	// 那些行同时也是 AI 诊断的输入。
+	"java_processes":      {Name: "java_processes", ReadOnly: true, Domain: "java", Desc: "JVM 进程清单与启动参数判读（堆上限/收集器/OOM 转储开关；args.full=1 附原始参数）"},
+	"java_jvm_info":       {Name: "java_jvm_info", ReadOnly: true, Domain: "java", Desc: "JVM 运行时生效参数（jinfo；args.pid|name 指定进程，args.sysprops=1 附系统属性）"},
+	"java_gc_stat":        {Name: "java_gc_stat", ReadOnly: true, Domain: "java", Desc: "GC 健康度：多次采样算窗口内 YGC/FGC 增量与老年代回收效果（args.interval_ms/count）"},
+	"java_thread_dump":    {Name: "java_thread_dump", ReadOnly: true, Domain: "java", Desc: "线程转储判读：死锁检测、状态分布、栈顶聚类、线程池饱和（args.full=1 附原文）"},
+	"java_heap_histo":     {Name: "java_heap_histo", ReadOnly: true, Domain: "java", Desc: "堆对象直方图 Top-N（args.top；**args.live=1 会触发 Full GC 停顿**，默认关闭）"},
+	"java_exception_scan": {Name: "java_exception_scan", ReadOnly: true, Domain: "java", Desc: "应用日志异常按类聚合，OOM/StackOverflow 提级（args.path 指定日志，默认自动发现）"},
+	"java_app_inspect":    {Name: "java_app_inspect", ReadOnly: true, Domain: "java", Desc: "一站式 Java 巡检：进程/参数/GC/线程/异常五项串跑并汇总「发现」，可直接交 AI 诊断"},
 
 	// —— 大数据运维（只读）——
 	"bigdata_jps":   {Name: "bigdata_jps", ReadOnly: true, Domain: "bigdata", Desc: "Java 进程列表（jps）"},
@@ -64,12 +78,12 @@ var knownPlaybookModules = map[string]playbookModuleMeta{
 	"agent_update": {Name: "agent_update", ReadOnly: false, Domain: "change", Desc: "从服务端 /dl 下载并热更新 Agent（SHA-256 校验；args.server 必填；rollback=1 回滚 .bak）"},
 
 	// —— 资源管控（虚拟机 / 容器）——
-	"hyperv_power":     {Name: "hyperv_power", ReadOnly: false, Domain: "change", Desc: "Hyper-V 虚拟机启停/重启（args.action + vm_id|name）"},
-	"hyperv_set":       {Name: "hyperv_set", ReadOnly: false, Domain: "change", Desc: "Hyper-V 调整 CPU/内存（processor_count / memory_mb / min/max / dynamic_memory）"},
+	"hyperv_power":         {Name: "hyperv_power", ReadOnly: false, Domain: "change", Desc: "Hyper-V 虚拟机启停/重启（args.action + vm_id|name）"},
+	"hyperv_set":           {Name: "hyperv_set", ReadOnly: false, Domain: "change", Desc: "Hyper-V 调整 CPU/内存（processor_count / memory_mb / min/max / dynamic_memory）"},
 	"container_action":     {Name: "container_action", ReadOnly: false, Domain: "change", Desc: "Docker/Podman 容器启停/重启"},
 	"container_compose_ls": {Name: "container_compose_ls", ReadOnly: true, Domain: "inspect", Desc: "列出 Docker/Podman Compose 项目"},
 	"container_compose":    {Name: "container_compose", ReadOnly: false, Domain: "change", Desc: "Compose up/down/ps/logs/pull（需 project 或 file）"},
-	"container_logs":   {Name: "container_logs", ReadOnly: true, Domain: "sre", Desc: "Docker/Podman 容器日志"},
+	"container_logs":       {Name: "container_logs", ReadOnly: true, Domain: "sre", Desc: "Docker/Podman 容器日志"},
 }
 
 func validatePlaybookModule(st PlaybookStep) error {

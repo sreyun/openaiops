@@ -37,6 +37,7 @@ func assistTaskPolicy(task string) aiTaskPolicy {
 		"hardware_diagnosis", "hyperv_diagnosis", "netflow_diagnosis", "checks_diagnosis",
 		"forward_diagnosis", "apimon_diagnosis", "content_audit_diagnosis",
 		"host_security_diagnosis", "web_vuln_diagnosis",
+		"inspect_diagnosis", "java_diagnosis", "inspect_remediation", "host_inspect_analysis",
 		"host_security_remediation", "web_vuln_remediation",
 		"host_security_finding", "web_vuln_finding",
 		"hyperv_ops_plan", "container_ops_plan", "k8s_ops_plan", "sql_remediation",
@@ -46,6 +47,9 @@ func assistTaskPolicy(task string) aiTaskPolicy {
 	}
 	switch task {
 	case "sql_beautify", "sql_audit", "sql_optimize", "sql_remediation",
+		// 巡检报告动辄上万字符，且要求分五/六段结构化输出；默认 120s 会把长报告
+		// 的诊断截在半路，用户看到的是一段没写完的结论。
+		"inspect_diagnosis", "java_diagnosis", "inspect_remediation",
 		"hyperv_ops_plan", "container_ops_plan", "k8s_ops_plan",
 		"host_security_remediation", "web_vuln_remediation",
 		"host_security_finding", "web_vuln_finding":

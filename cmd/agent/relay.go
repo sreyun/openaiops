@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"log"
 	"log/slog"
@@ -47,6 +48,23 @@ func runRelay(listenAddr, upstream, relaySecret string) {
 	streamProxy := httputil.NewSingleHostReverseProxy(target)
 	streamProxy.FlushInterval = -1 // -1 = flush after every write
 	streamProxy.Transport = relayTransport
+
+	// 回源失败时把**真实原因**回给客户端。
+	//
+	// Go 的默认行为是吐一个裸 "502 Bad Gateway"，真实错误只进中继自己的日志。装机的人
+	// 在被装的那台内网机器上，看不到中继的日志，于是只能看到一个不含任何线索的 502，
+	// 连"是中继连不上上游"还是"上游没有这个文件"都分不出来。
+	relayProxyError := func(w http.ResponseWriter, r *http.Request, e error) {
+		slog.Warn("Relay 回源失败", "path", r.URL.Path, "upstream", upstream, "err", e)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusBadGateway)
+		fmt.Fprintf(w, "Relay: 回源失败\n路径: %s\n上游: %s\n原因: %v\n\n"+
+			"排查：① 中继机能否直接访问上游（curl -I %s）；"+
+			"② 若中继机需经 HTTP 代理出网，请为中继进程设置 HTTP_PROXY/HTTPS_PROXY/NO_PROXY；"+
+			"③ 上游是否仍在监听该端口。\n", r.URL.Path, upstream, e, upstream)
+	}
+	proxy.ErrorHandler = relayProxyError
+	streamProxy.ErrorHandler = relayProxyError
 
 	dlCache := newRelayDLCache(upstream, relaySecret)
 
@@ -100,7 +118,18 @@ func runRelay(listenAddr, upstream, relaySecret string) {
 	}
 }
 
+// relayTransport 是中继回源用的连接池。
+//
+// Proxy 这一行是必须的，而且它的缺失曾经表现为一个极难自查的故障：**同一个上游，
+// /install.sh 通、/dl 502**。原因是两条回源路径对代理的处理不一致——
+// serveRelayInstallScript 走 relayClient（用 http.DefaultTransport，天然认
+// HTTP_PROXY/HTTPS_PROXY/NO_PROXY），而 /dl 的缓存回源与直连代理都走本 Transport，
+// 没有 Proxy 字段就是 nil，即"永远直连"。
+//
+// 中继机恰恰是最可能挂代理的那一台：它被选作网关，就是因为只有它能出网，而企业里
+// "能出网"往往等于"经由 HTTP 代理出网"。于是安装脚本拿得到、二进制拿不到。
 var relayTransport = &http.Transport{
+	Proxy:               http.ProxyFromEnvironment,
 	MaxIdleConns:        100,
 	MaxIdleConnsPerHost: 50,
 	IdleConnTimeout:     90 * time.Second,
@@ -112,6 +141,15 @@ var relayTransport = &http.Transport{
 }
 
 var relayClient = &http.Client{Timeout: 30 * time.Second}
+
+// relayDLFetchTimeout 限制一次回源下载的总时长。
+//
+// 必须有上限：fetch 是**持着该产物的锁**跑的，一个卡死的上游连接会把这个产物的所有
+// /dl 请求永久挡住（内网所有机器同时装不上 Agent，且没有任何超时能把它解开）。
+// 取值要照顾跨境慢链路上的多 MB 二进制，所以比常规请求超时宽得多。
+const relayDLFetchTimeout = 10 * time.Minute
+
+var relayDLClient = &http.Client{Transport: relayTransport, Timeout: relayDLFetchTimeout}
 
 var serverLineRe = regexp.MustCompile(`((?:SERVER|\$Server)\s*=\s*")[^"]+(")`)
 
@@ -417,7 +455,8 @@ func (c *relayDLCache) fetch(urlPath, dst string) error {
 	if c.secret != "" {
 		req.Header.Set("X-Relay-Secret", c.secret)
 	}
-	resp, err := relayTransport.RoundTrip(req)
+	// 用带总超时的 Client 而不是裸 RoundTrip：后者既没有超时，也不跟随重定向。
+	resp, err := relayDLClient.Do(req)
 	if err != nil {
 		return err
 	}
