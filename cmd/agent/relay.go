@@ -31,23 +31,19 @@ import (
 // v5.4.1: relaySecret is an optional shared secret that the relay injects as
 // X-Relay-Secret on every proxied request. When configured on the upstream
 // server, all agent-facing requests via the relay must carry this header.
-func runRelay(listenAddr, upstream, relaySecret string) {
+func runRelay(listenAddr, upstream, relaySecret, installToken string) {
 	target, err := url.Parse(upstream)
 	if err != nil {
 		log.Fatalf("Relay: 无效的上游地址 %q: %v", upstream, err)
 	}
 
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	proxy.FlushInterval = 100 * time.Millisecond
-	proxy.Transport = relayTransport
+	proxy := newRelayProxy(target, 100*time.Millisecond)
 
 	// Interactive channels get immediate flushing. The reverse terminal, remote
 	// desktop and port-forward all ride plain HTTP streams (rx/tx) through this
 	// relay; a 100ms buffer window is a 100ms lag on every keystroke and every
 	// frame, which is exactly what makes a relayed session feel broken.
-	streamProxy := httputil.NewSingleHostReverseProxy(target)
-	streamProxy.FlushInterval = -1 // -1 = flush after every write
-	streamProxy.Transport = relayTransport
+	streamProxy := newRelayProxy(target, -1) // -1 = flush after every write
 
 	// 回源失败时把**真实原因**回给客户端。
 	//
@@ -70,7 +66,7 @@ func runRelay(listenAddr, upstream, relaySecret string) {
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/install.sh" || r.URL.Path == "/install.ps1" {
-			serveRelayInstallScript(w, r, upstream, relaySecret)
+			serveRelayInstallScript(w, r, upstream, relaySecret, installToken)
 			return
 		}
 		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/dl/") {
@@ -101,7 +97,13 @@ func runRelay(listenAddr, upstream, relaySecret string) {
 	} else if !strings.HasPrefix(listenAddr, ":") {
 		relayPort = ":" + listenAddr
 	}
-	slog.Info("内网机器安装命令", "cmd", "curl -fsSL http://<本机IP>"+relayPort+"/install.sh | sh")
+	for _, line := range relayInstallHints(relayPort, installToken) {
+		slog.Info("内网机器安装命令", "cmd", line)
+	}
+	if strings.TrimSpace(installToken) == "" {
+		slog.Warn("中继未持有安装 token：上面的命令也不带 token，服务端若开启校验，内网机器装完会注册被拒(403)",
+			"fix", "在面板『安装 Agent → 网关中继』复制带 ?token= 的命令重跑一次安装")
+	}
 
 	if listenAddr == "" || strings.HasPrefix(listenAddr, ":") ||
 		strings.HasPrefix(listenAddr, "0.0.0.0:") {
@@ -121,6 +123,59 @@ func runRelay(listenAddr, upstream, relaySecret string) {
 	if err := srv.ListenAndServe(); err != nil {
 		log.Fatalf("Relay 启动失败: %v", err)
 	}
+}
+
+// newRelayProxy 建一个指向 target 的反代，并把 Host 头改写成**上游的** Host。
+//
+// 改写 Host 是必须的，而它的缺失是一个看起来毫无道理的故障：内网机器能从中继上
+// 装好 Agent、能下载二进制，却一连上报就收到一页 HTML 错误页（日志里是
+// `服务端返回状态码 xxx: <html>…`）。
+//
+// 原因是 httputil.NewSingleHostReverseProxy **只改 URL，不改 Host 头**：内网 agent
+// 发来的 Host 是中继自己的 192.168.x.x:8529，被原样送到上游。上游前面只要是按名字
+// 分流的 nginx / 负载均衡（生产上几乎总是），这个 Host 落不到 aiops 那个 server 块
+// 上，于是回来的是默认站点的 404/421 错误页，而不是 API 的 JSON。
+//
+// 为什么 /install.sh 与 /dl 不受影响、掩盖了这个坑：那两条路径走的是中继**自己构造**
+// 的请求（serveRelayInstallScript / relayDLCache.fetch），Host 天然就是上游域名。于是
+// 现场表现成"装得上、连不上"——最容易让人往 token 和指纹上想的组合。
+func newRelayProxy(target *url.URL, flush time.Duration) *httputil.ReverseProxy {
+	p := httputil.NewSingleHostReverseProxy(target)
+	p.FlushInterval = flush
+	p.Transport = relayTransport
+	orig := p.Director
+	p.Director = func(r *http.Request) {
+		orig(r)
+		r.Host = target.Host
+	}
+	return p
+}
+
+// relayInstallHints 生成**能直接粘贴**的内网安装命令：真实网卡地址 + token。
+//
+// 原来这里印的是 http://<本机IP>:8529/install.sh —— 既没有地址也没有 token。照着抄的人
+// 装完，内网机器一样注册不上（服务端开着安装 Token 校验就是 403）；而这恰恰是网关自己
+// 刚踩过的坑。一条"看起来像命令的占位符"比不给提示更坑人。
+//
+// 多网卡时全列出来（最多 3 条）：网关按定义至少有内外两个网段，机器自己没法判断哪一个
+// 是内网机器够得着的那个，与其猜错不如都摆出来让人挑。
+func relayInstallHints(relayPort, installToken string) []string {
+	q := ""
+	if t := strings.TrimSpace(installToken); t != "" {
+		q = "?token=" + t
+	}
+	ips := rankedLocalIPv4s()
+	if len(ips) == 0 {
+		return []string{"curl -fsSL \"http://<本机内网IP>" + relayPort + "/install.sh" + q + "\" | sh"}
+	}
+	if len(ips) > 3 {
+		ips = ips[:3]
+	}
+	out := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		out = append(out, "curl -fsSL \"http://"+ip+relayPort+"/install.sh"+q+"\" | sh")
+	}
+	return out
 }
 
 // relayUpstreamProbe 是 http→https 升级探测，可在测试里替换。
@@ -288,10 +343,25 @@ func sanitizeHost(h string) string {
 	}, h)
 }
 
-func serveRelayInstallScript(w http.ResponseWriter, r *http.Request, upstream, relaySecret string) {
+// serveRelayInstallScript 取上游的安装脚本、把 SERVER= 改写成中继地址后交给内网机器。
+//
+// 缺 token 时补上中继自己那一枚：内网机器装完照样要向上游注册，服务端开着安装 Token
+// 校验时没有 token 就是 403——"装得上、面板里看不到"。而内网机器的运维手上往往只有
+// 一句 curl http://网关:8529/install.sh，没有 token 的概念。中继本来就是这个内网的
+// 装机来源，它手里的 token 也正是给这批机器用的，缺了就补，比让每台机器各自失败合理。
+//
+// 边界很清楚：**中继没配 token，就谁也补不到**——想收紧就别给网关配 token（网关自身
+// 也就不再出现在主机列表里，这是同一个开关的两面）。请求自带 token 时一律以自带的为准。
+func serveRelayInstallScript(w http.ResponseWriter, r *http.Request, upstream, relaySecret, installToken string) {
+	q := r.URL.Query()
+	if strings.TrimSpace(q.Get("token")) == "" && strings.TrimSpace(installToken) != "" {
+		q.Set("token", installToken)
+		slog.Info("内网装机请求未带 token，已用中继自己的安装 token 补上",
+			"path", r.URL.Path, "remote", r.RemoteAddr)
+	}
 	upstreamURL := upstream + r.URL.Path
-	if r.URL.RawQuery != "" {
-		upstreamURL += "?" + r.URL.RawQuery
+	if enc := q.Encode(); enc != "" {
+		upstreamURL += "?" + enc
 	}
 
 	req, err := http.NewRequestWithContext(r.Context(), "GET", upstreamURL, nil)

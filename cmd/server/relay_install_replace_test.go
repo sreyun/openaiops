@@ -71,3 +71,34 @@ func TestInstallScriptsRetryOnceOnChecksumMismatch(t *testing.T) {
 		t.Error("中继脚本在校验之前就替换了现役二进制")
 	}
 }
+
+// 插件解压失败 / 机器上没有 unzip，都不能带走整个安装：set -e 下
+// `command -v unzip && unzip -oq` 这条 AND 列表的非零退出码会当场终止脚本，
+// 而它恰好位于写 config.yaml 之前——用户看到的是"命令跑完、没报错、也没有 Agent"。
+func TestInstallScriptSurvivesPluginUnzipFailure(t *testing.T) {
+	tpl := installShTemplate
+	if strings.Contains(tpl, "command -v unzip >/dev/null 2>&1 && unzip -oq plugins.zip") {
+		t.Error("plugins.zip 解压仍是 AND 列表：set -e 下会终止整个安装")
+	}
+	if !strings.Contains(tpl, "已跳过插件（不影响 Agent 本体）") {
+		t.Error("解压失败时缺少\"跳过插件、继续安装\"的分支")
+	}
+}
+
+// 安装结束时印的内网命令必须带真实地址与 token。占位符命令抄下去，内网机器一样
+// 注册被拒（403）——网关自己刚踩过这个坑，不该再让它的用户踩一遍。
+func TestRelayInstallPrintsUsableInternalCommand(t *testing.T) {
+	if strings.Contains(relayInstallShTemplate, "http://<this-host-ip>:${RELAY_PORT}/install.sh\" | sh") {
+		t.Error("install-relay.sh 仍在打印不可用的占位符命令")
+	}
+	for _, must := range []string{"aiops_lan_ipv4s", `_q="?token=$TOKEN"`, "install.sh$_q"} {
+		if !strings.Contains(relayInstallShTemplate, must) {
+			t.Errorf("install-relay.sh 的内网命令缺少 %q", must)
+		}
+	}
+	for _, must := range []string{"Get-NetIPAddress", `$q = "?token=" + $Token`} {
+		if !strings.Contains(relayInstallPs1Template, must) {
+			t.Errorf("install-relay.ps1 的内网命令缺少 %q", must)
+		}
+	}
+}

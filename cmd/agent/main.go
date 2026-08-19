@@ -417,7 +417,7 @@ func main() {
 		// 成本；上报走 cfg.Server，不绕自己一圈。
 		// 回源地址要和上报地址走同一次 http→https 升级，见 resolveRelayUpstream。
 		// 放进 goroutine 是为了不让探测（最坏 ~15s）挡住启动的其余部分。
-		go runRelay(listen, resolveRelayUpstream(cfg.Server), cfg.RelaySecret)
+		go runRelay(listen, resolveRelayUpstream(cfg.Server), cfg.RelaySecret, cfg.Token)
 		if strings.TrimSpace(cfg.Token) == "" {
 			// 老网关（本改动之前装的）配置里没有 token。服务端开了安装 Token 校验时
 			// 注册会被拒，症状是"中继照常工作、主机列表里就是没有它"——说清楚比让人
@@ -546,6 +546,17 @@ func main() {
 	// Log effective server(s) at startup for quick diagnosis
 	for _, sc := range servers {
 		slog.Info("Agent 上报目标", "server", sc.Server, "config_path", cfgPath)
+		// 没有 token 的目标只有"这台机器的指纹已经登记过"时才能注册成功。多服务端下
+		// 这一点尤其容易漏：另外几个面板都正常，唯独这一个永远看不到这台主机，而日志
+		// 里只有一条与其它目标混在一起的 403，很难看出是"哪一个"目标缺配置。
+		// 与中继网关那条告警同源（见上面 cfg.Relay 分支），措辞刻意说明老机器不受影响。
+		// 中继网关跳过：上面那条针对网关的告警措辞更具体，两条一起打反而稀释信息。
+		if strings.TrimSpace(sc.Token) == "" && !cfg.Relay {
+			slog.Warn("该上报目标未配置 token：服务端若开启安装 Token 校验，首次注册会被 403 拒绝，本机不会出现在它的主机列表"+
+				"（指纹已登记过的老机器不受影响）",
+				"server", sc.Server,
+				"fix", "在该面板『安装 Agent』复制带 ?token= 的命令重装，或在 config.yaml 对应条目补 token")
+		}
 	}
 	if selfTest {
 		os.Exit(runSelfTest(os.Stdout, servers, hostID, cfgPath, cfg.StateFile))

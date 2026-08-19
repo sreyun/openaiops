@@ -563,8 +563,19 @@ done
 [ -f aiops-agent ] && cp -f aiops-agent aiops-agent.bak 2>/dev/null || true
 mv -f "$NEW" aiops-agent
 chmod +x aiops-agent
+# 插件是可选件，任何一步失败都不能带走整个安装。
+#
+# 这里原来是 "command -v unzip && unzip -oq plugins.zip"：在 set -e 下，这条 AND 列表
+# 的整体退出码非零就会**当场终止脚本**——机器上没有 unzip，或残留的半个 plugins.zip
+# 解压失败，都会让安装静默停在写 config.yaml 之前。用户看到的是命令跑完、没有报错、
+# 也没有 Agent，比明确失败难查得多。
+rm -f plugins.zip
 if aiops_fetch "$SERVER/dl/plugins.zip" plugins.zip 2>/dev/null; then
-  command -v unzip >/dev/null 2>&1 && unzip -oq plugins.zip
+  if command -v unzip >/dev/null 2>&1; then
+    unzip -oq plugins.zip || echo "[AIOps] WARN: plugins.zip 解压失败，已跳过插件（不影响 Agent 本体）"
+  else
+    echo "[AIOps] WARN: 未找到 unzip，已跳过插件解压（不影响 Agent 本体）"
+  fi
   rm -f plugins.zip
 fi
 # Annotated config.yaml: active settings + full commented option reference.
@@ -2105,9 +2116,36 @@ else
   aiops_start_relay_fallback
 fi
 RELAY_PORT="${LISTEN##*:}"
+# 打印**能直接粘贴**的内网安装命令：真实网卡地址 + token。
+#
+# 原来这里印的是 http://<this-host-ip>:8529/install.sh，既没有地址也没有 token。
+# 照着抄的人装完，内网机器一样注册不上（服务端开着安装 Token 校验就是 403），
+# 而这正是网关自己刚踩过的坑——一条"看起来像命令的占位符"比不给提示更坑人。
+aiops_lan_ipv4s() {
+  if command -v ip >/dev/null 2>&1; then
+    ip -4 -o addr show scope global 2>/dev/null | awk '{split($4,a,"/"); print a[1]}' || true
+  elif command -v hostname >/dev/null 2>&1 && hostname -I >/dev/null 2>&1; then
+    hostname -I 2>/dev/null | tr ' ' '\n' || true
+  elif command -v ifconfig >/dev/null 2>&1; then
+    ifconfig 2>/dev/null | awk '/inet /{print $2}' | sed 's/^addr://' || true
+  fi
+}
+if [ -n "$TOKEN" ]; then _q="?token=$TOKEN"; else _q=""; fi
+_ips=$(aiops_lan_ipv4s | grep -v '^127\.' | grep -v '^169\.254\.' | head -3 || true)
 echo ""
 echo "[AIOps] Relay ready! Internal machines install with:"
-echo "  curl -fsSL http://<this-host-ip>:${RELAY_PORT}/install.sh | sh"
+if [ -n "$_ips" ]; then
+  for _ip in $_ips; do
+    echo "  curl -fsSL \"http://$_ip:${RELAY_PORT}/install.sh$_q\" | sh"
+  done
+  echo "[AIOps] 多个地址时选内网机器能访问的那个；命令里的 token 与本机 config.yaml 中的一致。"
+else
+  echo "  curl -fsSL \"http://<本机内网IP>:${RELAY_PORT}/install.sh$_q\" | sh"
+fi
+if [ -z "$TOKEN" ]; then
+  echo "[AIOps] WARN: 本次安装没有 token，上面的命令也没有——服务端若开启安装 Token 校验，"
+  echo "[AIOps]       内网机器装完会注册被拒(403)，面板上看不到它们。请到面板『安装 Agent → 网关中继』复制带 ?token= 的命令。"
+fi
 `
 
 // relayInstallPs1Template installs the agent in GATEWAY RELAY mode on Windows.
@@ -2197,7 +2235,33 @@ Start-Sleep -Milliseconds 400
 Start-Process "wscript.exe" -ArgumentList ('"' + $vbs + '"')
 $Port = $Listen -replace '.*:', ''
 Write-Host "[AIOps] relay installed and started (listen $Listen)"
-Write-Host "[AIOps] internal machines use: http://<this-host-ip>:$Port"
+# 同 install-relay.sh：印真实地址 + token，占位符命令抄下去就是一台注册不上的机器。
+$q = ""
+if ($Token) { $q = "?token=" + $Token }
+$ips = @()
+try {
+  $ips = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |
+    Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } |
+    Select-Object -ExpandProperty IPAddress)
+} catch {
+  try {
+    $ips = @([System.Net.Dns]::GetHostAddresses($env:COMPUTERNAME) |
+      Where-Object { $_.AddressFamily -eq 'InterNetwork' } |
+      ForEach-Object { $_.IPAddressToString } |
+      Where-Object { $_ -notlike '127.*' -and $_ -notlike '169.254.*' })
+  } catch { $ips = @() }
+}
+Write-Host "[AIOps] internal machines install with:"
+if ($ips.Count -gt 0) {
+  foreach ($ip in ($ips | Select-Object -First 3)) {
+    Write-Host ("  curl -fsSL 'http://" + $ip + ":" + $Port + "/install.sh" + $q + "' | sh")
+  }
+} else {
+  Write-Host ("  curl -fsSL 'http://<this-host-ip>:" + $Port + "/install.sh" + $q + "' | sh")
+}
+if (-not $Token) {
+  Write-Host "[AIOps] WARN: no install token in this command — internal agents will be refused (403) if the server requires one." -ForegroundColor Yellow
+}
 `
 
 // uninstallShTemplate stops + removes the agent on Linux / macOS.

@@ -3,7 +3,10 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
+	"time"
 )
 
 // 自检必须走 /healthz、带上 relay secret，并如实回报状态码——它是内网机器全体 502 时
@@ -69,5 +72,151 @@ func TestResolveRelayUpstreamKeepsPlainHTTPWhenNoUpgrade(t *testing.T) {
 	relayUpstreamProbe = func(raw string) string { return raw }
 	if got := resolveRelayUpstream("http://10.0.0.9:8529/"); got != "http://10.0.0.9:8529" {
 		t.Fatalf("不应改写普通 http 上游，实际 %q", got)
+	}
+}
+
+// 多服务端下"某一个目标缺 token"必须能被单独看见：其余面板一切正常，只有这一个
+// 永远没有这台主机，而日志里那条 403 和别的目标混在一起，几乎无从分辨。
+func TestServerTargetKeepsItsOwnToken(t *testing.T) {
+	targets := []ServerConfig{
+		{Server: "https://a.example.com", Token: "tok-a"},
+		{Server: "https://b.example.com"},
+	}
+	a := NewAgent(targets, time.Minute, time.Minute, nil, nil, "h1", "")
+	if len(a.targets) != 2 {
+		t.Fatalf("目标数不对: %d", len(a.targets))
+	}
+	if a.targets[0].token != "tok-a" || a.targets[1].token != "" {
+		t.Fatalf("token 没有按目标各自绑定: %q / %q", a.targets[0].token, a.targets[1].token)
+	}
+	// 每个目标各有断路器：一个面板 403 刷屏不能拖住其它面板的上报。
+	if a.targets[0].cb == a.targets[1].cb {
+		t.Fatal("多个目标共用了同一个断路器")
+	}
+}
+
+// 中继启动时印的内网安装命令必须能直接粘贴：带真实地址、带 token。
+// 占位符命令（http://<本机IP>/install.sh，无 token）抄下去就是一台注册不上的机器。
+func TestRelayInstallHintsCarryToken(t *testing.T) {
+	hints := relayInstallHints(":8529", "tok-1")
+	if len(hints) == 0 {
+		t.Fatal("至少要给出一条安装命令")
+	}
+	for _, h := range hints {
+		if !strings.Contains(h, "?token=tok-1") {
+			t.Errorf("安装命令缺少 token: %s", h)
+		}
+		if !strings.Contains(h, ":8529/install.sh") {
+			t.Errorf("安装命令缺少中继端口/路径: %s", h)
+		}
+		if strings.Contains(h, "<") {
+			// 有真实网卡地址时不该再出现占位符；没有网卡地址的机器另说（下面那条用例）。
+			if len(rankedLocalIPv4s()) > 0 {
+				t.Errorf("有可用网卡地址时不应印占位符: %s", h)
+			}
+		}
+	}
+	if len(hints) > 3 {
+		t.Errorf("最多列 3 条，实际 %d 条", len(hints))
+	}
+}
+
+// 没有 token 时不能凭空造一个 ?token=，否则命令看着完整、装出来照样 403。
+func TestRelayInstallHintsOmitEmptyToken(t *testing.T) {
+	for _, h := range relayInstallHints(":8529", "  ") {
+		if strings.Contains(h, "token=") {
+			t.Errorf("无 token 时不应出现 token 参数: %s", h)
+		}
+	}
+}
+
+// 回源必须把 Host 改成上游的 Host。
+//
+// 少了这一步，内网 agent 的 Host（中继自己的 192.168.x.x:8529）会被原样送到上游；
+// 按名字分流的 nginx 认不出这个 Host，回给内网机器一页 HTML 错误页。而 /install.sh
+// 与 /dl 走中继自己构造的请求、Host 天然正确——于是现场是"装得上、连不上"。
+func TestRelayProxyRewritesHostToUpstream(t *testing.T) {
+	var gotHost string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHost = r.Host
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer up.Close()
+
+	target, err := url.Parse(up.URL)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	p := newRelayProxy(target, 0)
+
+	req := httptest.NewRequest(http.MethodPost, "http://192.168.30.114:8529/api/v1/agent/report", nil)
+	req.Host = "192.168.30.114:8529" // 内网 agent 眼里的地址
+	rr := httptest.NewRecorder()
+	p.ServeHTTP(rr, req)
+
+	if gotHost != target.Host {
+		t.Fatalf("上游收到的 Host 应是 %q，实际 %q（按名字分流的反代会因此返回错误页）", target.Host, gotHost)
+	}
+	if rr.Code != http.StatusOK {
+		t.Fatalf("回源应成功，实际 %d", rr.Code)
+	}
+}
+
+// 内网机器只输一句 curl http://网关:8529/install.sh 时，中继要把自己的 token 补上：
+// 否则装完注册被 403 拒，症状是"装得上、面板里看不到"。
+func TestRelayInstallScriptFillsMissingToken(t *testing.T) {
+	var gotToken string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotToken = r.URL.Query().Get("token")
+		_, _ = w.Write([]byte("#!/bin/sh\nSERVER=\"https://panel.example.com\"\n"))
+	}))
+	defer up.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "http://192.168.30.114:8529/install.sh", nil)
+	req.Host = "192.168.30.114:8529"
+	rr := httptest.NewRecorder()
+	serveRelayInstallScript(rr, req, up.URL, "", "gw-token")
+
+	if gotToken != "gw-token" {
+		t.Fatalf("中继应补上自己的 token，上游实际收到 %q", gotToken)
+	}
+	if body := rr.Body.String(); !strings.Contains(body, "http://192.168.30.114:8529") {
+		t.Fatalf("SERVER= 应被改写成中继地址，实际: %s", body)
+	}
+}
+
+// 请求自带 token 时以自带的为准，中继不得覆盖（多面板/多 token 场景会被改错）。
+func TestRelayInstallScriptKeepsExplicitToken(t *testing.T) {
+	var gotToken string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotToken = r.URL.Query().Get("token")
+		_, _ = w.Write([]byte("#!/bin/sh\n"))
+	}))
+	defer up.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "http://192.168.30.114:8529/install.sh?token=explicit", nil)
+	req.Host = "192.168.30.114:8529"
+	serveRelayInstallScript(httptest.NewRecorder(), req, up.URL, "", "gw-token")
+
+	if gotToken != "explicit" {
+		t.Fatalf("自带 token 必须原样透传，实际 %q", gotToken)
+	}
+}
+
+// 中继自己没有 token 时不能凭空造：那说明这套部署本就没打算发 token。
+func TestRelayInstallScriptWithoutTokenStaysEmpty(t *testing.T) {
+	var gotToken string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotToken = r.URL.Query().Get("token")
+		_, _ = w.Write([]byte("#!/bin/sh\n"))
+	}))
+	defer up.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "http://192.168.30.114:8529/install.sh", nil)
+	req.Host = "192.168.30.114:8529"
+	serveRelayInstallScript(httptest.NewRecorder(), req, up.URL, "", "")
+
+	if gotToken != "" {
+		t.Fatalf("中继无 token 时不应补 token，实际 %q", gotToken)
 	}
 }
