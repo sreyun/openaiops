@@ -36,7 +36,10 @@ const logStoreCap = 50000
 const logPersistCap = 8000
 
 type logStore struct {
-	mu   sync.Mutex
+	// 读写锁而不是互斥锁：写者只有 ingest 一个，检索/统计/取错误行全是只读。
+	// 500 个日志采集器持续写入时，用互斥锁会让「两个人同时搜日志」也互相排队，
+	// 而搜索恰恰是这里最慢的操作。
+	mu   sync.RWMutex
 	logs []StoredLog
 }
 
@@ -83,8 +86,8 @@ func (ls *logStore) search(hostID, level, keyword string, since int64, limit int
 		limit = 500
 	}
 	kw := strings.ToLower(strings.TrimSpace(keyword))
-	ls.mu.Lock()
-	defer ls.mu.Unlock()
+	ls.mu.RLock()
+	defer ls.mu.RUnlock()
 	out := make([]StoredLog, 0, limit)
 	for i := len(ls.logs) - 1; i >= 0 && len(out) < limit; i-- {
 		l := ls.logs[i]
@@ -97,7 +100,7 @@ func (ls *logStore) search(hostID, level, keyword string, since int64, limit int
 		if since > 0 && l.Ts < since {
 			continue
 		}
-		if kw != "" && !strings.Contains(strings.ToLower(l.Message), kw) {
+		if kw != "" && !containsSubstrFold(l.Message, kw) {
 			continue
 		}
 		out = append(out, l)
@@ -117,8 +120,8 @@ func (ls *logStore) searchPage(hostID, level, keyword string, since int64, page,
 	offset := (page - 1) * pageSize
 	kw := strings.ToLower(strings.TrimSpace(keyword))
 
-	ls.mu.Lock()
-	defer ls.mu.Unlock()
+	ls.mu.RLock()
+	defer ls.mu.RUnlock()
 
 	// First pass: count total matches
 	total := 0
@@ -133,7 +136,7 @@ func (ls *logStore) searchPage(hostID, level, keyword string, since int64, page,
 		if since > 0 && l.Ts < since {
 			continue
 		}
-		if kw != "" && !strings.Contains(strings.ToLower(l.Message), kw) {
+		if kw != "" && !containsSubstrFold(l.Message, kw) {
 			continue
 		}
 		total++
@@ -153,7 +156,7 @@ func (ls *logStore) searchPage(hostID, level, keyword string, since int64, page,
 		if since > 0 && l.Ts < since {
 			continue
 		}
-		if kw != "" && !strings.Contains(strings.ToLower(l.Message), kw) {
+		if kw != "" && !containsSubstrFold(l.Message, kw) {
 			continue
 		}
 		if skipped < offset {
@@ -167,9 +170,9 @@ func (ls *logStore) searchPage(hostID, level, keyword string, since int64, page,
 
 // logStats holds aggregated statistics for the current search scope.
 type logStats struct {
-	ByLevel          map[string]int    `json:"by_level"`
-	TopHosts         []logHostCount    `json:"top_hosts"`
-	TimeDistribution map[string]int    `json:"time_distribution"`
+	ByLevel          map[string]int `json:"by_level"`
+	TopHosts         []logHostCount `json:"top_hosts"`
+	TimeDistribution map[string]int `json:"time_distribution"`
 }
 
 type logHostCount struct {
@@ -183,8 +186,8 @@ func (ls *logStore) searchStats(hostID, level, keyword string, since int64) logS
 	kw := strings.ToLower(strings.TrimSpace(keyword))
 	now := time.Now().Unix()
 
-	ls.mu.Lock()
-	defer ls.mu.Unlock()
+	ls.mu.RLock()
+	defer ls.mu.RUnlock()
 
 	stats := logStats{
 		ByLevel:          map[string]int{"error": 0, "warn": 0, "info": 0, "debug": 0},
@@ -208,7 +211,7 @@ func (ls *logStore) searchStats(hostID, level, keyword string, since int64) logS
 				continue
 			}
 		}
-		if kw != "" && !strings.Contains(strings.ToLower(l.Message), kw) {
+		if kw != "" && !containsSubstrFold(l.Message, kw) {
 			continue
 		}
 
@@ -236,7 +239,10 @@ func (ls *logStore) searchStats(hostID, level, keyword string, since int64) logS
 	}
 
 	// Top 5 hosts
-	type hc struct{ hn, hid string; n int }
+	type hc struct {
+		hn, hid string
+		n       int
+	}
 	var sorted []hc
 	for _, v := range hostCounts {
 		sorted = append(sorted, hc{v.hostname, "", v.count})
@@ -255,8 +261,8 @@ func (ls *logStore) searchStats(hostID, level, keyword string, since int64) logS
 
 // recentErrors returns up to limit error/warn lines since a timestamp (AI input).
 func (ls *logStore) recentErrors(since int64, limit int) []StoredLog {
-	ls.mu.Lock()
-	defer ls.mu.Unlock()
+	ls.mu.RLock()
+	defer ls.mu.RUnlock()
 	out := []StoredLog{}
 	for i := len(ls.logs) - 1; i >= 0 && len(out) < limit; i-- {
 		l := ls.logs[i]

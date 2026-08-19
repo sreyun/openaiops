@@ -21,11 +21,32 @@ const (
 	eventCooldownSec  = 300  // min gap between identical plugin events (noise suppression)
 
 	// History storage constants (multi-tier downsampling)
-	histRawMax     = 1200 // raw samples: ~1.5h at 5s interval
-	hist1mMax      = 2880 // 1-min aggregates: 48h (2880 points)
-	hist5mMax      = 8640 // 5-min aggregates: 30 days (8640 points, 12/hour × 24h × 30d)
-	hist1mInterval = 60   // aggregate to 1-min every 60s
-	hist5mInterval = 300  // aggregate to 5-min every 300s
+	hist1mInterval = 60  // aggregate to 1-min every 60s
+	hist5mInterval = 300 // aggregate to 5-min every 300s
+
+	// 各层默认深度。改成变量（见下）是因为**这几个数直接决定进程内存**：
+	// 一个 shared.Sample 是 344 B，三层合计 12720 点 ≈ 每台主机 4.2 MB，
+	// 500 台就是 ≈ 2.0 GB —— 还不含 raw 层里 Disks/Conns/GPUs 那几个切片。
+	// 机群上了规模之后这不再是"调优选项"，而是能不能装得下的问题。
+	histRawMaxDefault = 1200 // raw samples: ~1.5h at 5s interval
+	hist1mMaxDefault  = 2880 // 1-min aggregates: 48h
+	hist5mMaxDefault  = 8640 // 5-min aggregates: 30 days（12/时 × 24 × 30）
+)
+
+// 内存态历史环的深度，可用环境变量按机群规模下调。
+//
+// 这三层是**内存缓存 + 实时叠加层**，持久历史在 VictoriaMetrics 里；下调它们只影响
+// 「VM 不可用时能回看多久」和图表右端的实时叠加窗口，不会丢掉长期历史。
+//
+//	AIOPS_HIST_RAW_MAX  原始点（默认 1200 ≈ 1.5 小时）
+//	AIOPS_HIST_1M_MAX   1 分钟聚合点（默认 2880 = 48 小时）
+//	AIOPS_HIST_5M_MAX   5 分钟聚合点（默认 8640 = 30 天，占三层内存的 68%）
+//
+// 500 台机群若把 5m 层降到 7 天（2016），每台主机从 4.2 MB 降到约 2.0 MB，整体省下约 1 GB。
+var (
+	histRawMax = envIntDefault("AIOPS_HIST_RAW_MAX", histRawMaxDefault)
+	hist1mMax  = envIntDefault("AIOPS_HIST_1M_MAX", hist1mMaxDefault)
+	hist5mMax  = envIntDefault("AIOPS_HIST_5M_MAX", hist5mMaxDefault)
 )
 
 // Host is the aggregate record the server keeps per agent.

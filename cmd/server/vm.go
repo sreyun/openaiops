@@ -101,7 +101,7 @@ func newVMWriter(cfg *ConfigStore) *vmWriter {
 	// 写入出问题不该让读图瞎掉，反过来也一样。
 	return &vmWriter{
 		cfg: cfg, ch: make(chan vmSample, 8192), checkCh: make(chan vmCheckSample, 4096), apiCh: make(chan vmAPISample, 4096),
-		httpc:        &http.Client{Timeout: vmQueryTimeout()},
+		httpc:        &http.Client{Timeout: vmQueryTimeout(), Transport: newVMTransport()},
 		breaker:      newVMCircuitBreaker(),
 		readBreaker:  newVMCircuitBreaker(),
 		historyCache: newVMHistoryCache(),

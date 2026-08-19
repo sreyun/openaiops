@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -79,17 +80,36 @@ func ssrfDialControl(network, address string, _ syscall.RawConn) error {
 
 // newGuardedHTTPClient 返回一个带 SSRF 出站校验的 http.Client，用于 AI/Webhook 等
 // 用户可影响 URL 的出站请求。DialContext 的 Control 会在每次真实连接（含重定向）前校验 IP。
-func newGuardedHTTPClient(timeout time.Duration) *http.Client {
+// guardedTransport 是所有受 SSRF 守卫的出站请求**共用**的连接池。
+//
+// 这里以前是「每次调用 newGuardedHTTPClient 都新建一个 Transport」。Transport 才是持有
+// 连接池的对象，用完即弃等于**连接完全不复用**：AI 每一次对话、每一次函数调用、每一次
+// 向量检索都要重新握一次 TCP + TLS。对着跨地域的模型端点，这是每次调用白白多花一个
+// 完整握手（常见 100–300 ms），而 SRE Agent 一轮推理里要连着发好几次请求。
+//
+// 另外 MaxIdleConnsPerHost 不设就是 net/http 的默认值 **2**：即便共用了 Transport，
+// 打向同一个模型端点的并发请求超过 2 条时仍会退化成"每次新建连接"。全部出站都指向少数
+// 几个端点，所以 per-host 才是真正起作用的那个上限。
+//
+// 共用是安全的：SSRF 拦截发生在 Dialer 的 Control 回调里（每条连接建立时执行），
+// 换成共用池不会绕过它；而池里已有的连接指向的是**当时已通过校验**的 IP，DNS 被改指到
+// 内网也只会影响新建连接——方向上是更安全的一侧。
+var guardedTransport = sync.OnceValue(func() *http.Transport {
 	d := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second, Control: ssrfDialControl}
-	return &http.Client{
-		Timeout: timeout,
-		Transport: &http.Transport{
-			DialContext:           d.DialContext,
-			ForceAttemptHTTP2:     true,
-			MaxIdleConns:          10,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
-		},
+	return &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           d.DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          128,
+		MaxIdleConnsPerHost:   32,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
 	}
+})
+
+// newGuardedHTTPClient 返回带 SSRF 守卫的客户端。超时逐次不同没关系——超时挂在
+// http.Client 上，连接池挂在共用的 Transport 上，两者互不影响。
+func newGuardedHTTPClient(timeout time.Duration) *http.Client {
+	return &http.Client{Timeout: timeout, Transport: guardedTransport()}
 }

@@ -493,6 +493,9 @@ func main() {
 	slog.Info(Tz("server.api_url"), "url", base+"/api/v1/")
 	slog.Info(Tz("server.config_file"), "path", *cfgPath)
 	slog.Info("存储后端", "relational", "PostgreSQL", "timeseries", "VictoriaMetrics", "note", "内置 aiops.db 已停用")
+	// 内存态历史环的容量预算：机群一上规模，这一项就是进程内存的大头，而超了之后
+	// 只表现为 OOM / 长 GC 停顿，没有任何日志会指向它。启动时直接把账算给运维看。
+	logHistoryRingBudget(store.hostCount())
 	if hasAgentBinary(dist) {
 		slog.Info(Tz("server.dist_dir"), "path", dist, "note", Tz("server.dist_ok"))
 		if miss := listMissingAgentDist(dist); len(miss) > 0 {
