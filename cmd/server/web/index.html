@@ -288,6 +288,8 @@
                 <div class="th-input-row"><input type="text" id="cpuWarn" class="mono" placeholder="80"><span class="unit">%</span><input type="text" id="cpuCrit" class="mono" placeholder="95"><span class="unit">%</span></div></div>
               <div class="threshold-field"><label data-i18n="settings.mem_thresh">内存 警告 / 严重（%）</label>
                 <div class="th-input-row"><input type="text" id="memWarn" class="mono" placeholder="85"><span class="unit">%</span><input type="text" id="memCrit" class="mono" placeholder="95"><span class="unit">%</span></div></div>
+              <div class="threshold-field"><label data-i18n="settings.mem_free_floor">内存告警附加条件：剩余内存高于（GB）不告警</label>
+                <div class="th-input-row"><input type="text" id="memFreeFloor" class="mono" placeholder="0"><span class="unit">GB</span></div></div>
               <div class="threshold-field"><label data-i18n="settings.disk_thresh">磁盘 警告 / 严重（%）</label>
                 <div class="th-input-row"><input type="text" id="diskWarn" class="mono" placeholder="80"><span class="unit">%</span><input type="text" id="diskCrit" class="mono" placeholder="90"><span class="unit">%</span></div></div>
               <div class="threshold-field"><label data-i18n="settings.diskio_thresh">磁盘 IO 占用 警告 / 严重（%）</label>
@@ -458,6 +460,7 @@
                     <button type="button" class="htx-more-item" id="purgeOfflineBtn" data-i18n-title="ui.purge_offline_title" data-i18n="ui.purge_offline" title="删除所有离线主机">清理离线</button>
                   </div>
                 </div>
+                <button type="button" class="btn" id="hostBatchToggle" data-i18n="section.batch_mode" data-i18n-title="section.batch_mode_title" title="批量选择主机以变更分组">批量选择</button>
                 <span class="htx-crumb" id="hostsCrumb"></span>
                 <span class="count-pill" id="hostsCount">0</span>
               </div>
@@ -498,6 +501,7 @@
             </div>
             <div class="htx-content">
               <div id="agentUpdateBar" class="agent-update-bar" style="display:none"></div>
+              <div class="host-batch-bar" id="hostBatchBar" hidden></div>
               <div id="groups"></div>
               <div class="pager" id="pager"></div>
               <div class="empty" id="empty">

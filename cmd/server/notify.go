@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"net/http"
@@ -197,6 +198,8 @@ func (n *Notifier) tick() {
 	if n.nf != nil {
 		alerts = append(alerts, EvaluateNetFlow(n.nf, n.cfg.Thresholds())...)
 	}
+	// 补上完整分组路径：通知里只有主机名和 IP 时，值班的人得先回面板查这台机器属于谁。
+	alerts = n.cfg.decorateAlertGroups(alerts)
 	cur := make(map[string]Alert, len(alerts))
 	for _, a := range alerts {
 		cur[alertKey(a)] = a
@@ -472,8 +475,13 @@ func formatAlert(a Alert, firing bool) string {
 	if a.IP != "" {
 		ipLine = fmt.Sprintf("\n%s: %s", Tz("notify.ip"), a.IP)
 	}
-	return fmt.Sprintf("%s\n%s: %s%s\n%s: %s\n%s: %s\n%s: %s\n%s: %s",
-		Tz("notify.title", status), Tz("notify.host"), host, ipLine,
+	// 分组紧跟在主机后面：值班的人先要知道"这是哪一摊的机器"，再看是哪一台。
+	groupLine := ""
+	if g := strings.TrimSpace(a.Group); g != "" {
+		groupLine = fmt.Sprintf("\n%s: %s", Tz("notify.group"), g)
+	}
+	return fmt.Sprintf("%s\n%s: %s%s%s\n%s: %s\n%s: %s\n%s: %s\n%s: %s",
+		Tz("notify.title", status), Tz("notify.host"), host, groupLine, ipLine,
 		Tz("notify.level"), lv, Tz("notify.type"), typeLabel,
 		Tz("notify.detail"), a.Message, Tz("notify.time"), time.Unix(a.Timestamp, 0).Format("2006-01-02 15:04:05"))
 }
@@ -513,6 +521,9 @@ func formatAlertSMS(a Alert, firing bool) string {
 	parts = append(parts, lv)
 	if host != "" {
 		parts = append(parts, joinKV(Tz("notify.host"), host))
+	}
+	if g := strings.TrimSpace(a.Group); g != "" {
+		parts = append(parts, joinKV(Tz("notify.group"), g))
 	}
 	if ip := strings.TrimSpace(a.IP); ip != "" {
 		parts = append(parts, joinKV("IP", ip))
@@ -599,9 +610,18 @@ func alertEmailHTML(a Alert, firing bool) string {
 	if host == "" {
 		host = a.HostID
 	}
+	// 邮件是 HTML：主机名来自 Agent 上报、分组名来自用户输入，两者都可能带 < >，
+	// 不转义会把整封邮件的表格撑坏（并给出一条注入面）。
+	host = html.EscapeString(host)
+	typeLabel = html.EscapeString(typeLabel)
+	detail := html.EscapeString(a.Message)
 	ipLine := ""
 	if a.IP != "" {
-		ipLine = `<tr><td style="color:#888;padding:4px 0">` + Tz("notify.ip") + `</td><td style="padding:4px 0">` + a.IP + `</td></tr>`
+		ipLine = `<tr><td style="color:#888;padding:4px 0">` + Tz("notify.ip") + `</td><td style="padding:4px 0">` + html.EscapeString(a.IP) + `</td></tr>`
+	}
+	groupLine := ""
+	if g := strings.TrimSpace(a.Group); g != "" {
+		groupLine = `<tr><td style="color:#888;padding:4px 0">` + Tz("notify.group") + `</td><td style="padding:4px 0">` + html.EscapeString(g) + `</td></tr>`
 	}
 	return fmt.Sprintf(`<div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:20px">
   <div style="color:#888;font-size:12px;margin-bottom:4px">AIOps</div>
@@ -609,16 +629,17 @@ func alertEmailHTML(a Alert, firing bool) string {
   <table style="width:100%%;border-collapse:collapse">
     <tr><td style="color:#888;padding:4px 0;width:80px">%s</td><td style="padding:4px 0;font-weight:bold">%s</td></tr>
     %s
+    %s
     <tr><td style="color:#888;padding:4px 0">%s</td><td style="padding:4px 0;color:%s">%s</td></tr>
     <tr><td style="color:#888;padding:4px 0">%s</td><td style="padding:4px 0">%s</td></tr>
     <tr><td style="color:#888;padding:4px 0">%s</td><td style="padding:4px 0;word-break:break-all">%s</td></tr>
     <tr><td style="color:#888;padding:4px 0">%s</td><td style="padding:4px 0">%s</td></tr>
   </table>
 </div>`,
-		headColor, status, Tz("notify.host"), host, ipLine,
+		headColor, status, Tz("notify.host"), host, groupLine, ipLine,
 		Tz("notify.level"), lvlColor, lv,
 		Tz("notify.type"), typeLabel,
-		Tz("notify.detail"), a.Message,
+		Tz("notify.detail"), detail,
 		Tz("notify.time"), time.Unix(a.Timestamp, 0).Format("2006-01-02 15:04:05"))
 }
 

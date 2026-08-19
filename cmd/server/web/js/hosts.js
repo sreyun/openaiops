@@ -20,6 +20,140 @@ function hostDisplayTitle(h) {
 }
 
 /* ---------- 渲染：主机卡片 ---------- */
+
+/* ---------- 批量选择：一次把一批主机挪到同一个分组 ----------
+ *
+ * 逐台点「变更分组」是十几次弹窗、十几次刷新。选择态刻意做成"开关"而不是常驻复选框：
+ * 主机页最高频的动作是点开看详情，常驻复选框会把这个动作挤到一边，也容易误勾。
+ */
+let HOST_SELECT_MODE = false;
+const HOST_SELECTED = new Set();
+
+function hostSelectBoxHTML(h) {
+  if (!HOST_SELECT_MODE) return "";
+  const on = HOST_SELECTED.has(h.id);
+  return `<label class="host-pick" title="${esc(I18N.t("section.batch_pick"))}">
+    <input type="checkbox" data-host-pick="${esc(h.id)}"${on ? " checked" : ""}>
+  </label>`;
+}
+
+/** 选择态下接管卡片/行的点击：勾选而不是打开详情。返回 true 表示已处理。 */
+function hostSelectClick(hostEl, ev) {
+  if (!HOST_SELECT_MODE || !hostEl) return false;
+  if (ev && ev.target && ev.target.closest("[data-act]")) return false;
+  const id = hostEl.dataset.id;
+  if (!id) return false;
+  toggleHostSelected(id);
+  return true;
+}
+
+function toggleHostSelected(id) {
+  if (HOST_SELECTED.has(id)) HOST_SELECTED.delete(id);
+  else HOST_SELECTED.add(id);
+  const box = document.querySelector(`[data-host-pick="${CSS.escape(id)}"]`);
+  if (box) box.checked = HOST_SELECTED.has(id);
+  const el = document.querySelector(`.host[data-id="${CSS.escape(id)}"]`);
+  if (el) el.classList.toggle("picked", HOST_SELECTED.has(id));
+  renderHostBatchBar();
+}
+
+function setHostSelectMode(on) {
+  HOST_SELECT_MODE = !!on;
+  if (!HOST_SELECT_MODE) HOST_SELECTED.clear();
+  invalidateHostRenderCache();
+  renderHosts(LAST_HOSTS || []);
+  renderHostBatchBar();
+}
+
+/** 当前页里可见的主机 id（"全选本页"只作用于看得见的这一页，不偷偷选中翻页外的机器）。 */
+function visibleHostIds() {
+  return Array.from(document.querySelectorAll("#groups .host[data-id]")).map(el => el.dataset.id);
+}
+
+function renderHostBatchBar() {
+  const bar = $("hostBatchBar");
+  if (!bar) return;
+  const toggle = $("hostBatchToggle");
+  if (toggle) toggle.classList.toggle("active", HOST_SELECT_MODE);
+  if (!HOST_SELECT_MODE) { bar.hidden = true; bar.innerHTML = ""; return; }
+  bar.hidden = false;
+  const n = HOST_SELECTED.size;
+  bar.innerHTML = `
+    <span class="hbb-count">${esc(I18N.t("section.batch_selected"))} <b>${n}</b></span>
+    <button type="button" class="btn" data-batch="all">${esc(I18N.t("section.batch_select_page"))}</button>
+    <button type="button" class="btn" data-batch="none"${n ? "" : " disabled"}>${esc(I18N.t("section.batch_clear"))}</button>
+    <button type="button" class="btn primary" data-batch="folder"${n ? "" : " disabled"}>${esc(I18N.t("section.batch_move"))}</button>
+    <button type="button" class="btn ghost" data-batch="exit">${esc(I18N.t("ui.cancel", "取消"))}</button>`;
+}
+
+async function hostBatchMoveFolder() {
+  const ids = Array.from(HOST_SELECTED);
+  if (!ids.length) return;
+  const flat = flattenHostFolders(HOST_FOLDERS.folders || []);
+  const options = [{ id: "__ungrouped__", path: I18N.t("section.uncategorized") }]
+    .concat(flat.map(f => ({ id: f.id, path: f.path })));
+  const folderId = await promptMoveFolder({
+    hostname: I18N.t("section.batch_hosts_n", String(ids.length)).replace("{n}", String(ids.length)),
+    options,
+    currentId: ""
+  });
+  if (folderId === null) return;
+  try {
+    const r = await fetch(`${API}/hosts/folder/batch`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ host_ids: ids, folder_id: folderId })
+    });
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({}));
+      toast(e.error || I18N.t("toast.update_failed2"), "err");
+      return;
+    }
+    toast(I18N.t("toast.category_updated"), "ok");
+    setHostSelectMode(false);
+    await loadHostFolders();
+    refresh();
+  } catch (e) { toast(I18N.t("toast.update_failed") + e, "err"); }
+}
+
+function bindHostBatchOnce() {
+  if (window._htxBatchBound) return;
+  window._htxBatchBound = true;
+  document.addEventListener("click", async (e) => {
+    if (e.target.closest("#hostBatchToggle")) { setHostSelectMode(!HOST_SELECT_MODE); return; }
+    const pick = e.target.closest("[data-host-pick]");
+    if (pick) {
+      e.stopPropagation();
+      const id = pick.getAttribute("data-host-pick");
+      if (HOST_SELECTED.has(id) !== pick.checked) toggleHostSelected(id);
+      else { // 勾选框自身状态已由浏览器切换，同步集合
+        if (pick.checked) HOST_SELECTED.add(id); else HOST_SELECTED.delete(id);
+        const el = document.querySelector(`.host[data-id="${CSS.escape(id)}"]`);
+        if (el) el.classList.toggle("picked", pick.checked);
+        renderHostBatchBar();
+      }
+      return;
+    }
+    const act = e.target.closest("[data-batch]");
+    if (!act) return;
+    switch (act.getAttribute("data-batch")) {
+      case "all":
+        visibleHostIds().forEach(id => HOST_SELECTED.add(id));
+        invalidateHostRenderCache();
+        renderHosts(LAST_HOSTS || []);
+        renderHostBatchBar();
+        break;
+      case "none":
+        HOST_SELECTED.clear();
+        invalidateHostRenderCache();
+        renderHosts(LAST_HOSTS || []);
+        renderHostBatchBar();
+        break;
+      case "folder": await hostBatchMoveFolder(); break;
+      case "exit": setHostSelectMode(false); break;
+    }
+  });
+}
+
 function hostCard(h) {
   const m = h.latest || {};
   const swap = (m.swap_total || 0) > 0
@@ -60,9 +194,9 @@ function hostCard(h) {
   const agentVer = (typeof agentVersionBadgeHTML === "function") ? agentVersionBadgeHTML(h) : "";
   const agentSel = (typeof agentSelectCheckboxHTML === "function") ? agentSelectCheckboxHTML(h) : "";
   const outdatedCls = (typeof agentHostCardClass === "function") ? agentHostCardClass(h) : "";
-  return `<div class="host ${h.online ? "online" : "offline"}${outdatedCls}" tabindex="0" data-id="${esc(h.id)}" data-name="${esc(hostDisplayTitle(h))}" data-cat="${esc(h.category || "")}" data-folder="${esc(h.folder_id || "")}">
+  return `<div class="host ${h.online ? "online" : "offline"}${outdatedCls}${HOST_SELECTED.has(h.id) ? " picked" : ""}" tabindex="0" data-id="${esc(h.id)}" data-name="${esc(hostDisplayTitle(h))}" data-cat="${esc(h.category || "")}" data-folder="${esc(h.folder_id || "")}">
     <div class="host-head">
-      <div class="host-name">${agentSel}<span class="dot ${h.online ? "on" : "off"}"></span>
+      <div class="host-name">${hostSelectBoxHTML(h)}${agentSel}<span class="dot ${h.online ? "on" : "off"}"></span>
         <div class="hn" data-act="detail" title="${esc(hostDisplayTitle(h))}">${esc(hostDisplayTitle(h))}</div>
       </div>
       <div class="host-tags">
@@ -157,8 +291,8 @@ function hostRow(h) {
   const agentVer = (typeof agentVersionBadgeHTML === "function") ? agentVersionBadgeHTML(h) : "";
   const agentSel = (typeof agentSelectCheckboxHTML === "function") ? agentSelectCheckboxHTML(h) : "";
   const outdatedCls = (typeof agentHostCardClass === "function") ? agentHostCardClass(h) : "";
-  return `<div class="host hrow ${statusCls}${outdatedCls}" tabindex="0" data-id="${esc(h.id)}" data-name="${esc(hostDisplayTitle(h))}" data-cat="${esc(h.category || "")}" data-folder="${esc(h.folder_id || "")}">
-    ${agentSel}<span class="hrow-dot ${h.online ? "on" : "off"}"></span>
+  return `<div class="host hrow ${statusCls}${outdatedCls}${HOST_SELECTED.has(h.id) ? " picked" : ""}" tabindex="0" data-id="${esc(h.id)}" data-name="${esc(hostDisplayTitle(h))}" data-cat="${esc(h.category || "")}" data-folder="${esc(h.folder_id || "")}">
+    ${hostSelectBoxHTML(h)}${agentSel}<span class="hrow-dot ${h.online ? "on" : "off"}"></span>
     <div class="hrow-id">
       <div class="hrow-name" data-act="detail" title="${esc(hostDisplayTitle(h))}">${esc(hostDisplayTitle(h))}</div>
       <div class="hrow-sub" title="${ipTitle}">${h.ip ? `<span class="mono">${esc(h.ip)}</span>` : ""}${h.platform ? `<span class="hrow-sep">·</span>${esc(h.platform)}` : ""}${agentVer ? `<span class="hrow-sep">·</span>${agentVer}` : ""}</div>
@@ -573,13 +707,14 @@ function showHostTreeCtx(x, y, folderId) {
 async function hostFolderAdd(parentId) {
   const flat = flattenHostFolders(HOST_FOLDERS.folders || []);
   const parent = parentId ? flat.find(x => x.id === parentId) : null;
-  const name = await promptFolderName({
+  const res = await promptFolderName({
     title: parentId ? I18N.t("section.folder_add_child") : I18N.t("section.folder_add_root"),
     parentPath: parent ? parent.path : "",
     defaultValue: "",
     placeholder: I18N.t("section.folder_name_ph")
   });
-  if (name === null || !String(name).trim()) return;
+  if (!res || !String(res.name || "").trim()) return;
+  const name = res.name;
   try {
     const r = await fetch(`${API}/host-folders`, {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -599,23 +734,61 @@ async function hostFolderAdd(parentId) {
   } catch (e) { toast(I18N.t("toast.update_failed") + e, "err"); }
 }
 
+/** 收集 id 自身及其所有后代——它们不能成为自己的上级（会形成环）。 */
+function folderSubtreeIds(folders, id) {
+  const hit = [];
+  const walk = (list, inside) => {
+    (list || []).forEach(n => {
+      const now = inside || n.id === id;
+      if (now) hit.push(n.id);
+      walk(n.children || [], now);
+    });
+  };
+  walk(folders || [], false);
+  return new Set(hit);
+}
+
+/** 当前分组的父级 id（顶层返回 ""）。 */
+function folderParentId(folders, id) {
+  let found = "";
+  const walk = (list, parent) => {
+    (list || []).forEach(n => {
+      if (n.id === id) found = parent;
+      walk(n.children || [], n.id);
+    });
+  };
+  walk(folders || [], "");
+  return found;
+}
+
 async function hostFolderRename(id) {
-  const flat = flattenHostFolders(HOST_FOLDERS.folders || []);
+  const folders = HOST_FOLDERS.folders || [];
+  const flat = flattenHostFolders(folders);
   const cur = flat.find(x => x.id === id);
   const parentPath = cur && cur.path.includes(" / ")
     ? cur.path.slice(0, cur.path.lastIndexOf(" / "))
     : "";
-  const name = await promptFolderName({
+  // 可选的新上级：排掉自己和自己的后代，否则就是把一棵子树挂到它自己里面。
+  const banned = folderSubtreeIds(folders, id);
+  const parentOptions = [{ id: "", path: I18N.t("section.folder_root_level") }]
+    .concat(flat.filter(f => !banned.has(f.id)).map(f => ({ id: f.id, path: f.path })));
+  const curParent = folderParentId(folders, id);
+  const res = await promptFolderName({
     title: I18N.t("section.folder_rename"),
     parentPath,
     defaultValue: cur ? cur.name : "",
-    placeholder: I18N.t("section.folder_name_ph")
+    placeholder: I18N.t("section.folder_name_ph"),
+    parentOptions,
+    currentParentId: curParent
   });
-  if (name === null || !String(name).trim()) return;
+  if (!res || !String(res.name || "").trim()) return;
+  const body = { name: String(res.name).trim() };
+  // 只有真的改了层级才带 parent_id：没改就别让后端白写一次配置。
+  if (res.parentId !== undefined && res.parentId !== curParent) body.parent_id = res.parentId;
   try {
     const r = await fetch(`${API}/host-folders/${encodeURIComponent(id)}`, {
       method: "PATCH", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: String(name).trim() })
+      body: JSON.stringify(body)
     });
     if (!r.ok) {
       const e = await r.json().catch(() => ({}));
@@ -638,6 +811,14 @@ function promptFolderName(opts) {
     mask.id = "htxFolderDlgMask";
     mask.className = "mask htx-dlg-mask show";
     const parentPath = opts.parentPath || "";
+    // 上级分组下拉：只有"重命名/改层级"会传 parentOptions；新建分组仍然只显示父级路径。
+    const parentOptions = opts.parentOptions || null;
+    const parentSelectHTML = parentOptions
+      ? `<label class="htx-dlg-label" for="htxDlgParent">${esc(I18N.t("section.folder_parent"))}</label>
+         <select id="htxDlgParent" class="htx-dlg-input htx-dlg-select">${
+           parentOptions.map(o => `<option value="${esc(o.id)}"${o.id === (opts.currentParentId || "") ? " selected" : ""}>${esc(o.path)}</option>`).join("")
+         }</select>`
+      : "";
     mask.innerHTML = `
       <div class="htx-dlg" role="dialog" aria-modal="true" aria-labelledby="htxDlgTitle">
         <div class="htx-dlg-head">
@@ -645,7 +826,8 @@ function promptFolderName(opts) {
           <button type="button" class="htx-dlg-x" data-htx-dlg="cancel" aria-label="${esc(I18N.t("ui.close","关闭"))}">✕</button>
         </div>
         <div class="htx-dlg-body">
-          ${parentPath ? `<div class="htx-dlg-path" title="${esc(parentPath)}"><span class="htx-dlg-path-k">${esc(I18N.t("section.folder_parent"))}</span><span class="htx-dlg-path-v">${esc(parentPath)}</span></div>` : ""}
+          ${(!parentOptions && parentPath) ? `<div class="htx-dlg-path" title="${esc(parentPath)}"><span class="htx-dlg-path-k">${esc(I18N.t("section.folder_parent"))}</span><span class="htx-dlg-path-v">${esc(parentPath)}</span></div>` : ""}
+          ${parentSelectHTML}
           <label class="htx-dlg-label" for="htxDlgInput">${esc(I18N.t("section.folder_name"))}</label>
           <input type="text" id="htxDlgInput" class="htx-dlg-input" maxlength="48"
             placeholder="${esc(opts.placeholder || I18N.t("section.folder_name_ph"))}"
@@ -683,7 +865,8 @@ function promptFolderName(opts) {
         input.focus();
         return;
       }
-      finish(v);
+      const psel = mask.querySelector("#htxDlgParent");
+      finish({ name: v, parentId: psel ? psel.value : undefined });
     };
     const onKey = (e) => {
       if (e.key === "Escape") { e.preventDefault(); finish(null); }
@@ -856,6 +1039,8 @@ function renderHosts(hosts) {
 
   bindHostTreeOnce();
   bindHostsToolbarOnce();
+  bindHostBatchOnce();
+  renderHostBatchBar();
   renderHostTree();
 
   if (!LAST_RENDER_KEY) {
@@ -949,7 +1134,8 @@ function renderHosts(hosts) {
     ? ("q:" + searchQ)
     : (HOST_TREE_MODE === "type" ? ("t:" + CUR_TYPE) : ("f:" + CUR_FOLDER));
   // Include filter/sort/search so incremental update never skips a real list change.
-  const newKey = pageHosts.map(h => h.id).join(",") + "|" + HOST_VIEW + "|" + HOST_PAGE + "|" + filterKey + "|" + HOST_TREE_MODE + "|" + HOST_FILTER + "|" + HOST_SORT;
+  const newKey = pageHosts.map(h => h.id).join(",") + "|" + HOST_VIEW + "|" + HOST_PAGE + "|" + filterKey + "|" + HOST_TREE_MODE + "|" + HOST_FILTER + "|" + HOST_SORT
+    + "|sel:" + (HOST_SELECT_MODE ? "1" : "0") + ":" + HOST_SELECTED.size;
   if (LAST_RENDER_KEY === newKey && Object.keys(HOST_DOM_CACHE).length > 0) {
     pageHosts.forEach(h => updateHostCard(h));
     renderPager(pages, shown.length);

@@ -94,6 +94,7 @@
   "alert.task_timeout": "Scheduled task timeout %.0f seconds",
   "notify.title": "[AIOps] %s",
   "notify.host": "Host",
+  "notify.group": "Group",
   "notify.ip": "IP",
   "notify.level": "Level",
   "notify.type": "Type",

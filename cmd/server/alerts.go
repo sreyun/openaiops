@@ -17,8 +17,13 @@ import (
 //   - StandardThresholds()    — recommended default, balanced noise/sensitivity
 //   - RelaxedThresholds()     — low-noise, for dev/staging environments
 type Thresholds struct {
-	CPUWarn, CPUCrit         float64
-	MemWarn, MemCrit         float64
+	CPUWarn, CPUCrit float64
+	MemWarn, MemCrit float64
+	// MemFreeFloorGB 是内存告警的「并且」条件：使用率过线，但剩余内存仍不低于这个数
+	// （GB）时不告警。512G 的机器到 90% 还剩 50G，这时候叫醒值班的人是纯噪声；小机器
+	// 上 90% 只剩 800M 才是真事故——同一个百分比在不同规格的机器上根本不是同一件事。
+	// 0 = 不启用（保持纯百分比判定，与历史行为一致）。
+	MemFreeFloorGB           float64
 	DiskWarn, DiskCrit       float64
 	DiskIOWarn, DiskIOCrit   float64
 	IOPSWarn, IOPSCrit       float64
@@ -194,11 +199,23 @@ type Alert struct {
 	Level     string  `json:"level"`           // warning | critical
 	Type      string  `json:"type"`            // cpu | memory | disk | diskio | iops | offline | check | load | gpu | proc | conn | hardware | hyperv | api | task | forward | snmp | trap | netflow
 	Scope     string  `json:"scope,omitempty"` // sub-target (e.g. disk path) for per-item dedup
+	Group     string  `json:"group,omitempty"` // 完整分组路径（"IDC机房 / 华东 / 数据库"），由 decorateAlertGroups 填充
 	Since     int64   `json:"since,omitempty"` // unix time the condition first fired (for duration display)
 	Message   string  `json:"message"`
 	Value     float64 `json:"value"`
 	Timestamp int64   `json:"timestamp"`
 	Status    string  `json:"status,omitempty"` // acknowledged | silenced | "" (active)
+}
+
+// memFreeAboveFloor 报告「使用率虽然过线，但剩余内存还在地板之上」——这种情况按配置
+// 不算告警。floorGB<=0 表示没配这条附加条件，一律返回 false（等于不改变原行为）。
+// total==0（采集还没上来）时同样返回 false：宁可按老规则报一次，也不要因为一次缺数据
+// 把真实的内存告警吞掉。
+func memFreeAboveFloor(total, used uint64, floorGB float64) bool {
+	if floorGB <= 0 || total == 0 || used > total {
+		return false
+	}
+	return float64(total-used) >= floorGB*1024*1024*1024
 }
 
 func classify(v, warn, crit float64) string {
@@ -256,7 +273,7 @@ func Evaluate(hosts []*Host, t Thresholds) []Alert {
 				Value:   m.CPUPercent, Timestamp: now,
 			})
 		}
-		if lv := classify(m.MemPercent, t.MemWarn, t.MemCrit); lv != "" {
+		if lv := classify(m.MemPercent, t.MemWarn, t.MemCrit); lv != "" && !memFreeAboveFloor(m.MemTotal, m.MemUsed, t.MemFreeFloorGB) {
 			alerts = append(alerts, Alert{
 				HostID: h.ID, Hostname: h.Hostname, IP: h.IP, Level: lv, Type: "memory",
 				Message: Tz("alert.mem_high", m.MemPercent, fmtBytes(m.MemTotal-m.MemUsed)),

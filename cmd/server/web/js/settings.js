@@ -60,6 +60,7 @@ async function openSettings() {
     const td = (v, def) => (v == null || v === 0 || isNaN(v)) ? def : v;
     $("cpuWarn").value = td(t.cpu_warn, 80); $("cpuCrit").value = td(t.cpu_crit, 95);
     $("memWarn").value = td(t.mem_warn, 85); $("memCrit").value = td(t.mem_crit, 95);
+  $("memFreeFloor").value = td(t.mem_free_floor_gb, 0);
     $("diskWarn").value = td(t.disk_warn, 80); $("diskCrit").value = td(t.disk_crit, 90);
     $("diskioWarn").value = td(t.diskio_warn, 80); $("diskioCrit").value = td(t.diskio_crit, 95);
     $("iopsWarn").value = td(t.iops_warn, 50000); $("iopsCrit").value = td(t.iops_crit, 100000);
@@ -111,6 +112,7 @@ function fillThresholdForm(t) {
   const td = (v, def) => (v == null || v === 0 || isNaN(v)) ? def : v;
   $("cpuWarn").value = td(t.cpu_warn, 80); $("cpuCrit").value = td(t.cpu_crit, 95);
   $("memWarn").value = td(t.mem_warn, 85); $("memCrit").value = td(t.mem_crit, 95);
+  $("memFreeFloor").value = td(t.mem_free_floor_gb, 0);
   $("diskWarn").value = td(t.disk_warn, 80); $("diskCrit").value = td(t.disk_crit, 90);
   $("diskioWarn").value = td(t.diskio_warn, 80); $("diskioCrit").value = td(t.diskio_crit, 95);
   $("iopsWarn").value = td(t.iops_warn, 50000); $("iopsCrit").value = td(t.iops_crit, 100000);
@@ -151,6 +153,7 @@ function collectThresholdsFromForm() {
   return {
     cpu_warn: num("cpuWarn"), cpu_crit: num("cpuCrit"),
     mem_warn: num("memWarn"), mem_crit: num("memCrit"),
+    mem_free_floor_gb: num("memFreeFloor"),
     disk_warn: num("diskWarn"), disk_crit: num("diskCrit"),
     diskio_warn: num("diskioWarn"), diskio_crit: num("diskioCrit"),
     iops_warn: num("iopsWarn"), iops_crit: num("iopsCrit"),

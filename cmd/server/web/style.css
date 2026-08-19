@@ -6296,3 +6296,16 @@ html.embed-mode body {
 .about-link:hover{background:var(--accent-soft)}
 .about-link svg{width:15px; height:15px; flex:none}
 .about-copy{margin-top:14px; padding-top:12px; border-top:1px solid var(--line)}
+
+/* ---- 主机批量选择（批量变更分组）---- */
+.host-batch-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:8px 0;padding:8px 12px;
+  border:1px solid var(--border,#2a3244);border-radius:8px;background:var(--panel-2,rgba(127,127,127,.06))}
+.host-batch-bar .hbb-count{margin-right:4px;color:var(--muted,#8b96a8)}
+.host-batch-bar .hbb-count b{color:var(--text,#e6ebf2);font-size:15px}
+.host-pick{display:inline-flex;align-items:center;margin-right:6px;cursor:pointer}
+.host-pick input{width:15px;height:15px;cursor:pointer;accent-color:var(--accent,#3b82f6)}
+.host.picked{outline:2px solid var(--accent,#3b82f6);outline-offset:-2px}
+#hostBatchToggle.active{border-color:var(--accent,#3b82f6);color:var(--accent,#3b82f6)}
+.alert-group{margin-left:6px;padding:1px 6px;border-radius:4px;font-size:12px;
+  color:var(--muted,#8b96a8);background:var(--panel-2,rgba(127,127,127,.10));white-space:nowrap;
+  max-width:220px;overflow:hidden;text-overflow:ellipsis;display:inline-block;vertical-align:middle}

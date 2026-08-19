@@ -83,6 +83,7 @@ type ThresholdConfig struct {
 	CPUCrit         float64 `json:"cpu_crit"`
 	MemWarn         float64 `json:"mem_warn"`
 	MemCrit         float64 `json:"mem_crit"`
+	MemFreeFloorGB  float64 `json:"mem_free_floor_gb"` // 内存告警附加条件：剩余内存 ≥ 该值(GB) 时不告警；0=不启用
 	DiskWarn        float64 `json:"disk_warn"`
 	DiskCrit        float64 `json:"disk_crit"`
 	DiskIOWarn      float64 `json:"diskio_warn"`
@@ -166,7 +167,8 @@ func thresholdConfigFromThresholds(t Thresholds) ThresholdConfig {
 	return ThresholdConfig{
 		CPUWarn: t.CPUWarn, CPUCrit: t.CPUCrit,
 		MemWarn: t.MemWarn, MemCrit: t.MemCrit,
-		DiskWarn: t.DiskWarn, DiskCrit: t.DiskCrit,
+		MemFreeFloorGB: t.MemFreeFloorGB,
+		DiskWarn:       t.DiskWarn, DiskCrit: t.DiskCrit,
 		DiskIOWarn: t.DiskIOWarn, DiskIOCrit: t.DiskIOCrit,
 		IOPSWarn: t.IOPSWarn, IOPSCrit: t.IOPSCrit,
 		GPUWarn: t.GPUWarn, GPUCrit: t.GPUCrit,
@@ -175,7 +177,7 @@ func thresholdConfigFromThresholds(t Thresholds) ThresholdConfig {
 		LoadWarn: t.LoadWarn, LoadCrit: t.LoadCrit,
 		ProcWarn: t.ProcWarn,
 		ConnWarn: int(t.ConnWarn), ConnCrit: int(t.ConnCrit),
-		OfflineAfterSec: sec,
+		OfflineAfterSec:   sec,
 		CheckPingLossWarn: t.CheckPingLossWarn, CheckPingLossCrit: t.CheckPingLossCrit,
 		CheckPingLatencyWarn: t.CheckPingLatencyWarn, CheckPingLatencyCrit: t.CheckPingLatencyCrit,
 		CheckTCPTimeoutWarn: t.CheckTCPTimeoutWarn, CheckTCPTimeoutCrit: t.CheckTCPTimeoutCrit,
@@ -322,7 +324,8 @@ func (t ThresholdConfig) toThresholds() Thresholds {
 	return Thresholds{
 		CPUWarn: t.CPUWarn, CPUCrit: t.CPUCrit,
 		MemWarn: t.MemWarn, MemCrit: t.MemCrit,
-		DiskWarn: t.DiskWarn, DiskCrit: t.DiskCrit,
+		MemFreeFloorGB: t.MemFreeFloorGB,
+		DiskWarn:       t.DiskWarn, DiskCrit: t.DiskCrit,
 		DiskIOWarn: t.DiskIOWarn, DiskIOCrit: t.DiskIOCrit,
 		IOPSWarn: t.IOPSWarn, IOPSCrit: t.IOPSCrit,
 		GPUWarn: t.GPUWarn, GPUCrit: t.GPUCrit,
@@ -504,44 +507,44 @@ type ServerConfig struct {
 	HostFolders []HostFolderNode `json:"host_folders"`
 	// HostFolderAssign maps host id -> folder id (missing = ungrouped).
 	HostFolderAssign map[string]string `json:"host_folder_assign"`
-	InstallToken                  string            `json:"install_token"`
+	InstallToken     string            `json:"install_token"`
 	// PrevInstallToken + PrevTokenExpiresAt keep a rotated-out token valid during a
 	// grace period, so existing agents don't drop offline the instant the token is
 	// rotated. Managed by ResetToken (rotate).
-	PrevInstallToken   string           `json:"prev_install_token,omitempty"`
-	PrevTokenExpiresAt int64            `json:"prev_token_expires_at,omitempty"`
+	PrevInstallToken   string `json:"prev_install_token,omitempty"`
+	PrevTokenExpiresAt int64  `json:"prev_token_expires_at,omitempty"`
 	// Install token hardening: optional max uses / expiry / revoke without rotating.
-	InstallTokenMaxUses   int   `json:"install_token_max_uses,omitempty"`   // 0 = unlimited
-	InstallTokenUseCount  int   `json:"install_token_use_count,omitempty"`  // successful new registrations
-	InstallTokenExpiresAt int64 `json:"install_token_expires_at,omitempty"` // unix; 0 = never
-	InstallTokenRevoked   bool  `json:"install_token_revoked,omitempty"`
-	RequireToken          bool  `json:"require_token"`
-	Account            AccountConfig    `json:"account"`
-	Checks             []CustomCheck    `json:"checks"`
-	APISystems         []APISystem      `json:"api_systems,omitempty"`      // API 性能监控：按业务系统分组的批量接口
-	APITransactions    []APITransaction `json:"api_transactions,omitempty"` // API 合成事务：多步链式监控（变量提取/传递）
-	ScrapeTargets      []ScrapeTarget   `json:"scrape_targets,omitempty"`   // 指标抓取目标（agentless exporter 抓取，摄入 Prometheus 生态）
-	PromWriteToken     string           `json:"prom_write_token,omitempty"` // remote_write 接收端点的 Bearer 令牌（加密存储）
-	PromRules          []PromRule       `json:"prom_rules,omitempty"`       // 指标告警规则（PromQL）：抓取/推送来的指标接入告警
-	Dashboards         []Dashboard      `json:"dashboards,omitempty"`       // 仪表盘（自定义 + 导入 Grafana）
-	Governance         AlertGovernance  `json:"governance,omitempty"`       // 告警治理：静默/抑制/生效时段/通知路由
-	Playbooks          []Playbook       `json:"playbooks,omitempty"`
+	InstallTokenMaxUses   int              `json:"install_token_max_uses,omitempty"`   // 0 = unlimited
+	InstallTokenUseCount  int              `json:"install_token_use_count,omitempty"`  // successful new registrations
+	InstallTokenExpiresAt int64            `json:"install_token_expires_at,omitempty"` // unix; 0 = never
+	InstallTokenRevoked   bool             `json:"install_token_revoked,omitempty"`
+	RequireToken          bool             `json:"require_token"`
+	Account               AccountConfig    `json:"account"`
+	Checks                []CustomCheck    `json:"checks"`
+	APISystems            []APISystem      `json:"api_systems,omitempty"`      // API 性能监控：按业务系统分组的批量接口
+	APITransactions       []APITransaction `json:"api_transactions,omitempty"` // API 合成事务：多步链式监控（变量提取/传递）
+	ScrapeTargets         []ScrapeTarget   `json:"scrape_targets,omitempty"`   // 指标抓取目标（agentless exporter 抓取，摄入 Prometheus 生态）
+	PromWriteToken        string           `json:"prom_write_token,omitempty"` // remote_write 接收端点的 Bearer 令牌（加密存储）
+	PromRules             []PromRule       `json:"prom_rules,omitempty"`       // 指标告警规则（PromQL）：抓取/推送来的指标接入告警
+	Dashboards            []Dashboard      `json:"dashboards,omitempty"`       // 仪表盘（自定义 + 导入 Grafana）
+	Governance            AlertGovernance  `json:"governance,omitempty"`       // 告警治理：静默/抑制/生效时段/通知路由
+	Playbooks             []Playbook       `json:"playbooks,omitempty"`
 	// SRE workflow definitions (runtime state lives in the DB snapshot).
 	RemediationRules []RemediationRule `json:"remediation_rules,omitempty"`
 	TopologyEdges    []TopologyEdge    `json:"topology_edges,omitempty"` // 轻量服务依赖边（host/cat/svc）
 	SLOs             []SLO             `json:"slos,omitempty"`
 	// Enterprise ops
-	OnCallSchedules    []OnCallSchedule    `json:"oncall_schedules,omitempty"`
-	EscalationPolicies []EscalationPolicy  `json:"escalation_policies,omitempty"`
-	ChangeWindows          []ChangeWindow              `json:"change_windows,omitempty"`
-	ServiceRequestCatalog  []ServiceRequestCatalogItem `json:"service_request_catalog,omitempty"`
-	BusinessServices       []BusinessService           `json:"business_services,omitempty"`
-	Retention              RetentionConfig             `json:"retention,omitempty"`
-	Backup             BackupConfig        `json:"backup,omitempty"`
-	StatusPage         StatusPageConfig    `json:"status_page,omitempty"`
-	Brand              BrandConfig         `json:"brand,omitempty"`
-	TicketSLA          TicketSLAPolicy     `json:"ticket_sla,omitempty"`
-	CmdPolicy          CmdPolicyConfig     `json:"cmd_policy,omitempty"`
+	OnCallSchedules       []OnCallSchedule            `json:"oncall_schedules,omitempty"`
+	EscalationPolicies    []EscalationPolicy          `json:"escalation_policies,omitempty"`
+	ChangeWindows         []ChangeWindow              `json:"change_windows,omitempty"`
+	ServiceRequestCatalog []ServiceRequestCatalogItem `json:"service_request_catalog,omitempty"`
+	BusinessServices      []BusinessService           `json:"business_services,omitempty"`
+	Retention             RetentionConfig             `json:"retention,omitempty"`
+	Backup                BackupConfig                `json:"backup,omitempty"`
+	StatusPage            StatusPageConfig            `json:"status_page,omitempty"`
+	Brand                 BrandConfig                 `json:"brand,omitempty"`
+	TicketSLA             TicketSLAPolicy             `json:"ticket_sla,omitempty"`
+	CmdPolicy             CmdPolicyConfig             `json:"cmd_policy,omitempty"`
 	// LoopForceAllowNonAdmin：默认 false，闭环 force=true 仅管理员可用。
 	LoopForceAllowNonAdmin bool `json:"loop_force_allow_non_admin,omitempty"`
 	// RemoteGateDisabled：默认 false，开启冻结窗/高危远程闸门。
@@ -549,10 +552,10 @@ type ServerConfig struct {
 	// RemoteGateMode：空=freeze_or_highrisk。
 	RemoteGateMode string `json:"remote_gate_mode,omitempty"`
 	// RequireTerminalPassword：为 true 时，未设置终端二次密码的账号禁止打开终端（默认 true）。
-	RequireTerminalPassword *bool `json:"require_terminal_password,omitempty"`
-	AI                 AIConfig            `json:"ai,omitempty"`           // optional AI provider for inspection/diagnosis
-	VM                 VMConfig            `json:"vm,omitempty"`           // optional VictoriaMetrics writer (usually set via AIOPS_VM_URL)
-	PostgresDSN        string              `json:"postgres_dsn,omitempty"` // optional PostgreSQL DSN (usually via AIOPS_POSTGRES_DSN)
+	RequireTerminalPassword *bool    `json:"require_terminal_password,omitempty"`
+	AI                      AIConfig `json:"ai,omitempty"`           // optional AI provider for inspection/diagnosis
+	VM                      VMConfig `json:"vm,omitempty"`           // optional VictoriaMetrics writer (usually set via AIOPS_VM_URL)
+	PostgresDSN             string   `json:"postgres_dsn,omitempty"` // optional PostgreSQL DSN (usually via AIOPS_POSTGRES_DSN)
 	// TerminalDisabled is an inverted flag so remote terminal defaults ON for
 	// existing configs (zero value = enabled); set true to globally disable it.
 	TerminalDisabled bool `json:"terminal_disabled"`
@@ -647,10 +650,10 @@ type ServerConfig struct {
 
 func defaultServerConfig() ServerConfig {
 	return ServerConfig{
-		AlertsEnabled:    true,
-		AgentAutoUpdate:  true, // fleet default: push updates when agents lag
-		Thresholds:       defaultThresholdConfig(),
-		Categories:       map[string]string{},
+		AlertsEnabled:   true,
+		AgentAutoUpdate: true, // fleet default: push updates when agents lag
+		Thresholds:      defaultThresholdConfig(),
+		Categories:      map[string]string{},
 		SMTP: SMTPConfig{
 			FromName: "AIOps",
 		},
@@ -675,6 +678,11 @@ func (c ServerConfig) Validate() error {
 		if v < 0 || v > 100 {
 			return fmt.Errorf("%s", Tz("config.threshold_range", name, v))
 		}
+	}
+	// 内存告警的剩余内存地板：负数没有意义，过大（>1 TB）多半是把 MB 当成了 GB 填进来，
+	// 那会把内存告警整条静音掉——这种"配错了却看起来生效了"的状态最难排查，直接拒绝。
+	if t.MemFreeFloorGB < 0 || t.MemFreeFloorGB > 1024 {
+		return fmt.Errorf("%s", Tz("config.threshold_range", "mem_free_floor_gb", t.MemFreeFloorGB))
 	}
 	// OfflineAfter must be positive.
 	if t.OfflineAfterSec <= 0 {
@@ -1306,12 +1314,12 @@ func (cs *ConfigStore) Set(c ServerConfig) error {
 	c.Brand = cs.cfg.Brand
 	c.TicketSLA = cs.cfg.TicketSLA
 	c.CmdPolicy = cs.cfg.CmdPolicy
-	c.AI = cs.cfg.AI                             // managed via AI config endpoint
-	c.VM = cs.cfg.VM                             // managed via env / storage config
-	c.PostgresDSN = cs.cfg.PostgresDSN           // managed via env / storage config
-	c.RelaySecret = cs.cfg.RelaySecret           // managed via storage/relay config (masked in GET)
-	c.HTTPProxies = cs.cfg.HTTPProxies           // managed via proxy endpoints
-	c.ForwardRules = cs.cfg.ForwardRules         // managed via forward endpoints
+	c.AI = cs.cfg.AI                     // managed via AI config endpoint
+	c.VM = cs.cfg.VM                     // managed via env / storage config
+	c.PostgresDSN = cs.cfg.PostgresDSN   // managed via env / storage config
+	c.RelaySecret = cs.cfg.RelaySecret   // managed via storage/relay config (masked in GET)
+	c.HTTPProxies = cs.cfg.HTTPProxies   // managed via proxy endpoints
+	c.ForwardRules = cs.cfg.ForwardRules // managed via forward endpoints
 	// Preserve SMTP password when the incoming value is blank or masked (same
 	// strategy as webhook secrets — the browser may submit without re-typing it).
 	if c.SMTP.Password == "" || strings.Contains(c.SMTP.Password, "****") {

@@ -247,6 +247,8 @@ function renderAlerts(alerts) {
   const row = a => {
     const dur = a.since ? I18N.t("section.duration") + " " + fmtDur(now - a.since) : "";
     const ipStr = a.ip ? `<span class="alert-ip mono">${esc(a.ip)}</span>` : "";
+    // 分组路径：同名主机在不同机房是常态，只看主机名判断不了"这是哪一摊的机器"。
+    const groupStr = a.group ? `<span class="alert-group" title="${esc(a.group)}">${esc(a.group)}</span>` : "";
     const timeStr = a.timestamp ? `<span class="alert-time mono">${fmtDateTime(a.timestamp)}</span>` : "";
     // dur 包装在 .alert-dur[data-since] 中，供 refreshAlertRowTimes 轻量更新
     const durSpan = a.since
@@ -270,7 +272,7 @@ function renderAlerts(alerts) {
     return `<div class="row-item ${esc(a.level)}${statusClass}" tabindex="0" data-key="${esc(alertKey(a))}">
     <span class="badge ${esc(a.level)}">${a.level === "critical" ? I18N.t("ui.critical") : a.level === "info" ? I18N.t("toast.recovered") : I18N.t("ui.warning")}</span>
     ${statusBadge}
-    <strong>${esc(a.hostname)}</strong>${ipStr}<span class="msg">${esc(a.message)}</span>
+    <strong>${esc(a.hostname)}</strong>${groupStr}${ipStr}<span class="msg">${esc(a.message)}</span>
     ${durSpan}
     ${timeStr}
     <span class="alert-actions">${actions}</span></div>`;
@@ -279,7 +281,7 @@ function renderAlerts(alerts) {
   let filtered = alerts;
   if (ALERT_TYPE) filtered = filtered.filter(a => a.type === ALERT_TYPE);
   if (ALERT_SEARCH) filtered = filtered.filter(a => {
-    const hay = [a.hostname, a.ip, a.message, a.host_id, a.type, a.scope, a.level].filter(Boolean).join(" ");
+    const hay = [a.hostname, a.ip, a.group, a.message, a.host_id, a.type, a.scope, a.level].filter(Boolean).join(" ");
     return matchesSearchTokens(hay, ALERT_SEARCH);
   });
   const empty = `<div class="empty-line">✅ ${I18N.t("empty.no_alerts")}</div>`;

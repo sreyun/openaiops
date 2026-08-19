@@ -92,6 +92,8 @@ const groupsEl = $("groups");
 if (groupsEl) {
   groupsEl.addEventListener("click", e => {
     const host = e.target.closest(".host"); if (!host) return;
+    // 批量选择态下，点卡片是"勾选"而不是"打开详情"——否则勾一台就弹一个详情窗。
+    if (typeof hostSelectClick === "function" && hostSelectClick(host, e)) return;
     const act = e.target.closest("[data-act]");
     const { id, name, cat } = host.dataset;
     if (act) {

@@ -94,6 +94,7 @@
   "alert.task_timeout": "定時任務超時 %.0f 秒",
   "notify.title": "【AIOps】%s",
   "notify.host": "主機",
+  "notify.group": "分組",
   "notify.ip": "IP",
   "notify.level": "級別",
   "notify.type": "類型",
