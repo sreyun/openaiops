@@ -265,7 +265,15 @@ function hvToolbar(totalHosts, totalVMs, totalBad) {
 function hvTreeHTML(hosts) {
   const treeQ = normalizeSearchText(HV_TREE_Q);
   const searchActive = !!normalizeSearchText(HV_FILTER.q);
-  const filtering = searchActive || !!HV_FILTER.status || !!treeQ;
+  // filtering 的唯一作用是「搜索时强制展开，把命中露出来」，所以它只能由**搜索框**决定。
+  //
+  // 这里原来把状态下拉也算进来了——而 HV_FILTER.status 默认就是 "running"，于是 filtering
+  // 开箱即为真，下面两处 `&& !filtering` 让折叠状态**永远**被忽略：箭头点下去，HV_COLLAPSED
+  // 确实写进去了，重渲染时又被强制展开。表现就是「Hyper-V 的树收不起来」。
+  // 状态下拉是常驻的视图模式（默认只看运行中的机器），不是一次性的查找动作，把它当搜索
+  // 处理是这个 bug 的根。主机树一直只认树内搜索（hosts.js: `!q && HOST_TREE_COLLAPSED...`），
+  // 这里与它对齐。
+  const filtering = searchActive || !!treeQ;
   // 左树始终列出全部宿主机（树搜过滤）；选中态只高亮，不隐藏兄弟节点
   const shown = hosts.filter(inv => hvHostMatchesTreeQ(inv, treeQ));
   const rootId = "__all__";

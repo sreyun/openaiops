@@ -56,6 +56,19 @@ func TestIncludeLinuxMount(t *testing.T) {
 		{"tank/data", "/data", "zfs", true},
 		{"tmpfs", "/run", "tmpfs", false},
 		{"proc", "/proc", "proc", false},
+
+		// 容器/Pod 的内部挂载不该出现在"主机的盘"里：一台跑几十个 Pod 的节点会因此多出
+		// 几十上百条，而它们多半只是节点根盘的绑定挂载——同一块盘被数很多遍。
+		{"/dev/sda1", "/var/lib/kubelet/pods/8f3c/volumes/kubernetes.io~empty-dir/tmp", "ext4", false},
+		{"/dev/sda1", "/var/lib/docker/containers/abc123/mounts/shm", "ext4", false},
+		{"nfs:/pv", "/var/lib/kubelet/pods/8f3c/volumes/kubernetes.io~nfs/pv-1", "nfs4", false},
+		{"/dev/sda1", "/run/k3s/containerd/io.containerd.grpc.v1.cri/sandboxes/x/shm", "ext4", false},
+		{"/dev/sda1", "/var/lib/containerd/tmpmounts/x", "ext4", false},
+		// 但运行时数据目录本身要留着：给它挂独立盘是常见做法，写满了整个节点的容器全挂。
+		{"/dev/sdb1", "/var/lib/docker", "ext4", true},
+		{"/dev/sdb1", "/var/lib/kubelet", "xfs", true},
+		// 名字只是前缀相同、并不在目录内部的，不能误伤。
+		{"/dev/sdc1", "/var/lib/dockerdata", "ext4", true},
 	}
 	for _, c := range cases {
 		got := includeLinuxMount(c.dev, c.mount, c.fs)

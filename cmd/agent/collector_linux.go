@@ -643,9 +643,45 @@ func enumLinuxDisksFromMounts(r io.Reader) []shared.DiskInfo {
 	return out
 }
 
+// containerVolumeRoots 是容器运行时与 kubelet 的数据目录。
+//
+// 它们**下面**的挂载点是每容器/每 Pod 的临时产物：/var/lib/kubelet/pods/<uid>/volumes/…、
+// /var/lib/docker/containers/<id>/mounts/…。一台跑着几十个 Pod 的节点会因此多出几十上百
+// 条"磁盘"，把主机卡片和列表刷满，而且它们绝大多数只是节点根盘的绑定挂载——同一块盘被
+// 数了很多遍。运维要看的是节点的盘，不是每个 Pod 的卷。
+var containerVolumeRoots = []string{
+	"/var/lib/docker",
+	"/var/lib/containers",
+	"/var/lib/containerd",
+	"/run/containerd",
+	"/var/lib/kubelet",
+	"/var/lib/rancher",
+	"/run/k3s",
+	"/var/lib/crio",
+	"/run/crio",
+	"/var/lib/origin",
+	"/var/snap/microk8s",
+}
+
+// isContainerNestedMount 报告挂载点是否落在容器运行时数据目录**内部**。
+//
+// 只排嵌套的，数据目录本身要留着：把一块独立盘挂到 /var/lib/docker 是常见做法，那块盘
+// 写满会让整个节点的容器全挂——恰恰是最该盯的一块盘。
+func isContainerNestedMount(mount string) bool {
+	for _, root := range containerVolumeRoots {
+		if strings.HasPrefix(mount, root+"/") {
+			return true
+		}
+	}
+	return false
+}
+
 // includeLinuxMount decides whether a /proc/mounts row should contribute disk usage.
 func includeLinuxMount(dev, mount, fstype string) bool {
 	if mount == "/boot" || strings.HasPrefix(mount, "/boot/") {
+		return false
+	}
+	if isContainerNestedMount(mount) {
 		return false
 	}
 	switch fstype {

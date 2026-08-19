@@ -507,7 +507,10 @@ type ServerConfig struct {
 	HostFolders []HostFolderNode `json:"host_folders"`
 	// HostFolderAssign maps host id -> folder id (missing = ungrouped).
 	HostFolderAssign map[string]string `json:"host_folder_assign"`
-	InstallToken     string            `json:"install_token"`
+	// ResourceNotes 是资源（Hyper-V 虚机 / 容器…）上的用户注解，键由资源页拼出（见
+	// resource_notes.go）。采集端的名字重名是常态，别名是运维自己的区分依据。
+	ResourceNotes map[string]ResourceNote `json:"resource_notes,omitempty"`
+	InstallToken  string                  `json:"install_token"`
 	// PrevInstallToken + PrevTokenExpiresAt keep a rotated-out token valid during a
 	// grace period, so existing agents don't drop offline the instant the token is
 	// rotated. Managed by ResetToken (rotate).
@@ -1289,6 +1292,7 @@ func (cs *ConfigStore) Set(c ServerConfig) error {
 	c.Categories = cs.cfg.Categories             // categories managed via SetCategory
 	c.HostFolders = cs.cfg.HostFolders           // host folder tree managed via folder endpoints
 	c.HostFolderAssign = cs.cfg.HostFolderAssign // host→folder assignments
+	c.ResourceNotes = cs.cfg.ResourceNotes       // 资源注解：由专用端点管理，保护不被表单清零
 	c.InstallToken = cs.cfg.InstallToken         // token managed via install endpoints
 	c.Account = cs.cfg.Account                   // account managed via auth endpoints
 	c.Checks = cs.cfg.Checks                     // checks managed via check endpoints

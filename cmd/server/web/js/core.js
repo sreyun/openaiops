@@ -771,6 +771,26 @@ const isSystemMount = p => {
   return p === "/boot" || p.startsWith("/boot/") || p === "/System" || p.startsWith("/System/");
 };
 
+// 容器运行时 / kubelet 的数据目录：它们**下面**的挂载点是每容器、每 Pod 的临时卷。
+// 目录本身不在此列——把独立盘挂到 /var/lib/docker 是常见做法，那块盘反而最该盯。
+const CONTAINER_VOLUME_ROOTS = [
+  "/var/lib/docker", "/var/lib/containers", "/var/lib/containerd", "/run/containerd",
+  "/var/lib/kubelet", "/var/lib/rancher", "/run/k3s", "/var/lib/crio", "/run/crio",
+  "/var/lib/origin", "/var/snap/microk8s",
+];
+
+const isContainerVolumeMount = p => {
+  p = String(p || "");
+  return CONTAINER_VOLUME_ROOTS.some(root => p.startsWith(root + "/"));
+};
+
+/** 主机卡片/列表里不该出现的挂载点：系统盘 + 容器/Pod 的内部卷。
+ *
+ * 新版 agent 已经不再上报后者，这里兜的是两种情况：还没升级的 agent，以及历史数据。
+ * 一台节点几十个 Pod 就是几十条"磁盘"，把卡片刷满不说，它们多半只是根盘的绑定挂载——
+ * 同一块盘被数很多遍，"最满的那块盘"也就跟着失真。 */
+const isNoiseMount = p => isSystemMount(p) || isContainerVolumeMount(p);
+
 /* ---------- 挂载路径智能缩短（K8s PVC / 长路径截断） ---------- */
 const shortenMountPath = (raw, maxLen = 42) => {
   const p = String(raw || "");

@@ -111,7 +111,7 @@ async function hostBatchMoveFolder() {
     toast(I18N.t("toast.category_updated"), "ok");
     setHostSelectMode(false);
     await loadHostFolders();
-    refresh();
+    await afterHostFolderChange();
   } catch (e) { toast(I18N.t("toast.update_failed") + e, "err"); }
 }
 
@@ -159,7 +159,7 @@ function hostCard(h) {
   const swap = (m.swap_total || 0) > 0
     ? bar(I18N.t("section.swap"), m.swap_percent || 0, (m.swap_percent || 0).toFixed(1) + "% · " + fmtGB(m.swap_used || 0) + "/" + fmtGB(m.swap_total || 0) + I18N.t("unit.gb"))
     : "";
-  const disks = (Array.isArray(m.disks) ? m.disks : []).filter(d => !isSystemMount(d.path));
+  const disks = (Array.isArray(m.disks) ? m.disks : []).filter(d => !isNoiseMount(d.path));
   const disksHtml = disks.length
     ? disks.map(d => {
         const shortPath = shortenMountPath(d.path);
@@ -257,7 +257,7 @@ function hostListHeader() {
 /* ---------- 渲染：主机列表行（列表视图） ---------- */
 function hostRow(h) {
   const m = h.latest || {};
-  const disks = (Array.isArray(m.disks) ? m.disks : []).filter(d => !isSystemMount(d.path));
+  const disks = (Array.isArray(m.disks) ? m.disks : []).filter(d => !isNoiseMount(d.path));
   const diskMax = disks.length ? Math.max(...disks.map(d => d.percent)) : (m.disk_percent || 0);
   const gpus = Array.isArray(m.gpus) ? m.gpus : [];
   const gpuMax = gpus.length ? Math.max(...gpus.map(g => g.util_percent || 0)) : null;
@@ -704,6 +704,21 @@ function showHostTreeCtx(x, y, folderId) {
   });
 }
 
+/** 分组增删改之后的统一收尾。
+ *
+ * 两步缺一不可：
+ *   - renderHostTree()：树的数据（HOST_FOLDERS）已经是新的了，立刻重画，用户看到的是
+ *     自己刚敲的名字，而不是等一个网络往返；
+ *   - refresh(true)：主机行上的分组标签来自 /hosts 的 category，得重新拉。**必须带 true**——
+ *     refresh() 有 in-flight 去重（nav.js），而页面本身在定时刷新，不加 force 时十有八九
+ *     拿到的是"改名之前就发出的那一次"，于是界面要等下一拍才变。这正是"改了名字得手动
+ *     刷新才看得到"的成因。
+ */
+async function afterHostFolderChange() {
+  renderHostTree();
+  await refresh(true);
+}
+
 async function hostFolderAdd(parentId) {
   const flat = flattenHostFolders(HOST_FOLDERS.folders || []);
   const parent = parentId ? flat.find(x => x.id === parentId) : null;
@@ -730,7 +745,7 @@ async function hostFolderAdd(parentId) {
     HOST_TREE_COLLAPSED.delete(parentId || "__all__");
     persistHostTreeCollapsed();
     await loadHostFolders();
-    renderHosts(LAST_HOSTS);
+    await afterHostFolderChange();
   } catch (e) { toast(I18N.t("toast.update_failed") + e, "err"); }
 }
 
@@ -797,7 +812,7 @@ async function hostFolderRename(id) {
     }
     toast(I18N.t("toast.folder_saved"), "ok");
     await loadHostFolders();
-    refresh();
+    await afterHostFolderChange();
   } catch (e) { toast(I18N.t("toast.update_failed") + e, "err"); }
 }
 
@@ -909,7 +924,7 @@ async function hostFolderDelete(id) {
     if (CUR_FOLDER === id || (match && match.has(CUR_FOLDER))) setCurFolder("");
     toast(I18N.t("toast.folder_deleted"), "ok");
     await loadHostFolders();
-    refresh();
+    await afterHostFolderChange();
   } catch (e) { toast(I18N.t("toast.deleted") + ": " + e, "err"); }
 }
 
@@ -1202,7 +1217,7 @@ async function editCategory(id, cur) {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ folder_id: folderId })
     });
-    if (r.ok) { toast(I18N.t("toast.category_updated"), "ok"); await loadHostFolders(); refresh(); }
+    if (r.ok) { toast(I18N.t("toast.category_updated"), "ok"); await loadHostFolders(); await afterHostFolderChange(); }
     else toast(I18N.t("toast.update_failed2"), "err");
   } catch (e) { toast(I18N.t("toast.update_failed") + e, "err"); }
 }
