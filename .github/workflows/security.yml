@@ -9,12 +9,6 @@ name: Security · 代码安全门 (SAST + 依赖漏洞 + 密钥扫描 + SBOM)
 # 随着存量问题清零，可把 gosec/staticcheck 逐步提升为硬门槛。
 
 on:
-  push:
-    tags:
-      - 'v*'
-  pull_request:
-  schedule:
-    - cron: '0 2 * * 1'   # 每周一 02:00 UTC 复扫，捕获新披露的 CVE
   workflow_dispatch:
 
 permissions:

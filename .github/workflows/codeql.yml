@@ -4,12 +4,7 @@ name: CodeQL · 深度 SAST (Go)
 # 面向企业交付的"我们做静态安全分析"背书。
 
 on:
-  push:
-    tags:
-      - 'v*'
-  pull_request:
-  schedule:
-    - cron: '0 3 * * 1'   # 每周一 03:00 UTC
+  workflow_dispatch:
 
 permissions:
   contents: read

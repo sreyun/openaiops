@@ -7,9 +7,6 @@ name: Release · Build Binaries & Docker
 #   HW_SECRET_KEY  =  <华为云秘密密钥 SK>
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
       tag:
