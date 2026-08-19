@@ -32,9 +32,11 @@ const HOST_SELECTED = new Set();
 function hostSelectBoxHTML(h) {
   if (!HOST_SELECT_MODE) return "";
   const on = HOST_SELECTED.has(h.id);
-  return `<label class="host-pick" title="${esc(I18N.t("section.batch_pick"))}">
-    <input type="checkbox" data-host-pick="${esc(h.id)}"${on ? " checked" : ""}>
-  </label>`;
+  // 用 span 而不是 label：label 会把点击**转发**给内部的 input，于是同一次点击会走两遍
+  // 切换逻辑（选中又取消），表现成"点了没反应"。
+  return `<span class="host-pick" title="${esc(I18N.t("section.batch_pick"))}">
+    <input type="checkbox" data-host-pick="${esc(h.id)}"${on ? " checked" : ""} aria-label="${esc(I18N.t("section.batch_pick"))}">
+  </span>`;
 }
 
 /** 选择态下接管卡片/行的点击：勾选而不是打开详情。返回 true 表示已处理。 */
@@ -93,7 +95,7 @@ async function hostBatchMoveFolder() {
   const options = [{ id: "__ungrouped__", path: I18N.t("section.uncategorized") }]
     .concat(flat.map(f => ({ id: f.id, path: f.path })));
   const folderId = await promptMoveFolder({
-    hostname: I18N.t("section.batch_hosts_n", String(ids.length)).replace("{n}", String(ids.length)),
+    hostname: I18N.t("section.batch_hosts_n").replace("{n}", String(ids.length)),
     options,
     currentId: ""
   });

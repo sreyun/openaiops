@@ -49,6 +49,12 @@ func sanitizeResourceKey(s string) string {
 		if r < 0x20 || r == 0x7f {
 			return ""
 		}
+		// 键会作为一个路径段出现在 PUT /resource-notes/{key} 里：带斜杠的键 encode 之后
+		// 会被 mux 拆成两段而匹配不上，报出来的是一个莫名其妙的 404。直接在这里拒掉，
+		// 让调用方立刻知道键不合法。
+		if r == '/' {
+			return ""
+		}
 	}
 	return s
 }
