@@ -108,6 +108,11 @@ func runRelay(listenAddr, upstream, relaySecret string) {
 		slog.Warn("⚠ 监听地址绑定到所有网卡——如不需外部访问，建议用 --listen 192.168.x.x:8529 绑定到内网IP")
 	}
 
+	// 启动时探一次上游。中继回源不通时，内网每一台 agent 只会看到 502，而它们的运维
+	// 看不到这台网关机的日志；这里把结论**提前**印在中继自己的日志第一屏，装机的人
+	// systemctl status aiops-relay 一眼就能看到"到底是不是我这台出不去网"。
+	go probeRelayUpstream(upstream, relaySecret)
+
 	srv := &http.Server{
 		Addr:              listenAddr,
 		Handler:           handler,
@@ -116,6 +121,73 @@ func runRelay(listenAddr, upstream, relaySecret string) {
 	if err := srv.ListenAndServe(); err != nil {
 		log.Fatalf("Relay 启动失败: %v", err)
 	}
+}
+
+// relayUpstreamProbe 是 http→https 升级探测，可在测试里替换。
+var relayUpstreamProbe = probeUpgradeHTTPToHTTPS
+
+// resolveRelayUpstream 决定中继回源用的上游地址。
+//
+// 它必须和上报走**同一次** http→https 升级：上报那条路径在 main 里晚于中继启动，由
+// normalizeServersPreferHTTPS 把 http://host 探测升级成 https://host（上游 301 到 TLS，
+// 或 80 端口压根不作答时）。中继却是在那之前按值取走 cfg.Server 的，于是同一个进程、
+// 同一份配置会分裂成两个上游地址。
+//
+// 这个分裂在现场长这样，且极难自查：网关机自己的上报一切正常（https），内网每一台
+// agent 的注册与上报却全是 502，中继日志里是 `upstream=http://… err=EOF`——EOF 正是
+// 明文打到只收 TLS 的前门（nginx `return 444` / 只 listen 443）时的表现。域名相同、
+// 配置只有一份，看上去"同一个地址一边通一边不通"。
+func resolveRelayUpstream(server string) string {
+	up := strings.TrimRight(strings.TrimSpace(server), "/")
+	if u := strings.TrimRight(relayUpstreamProbe(up), "/"); u != "" && u != up {
+		slog.Warn("中继上游只接受 HTTPS，回源地址已升级", "from", up, "to", u)
+		return u
+	}
+	return up
+}
+
+// probeRelayUpstream 用**与真实回源完全相同的 Transport** 请求一次上游 /healthz。
+// 必须同一个 Transport：代理、TLS 信任、HTTP 版本这三样只要有一样不同，探测通过而
+// 回源 502 的情形就会出现，那比不探测更误导人。
+func probeRelayUpstream(upstream, relaySecret string) {
+	status, err := relayUpstreamHealth(upstream, relaySecret)
+	if err != nil {
+		slog.Error("Relay 回源自检失败：内网机器将全部收到 502", "upstream", upstream, "err", err)
+		if strings.HasPrefix(strings.ToLower(upstream), "http://") {
+			slog.Error("排查：上游是 http://——若服务端只开了 HTTPS，明文请求会被前门直接断开（正是 EOF）；" +
+				"把 config.yaml 的 server 改成 https:// 后重启 aiops-relay。")
+		}
+		slog.Error("排查：① 本机能否直接访问上游（curl -I " + upstream + "）；" +
+			"② 若需经 HTTP 代理出网，请在 aiops-relay 的 systemd 单元里加 " +
+			"Environment=HTTP_PROXY=… HTTPS_PROXY=… NO_PROXY=…（服务不继承登录 shell 的环境变量）；" +
+			"③ 上游自签证书请配置 ca_cert 或 tls_skip_verify。")
+		return
+	}
+	if status >= 300 {
+		slog.Warn("Relay 回源自检：上游返回非 2xx（回源链路通，但上游本身不健康）",
+			"upstream", upstream, "status", status)
+		return
+	}
+	slog.Info("Relay 回源自检通过", "upstream", upstream)
+}
+
+// relayUpstreamHealth 发出探测请求，返回上游状态码。
+func relayUpstreamHealth(upstream, relaySecret string) (int, error) {
+	req, err := http.NewRequest(http.MethodGet, strings.TrimRight(upstream, "/")+"/healthz", nil)
+	if err != nil {
+		return 0, err
+	}
+	if relaySecret != "" {
+		req.Header.Set("X-Relay-Secret", relaySecret)
+	}
+	c := &http.Client{Transport: relayTransport, Timeout: 15 * time.Second}
+	resp, err := c.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+	return resp.StatusCode, nil
 }
 
 // relayTransport 是中继回源用的连接池。
@@ -128,12 +200,17 @@ func runRelay(listenAddr, upstream, relaySecret string) {
 //
 // 中继机恰恰是最可能挂代理的那一台：它被选作网关，就是因为只有它能出网，而企业里
 // "能出网"往往等于"经由 HTTP 代理出网"。于是安装脚本拿得到、二进制拿不到。
+// ForceAttemptHTTP2 关掉，和 reportTransport 保持一致（见 reporter.go 顶部那段说明）：
+// HTTP/2 把所有请求复用到一条 TCP 连接上，上游一重启这条连接就死，中继上**整个内网**
+// 的注册与上报会同时失败；HTTP/1.1 每个请求各拿一条连接，只有在途请求受影响。
+// 另有一类现场故障也只在 h2 上出现：上游前面的反代 ALPN 谈成 h2 却不能真正承载，
+// 表现为中继一切回源 502，而网关机自己的上报（HTTP/1.1）一切正常——最难自查的组合。
 var relayTransport = &http.Transport{
 	Proxy:               http.ProxyFromEnvironment,
 	MaxIdleConns:        100,
 	MaxIdleConnsPerHost: 50,
 	IdleConnTimeout:     90 * time.Second,
-	ForceAttemptHTTP2:   true,
+	ForceAttemptHTTP2:   false,
 	DialContext: (&net.Dialer{
 		Timeout:   10 * time.Second,
 		KeepAlive: 30 * time.Second,

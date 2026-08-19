@@ -2119,7 +2119,7 @@ window.DICT_EN = {
   "install.mode_exclusive_hint": "Relay and multi-server are mutually exclusive — do not configure both on one Agent.",
   "install.invalid_extra_server": "Extra server URL is invalid; use http(s)://host[:port]",
   "install.fill_gateway_first": "Enter a valid gateway LAN IP first",
-  "install.gateway_category_hint": "Gateway relay install does not set category/token; put grouping on the ② internal command.",
+  "install.gateway_category_hint": "The gateway command now carries the token and selected group: the gateway registers itself and stays monitored and auto-upgradable.",
   "install.relay_secret_hint": "Server and gateway must share the same AIOPS_RELAY_SECRET (optional; unset skips checks). Mismatch causes relay auth failures.",
   "install.relay_rewrite_note": "Scripts fetched via relay rewrite server to the gateway and strip servers[] (mutually exclusive with multi-server).",
   "install.multi_scenario": "Scenario",
@@ -2335,7 +2335,8 @@ window.DICT_EN = {
   "check.history_title": "Check history",
   "chart.zoom_title": "Trend zoom",
   "chart.zoom_hint": "Drag to select a range to zoom · double-click to reset · hover to view values",
-  
+  "ui.v2_console": "New console",
+  "ui.v2_console_hint": "Vue console (experimental, runs alongside the classic one — switch back any time)",
   "about.title": "About Us",
   "about.product": "AIOps",
   "about.version": "Version",

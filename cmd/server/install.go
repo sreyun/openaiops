@@ -1956,6 +1956,21 @@ aiops_start_relay_fallback() {
   echo "[AIOps] relay started in background (log: $DIR/relay.log)"
 }
 
+# 把装机环境里的出网代理写进 unit。systemd 服务**不继承**登录 shell 的环境变量：
+# 装机的人 curl 得通（shell 里有 HTTP_PROXY），中继起来后回源却永远直连——表现为
+# 内网每台机器注册/上报全是 502，而网关机上手工 curl 一切正常，极难自查。
+RELAY_ENV=""
+for _pv in HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy; do
+  eval "_pval=\${$_pv:-}"
+  if [ -n "$_pval" ]; then
+    RELAY_ENV="${RELAY_ENV}Environment=\"$_pv=$_pval\"
+"
+  fi
+done
+if [ -n "$RELAY_ENV" ]; then
+  echo "[AIOps] relay 将经由代理回源（已写入 systemd 单元）"
+fi
+
 if aiops_has_systemd && [ "$(id -u)" = "0" ]; then
   cat > /etc/systemd/system/aiops-relay.service <<UNIT
 [Unit]
@@ -1965,7 +1980,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=$DIR
-ExecStart=$DIR/aiops-agent --config $DIR/config.yaml
+${RELAY_ENV}ExecStart=$DIR/aiops-agent --config $DIR/config.yaml
 Restart=always
 RestartSec=5
 [Install]

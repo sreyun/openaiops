@@ -15,8 +15,9 @@ func TestInstallShellTemplatesParse(t *testing.T) {
 		t.Skip("no /bin/sh on this platform")
 	}
 	for name, tpl := range map[string]string{
-		"install.sh":   installShTemplate,
-		"uninstall.sh": uninstallShTemplate,
+		"install.sh":       installShTemplate,
+		"uninstall.sh":     uninstallShTemplate,
+		"relay-install.sh": relayInstallShTemplate,
 	} {
 		t.Run(name, func(t *testing.T) {
 			cmd := exec.Command(sh, "-n")
@@ -48,5 +49,16 @@ func TestInstallScriptReportsRealHTTPStatus(t *testing.T) {
 	}
 	if !strings.Contains(installShTemplate, "HTTP_PROXY") {
 		t.Fatal("install.sh 的 502 解释里应提示中继机的出网代理设置")
+	}
+}
+
+// 中继机是"唯一能出网"的那台，而企业里"能出网"往往等于"经由 HTTP 代理出网"。
+// systemd 服务不继承登录 shell 的环境变量：装机时 curl 通、中继起来后回源却直连，
+// 结果是内网每台机器注册/上报全 502，网关机上手工 curl 却一切正常。
+func TestRelayInstallPassesProxyEnvIntoUnit(t *testing.T) {
+	for _, must := range []string{"RELAY_ENV", "HTTPS_PROXY", "NO_PROXY", "${RELAY_ENV}ExecStart="} {
+		if !strings.Contains(relayInstallShTemplate, must) {
+			t.Fatalf("中继安装脚本没有把出网代理写进 systemd 单元，缺少 %q", must)
+		}
 	}
 }

@@ -230,6 +230,22 @@ func (t *serverTarget) refreshToken() {
 	}
 }
 
+// httpErrSnipLen 是附在错误信息后面的响应体长度上限：够放下中继那段"回源失败/原因/
+// 排查"，又不至于把一页 HTML 错误页灌进日志。
+const httpErrSnipLen = 400
+
+// statusErr 把非 2xx 响应连同响应体开头一段包成错误。
+//
+// 中继模式下这是内网机器唯一能看到真实原因的通道：/api/v1/agent/* 的 502 由网关机上
+// 的中继产生，正文写明了回源失败的原因（连不上上游 / 需要 HTTP_PROXY / 端口没监听），
+// 而中继机的日志只有网关机的运维看得到。只报一个"状态码 502"等于把线索全丢了。
+func statusErr(resp *http.Response) error {
+	if snip := readHTTPBodySnip(resp.Body, httpErrSnipLen); snip != "" {
+		return fmt.Errorf("服务端返回状态码 %d: %s", resp.StatusCode, snip)
+	}
+	return fmt.Errorf("服务端返回状态码 %d", resp.StatusCode)
+}
+
 // register sends the agent's identity (with this target's token) to the server.
 // On success the target is marked registered; 403 or network errors return false
 // but don't crash — the agent keeps retrying on subsequent report cycles.
@@ -249,7 +265,15 @@ func (t *serverTarget) register(base shared.Report) bool {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		slog.Warn("注册被拒，可能 Token 已失效或指纹无效", "server", t.server, "status", resp.StatusCode)
+		// 5xx 不是鉴权问题，说这话会把人引到错误的方向：中继模式下它几乎总是"网关机
+		// 回源失败"，真实原因只在响应体里（cmd/agent/relay.go 的 ErrorHandler 写的那段），
+		// 而中继机的日志内网机器上的人根本看不到。所以两件事都要做：分开措辞、带上正文。
+		msg := "注册被拒，可能 Token 已失效或指纹无效"
+		if resp.StatusCode >= 500 {
+			msg = "注册失败：服务端或中继返回 5xx"
+		}
+		slog.Warn(msg, "server", t.server, "status", resp.StatusCode,
+			"detail", readHTTPBodySnip(resp.Body, httpErrSnipLen))
 		return false
 	}
 	// 取出服务端下发的日志加密密钥（base64）；之后每批日志用它 gzip+AES-GCM 加密上报。
@@ -378,7 +402,7 @@ func (t *serverTarget) send(rep shared.Report) error {
 		return fmt.Errorf("服务端返回状态码 400（请求格式错误）")
 	}
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("服务端返回状态码 %d", resp.StatusCode)
+		return statusErr(resp)
 	}
 	// 解析响应：服务端可能下发分布式探测任务（迭代 D）。解析失败不影响上报本身。
 	var rr shared.ReportResponse
@@ -1195,14 +1219,15 @@ func (a *Agent) postBackfill(t *serverTarget, batch []shared.BackfillSample) err
 		return err
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
 	if resp.StatusCode == http.StatusNotFound {
 		// 老服务端没有这个端点：补传对它没有意义，丢掉这批而不是无限重试。
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
 		return nil
 	}
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("服务端返回状态码 %d", resp.StatusCode)
+		return statusErr(resp)
 	}
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
 	return nil
 }
 

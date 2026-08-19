@@ -222,6 +222,12 @@
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
               <span data-i18n="profile.title">个人信息</span>
             </button>
+            <!-- 新版控制台入口：只有把前端产物打进二进制的版本才有 /v2，
+                 所以默认隐藏，由 /api/v1/summary 的 v2_console 决定是否显示。 -->
+            <a class="user-dropdown-item" id="ddV2Console" href="/v2/" style="display:none" data-i18n-title="ui.v2_console_hint" title="Vue 新版控制台（实验性，与经典版并行）">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg>
+              <span data-i18n="ui.v2_console">新版控制台</span>
+            </a>
             <button class="user-dropdown-item" id="ddAbout">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
               <span data-i18n="about.title">关于我们</span>
@@ -1919,7 +1925,7 @@
           </div>
           <div class="hint" data-i18n="install.gateway_cmd_hint">安装后自动启动中继服务，监听下方端口，转发所有请求到云监控中心。Linux 使用 sudo -E 以保留 AIOPS_RELAY_SECRET。</div>
           <div class="hint" data-i18n="install.relay_secret_hint">服务端与网关须配置相同 AIOPS_RELAY_SECRET（未设置则不校验）；密钥不一致会导致中继鉴权失败。</div>
-          <div class="hint" data-i18n="install.gateway_category_hint">网关中继安装不写入分组/Token；一级分组请写在②内网安装命令。</div>
+          <div class="hint" data-i18n="install.gateway_category_hint">网关命令已带上 Token 与所选分组：网关自己也会注册进主机列表，能被监控和自动升级。</div>
         </div>
         <div class="grid2">
           <div class="field">

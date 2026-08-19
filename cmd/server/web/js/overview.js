@@ -72,6 +72,10 @@ function renderCards(s) {
   if (verSpan && s.version && s.version !== "AIOps") {
     verSpan.textContent = s.version;
   }
+  // 新版控制台入口：只有产物真的打进了这个二进制才显示。给一个点了就 404 的菜单项
+  // 比不给还糟——用户会以为是自己环境坏了。
+  const v2Entry = $("ddV2Console");
+  if (v2Entry) v2Entry.style.display = s.v2_console ? "" : "none";
   TERMINAL_ENABLED = s.terminal_enabled !== false;
   if (typeof DESKTOP_ENABLED !== "undefined") DESKTOP_ENABLED = s.desktop_enabled !== false;
 }

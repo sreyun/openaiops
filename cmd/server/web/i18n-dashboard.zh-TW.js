@@ -2119,7 +2119,7 @@ window.DICT_TW = {
   "install.mode_exclusive_hint": "中繼與多服務端互斥，請勿在同一 Agent 上同時配置。",
   "install.invalid_extra_server": "額外服務端 URL 無效，請使用 http(s)://host[:port]",
   "install.fill_gateway_first": "請先填寫有效的閘道內網 IP",
-  "install.gateway_category_hint": "閘道中繼安裝不寫入分組/Token；一級分組請寫在②內網安裝命令。",
+  "install.gateway_category_hint": "閘道命令已帶上 Token 與所選分組：閘道自己也會註冊進主機列表，能被監控與自動升級。",
   "install.relay_secret_hint": "服務端與閘道須配置相同 AIOPS_RELAY_SECRET（未設置則不校驗）；密鑰不一致會導致中繼鑑權失敗。",
   "install.relay_rewrite_note": "經中繼拉取的腳本會把 server 改寫為閘道地址，並去掉 servers[]（與中繼互斥）。",
   "install.multi_scenario": "適用場景",
@@ -2335,7 +2335,8 @@ window.DICT_TW = {
   "check.history_title": "監控歷史",
   "chart.zoom_title": "趨勢放大",
   "chart.zoom_hint": "拖動框選可放大區間 · 雙擊還原 · 懸停檢視數值",
-  
+  "ui.v2_console": "新版控制台",
+  "ui.v2_console_hint": "Vue 新版控制台（實驗性，與經典版並行；隨時可切回）",
   "about.title": "關於我們",
   "about.product": "智慧維運 AIOps",
   "about.version": "版本",

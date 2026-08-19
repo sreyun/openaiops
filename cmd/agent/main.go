@@ -415,7 +415,9 @@ func main() {
 		// 恰恰是面板上唯一看不见的一台——没有指标、没有告警、自动升级够不到它，出事
 		// 只能有人登上去看。它出网正常（这是中继模式的前提），直连上游上报没有额外
 		// 成本；上报走 cfg.Server，不绕自己一圈。
-		go runRelay(listen, strings.TrimRight(cfg.Server, "/"), cfg.RelaySecret)
+		// 回源地址要和上报地址走同一次 http→https 升级，见 resolveRelayUpstream。
+		// 放进 goroutine 是为了不让探测（最坏 ~15s）挡住启动的其余部分。
+		go runRelay(listen, resolveRelayUpstream(cfg.Server), cfg.RelaySecret)
 		if strings.TrimSpace(cfg.Token) == "" {
 			// 老网关（本改动之前装的）配置里没有 token。服务端开了安装 Token 校验时
 			// 注册会被拒，症状是"中继照常工作、主机列表里就是没有它"——说清楚比让人

@@ -1033,21 +1033,26 @@ function renderRelayCmd() {
   const relayReady = validRelayHost(gwIP) && port > 0;
   const relay = relayReady ? formatRelayBase(gwIP, port) : "";
   const listenEnv = port ? `RELAY_LISTEN=:${port}` : "";
+  // 网关命令必须带 token：网关在中继的同时照常采集上报，没有 token 就注册不上——
+  // 现场症状是「内网机器全在，唯独这台网关在主机列表里找不到」，而转发一切正常。
+  // 只带身份参数（token/归属），log_paths 是给 ② 的内网机器的。
+  const gwQ = "token=" + encodeURIComponent(token) + installFolderQueryParts();
   let gatewayCmd = "", internalCmd = "";
   if (port) {
     if (CUR_OS === "windows") {
-      gatewayCmd = `${PS_TLS12}$env:RELAY_LISTEN=':${port}'; irm "${server}/install-relay.ps1" | iex`;
+      gatewayCmd = `${PS_TLS12}$env:RELAY_LISTEN=':${port}'; irm "${server}/install-relay.ps1?${gwQ}" | iex`;
       internalCmd = relayReady ? `${PS_TLS12}irm "${relay}/install.ps1?${q}" | iex` : "";
     } else if (CUR_OS === "macos") {
-      gatewayCmd = `curl -fsSL "${server}/install-relay.sh" | env ${listenEnv} sh`;
+      gatewayCmd = `curl -fsSL "${server}/install-relay.sh?${gwQ}" | env ${listenEnv} sh`;
       internalCmd = relayReady ? `curl -fsSL "${relay}/install.sh?${q}" | sh` : "";
     } else {
       // sudo -E keeps AIOPS_RELAY_SECRET; env sets listen port for the install script.
-      gatewayCmd = `curl -fsSL "${server}/install-relay.sh" | sudo -E env ${listenEnv} sh`;
+      gatewayCmd = `curl -fsSL "${server}/install-relay.sh?${gwQ}" | sudo -E env ${listenEnv} sh`;
       internalCmd = relayReady ? `curl -fsSL "${relay}/install.sh?${q}" | sh` : "";
     }
   }
-  $("relayGatewayCmd").textContent = gatewayCmd || I18N.t("install.invalid_port", "请填写有效的监听端口");
+  // 命令里现在带着 token，展示必须打码（复制走 dataset.rawCmd，见 nav.js）。
+  $("relayGatewayCmd").textContent = maskInstallCmd(gatewayCmd) || I18N.t("install.invalid_port", "请填写有效的监听端口");
   $("relayInternalCmd").textContent = maskInstallCmd(internalCmd) || I18N.t("install.fill_gateway_first", "请先填写有效的网关内网 IP（灰色提示不会自动填入）");
   const copyBtn = $("copyCmdBtn");
   if (copyBtn) copyBtn.disabled = !relayReady;

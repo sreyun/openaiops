@@ -2139,7 +2139,7 @@
   "install.mode_exclusive_hint": "中继与多服务端互斥，请勿在同一 Agent 上同时配置。",
   "install.invalid_extra_server": "额外服务端 URL 无效，请使用 http(s)://host[:port]",
   "install.fill_gateway_first": "请先填写有效的网关内网 IP",
-  "install.gateway_category_hint": "网关中继安装不写入分组/Token；一级分组请写在②内网安装命令。",
+  "install.gateway_category_hint": "网关命令已带上 Token 与所选分组：网关自己也会注册进主机列表，能被监控和自动升级。",
   "install.relay_secret_hint": "服务端与网关须配置相同 AIOPS_RELAY_SECRET（未设置则不校验）；密钥不一致会导致中继鉴权失败。",
   "install.relay_rewrite_note": "经中继拉取的脚本会把 server 改写为网关地址，并去掉 servers[]（与中继互斥）。",
   "install.multi_scenario": "适用场景",
@@ -2364,7 +2364,8 @@
   "chart.zoom_title": "趋势放大",
   "chart.zoom_hint": "拖动框选可放大区间 · 双击还原 · 悬停查看数值",
   /* --- 关于我们弹窗（与 Android 端「设置 → 关于我们」同源文案） --- */
-  
+  "ui.v2_console": "新版控制台",
+  "ui.v2_console_hint": "Vue 新版控制台（实验性，与经典版并行；随时可切回）",
   "about.title": "关于我们",
   "about.product": "智能运维 AIOps",
   "about.version": "版本",
