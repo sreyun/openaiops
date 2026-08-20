@@ -99,10 +99,18 @@ function renderHostBatchBar() {
  *
  * 这两个码说明请求压根没到业务逻辑：要么面板二进制里没有这条路由（版本过旧），要么前面
  * 有反向代理/WAF 按方法把 POST 拦了。裸状态码对用户毫无指向性——他会以为是权限或参数。 */
-function endpointUnavailableMsg(code) {
-  return I18N.t("toast.endpoint_unavailable",
+function endpointUnavailableMsg(code, resp) {
+  // Allow 头是决定性线索，直接摆出来，省掉一轮"请打开 F12 看看"：
+  //   Allow: GET, HEAD  → 这条路径在当前二进制里压根没注册，只有 `GET /` 那条兜底匹配上了
+  //                       ——面板版本过旧（docker compose up -d 不会自动换镜像）。
+  //   Allow: POST       → 路由在，是方法被中间环节改写了。
+  //   没有 Allow        → 这个 405 不是服务端 mux 发的，来自前面的代理/WAF。
+  var allow = "";
+  try { allow = (resp && resp.headers && resp.headers.get("Allow")) || ""; } catch (e) { /* 跨域下读不到头 */ }
+  var base = I18N.t("toast.endpoint_unavailable",
     "服务端没有这个接口（HTTP {code}）。多半是面板版本过旧，或前面的反向代理/WAF 拦掉了 POST。请升级面板后重试。")
     .replace("{code}", String(code));
+  return allow ? base + " [Allow: " + allow + "]" : base;
 }
 
 /* 批量改分组。
@@ -139,7 +147,7 @@ async function hostBatchMoveFolder() {
       // 权限、是参数还是版本；这三条的排查方向完全不同。
       console.error("[aiops] batch folder failed", r.status, body, { url: `${API}/hosts/folder/batch`, ids, folderId });
       if (r.status === 404 || r.status === 405) {
-        toast(endpointUnavailableMsg(r.status), "err");
+        toast(endpointUnavailableMsg(r.status, r), "err");
         return;
       }
       const why = body.error || `HTTP ${r.status}`;
@@ -204,7 +212,7 @@ async function promptBatchFolderTarget(count) {
     const body = await r.json().catch(() => ({}));
     const newId = body && body.folder && body.folder.id;
     if (!r.ok || !newId) {
-      if (r.status === 404 || r.status === 405) { toast(endpointUnavailableMsg(r.status), "err"); return null; }
+      if (r.status === 404 || r.status === 405) { toast(endpointUnavailableMsg(r.status, r), "err"); return null; }
       toast(body.error || (I18N.t("toast.update_failed2") + `：HTTP ${r.status}`), "err");
       return null;
     }

@@ -725,6 +725,15 @@ function createTermTab(id, name, tabName, opts) {
   // (preventDefault + fake KeyboardEvent drops characters on some browsers).
   screen.addEventListener("keydown", function(ev) {
     if (document.activeElement === input) return;
+    // 聚焦隐藏 textarea 会把文档选区收掉——而"鼠标选中一段输出，再按 Ctrl+C"正是终端里
+    // 最常用的复制方式。先把选区取下来存住，termKeyDown 的复制分支优先用这份快照。
+    //
+    // 右键菜单一直是好的，就是因为它在弹出时也做了同样的缓存（_termSel）；键盘这条路
+    // 少了这一步，于是 Ctrl+C 读到空选区 → 当成没选中 → 直接把 ^C 发给 shell，
+    // Ctrl+Shift+C 则弹一句"没有选中内容"。明文 HTTP 下尤其显眼：用户以为是剪贴板权限问题。
+    if ((ev.ctrlKey || ev.metaKey) && (ev.key === "c" || ev.key === "C" || ev.key === "Insert")) {
+      tabObj._pendingCopySel = termSelectionText(tabObj);
+    }
     input.focus({ preventScroll: true });
     const printable = ev.key && ev.key.length === 1 && !ev.ctrlKey && !ev.metaKey && !ev.altKey;
     if (printable) {
@@ -1918,7 +1927,11 @@ function termKeyDown(e, tab) {
   // Ctrl+Shift+C / Cmd+Shift+C / Ctrl+Insert → 强制复制
   if ((mod && (k === "c" || k === "C")) || (mod && k === "Insert")) {
     const shiftCopy = e.shiftKey;
-    const sel = termSelectionText(tab);
+    // 优先用按键那一刻的快照：走 screen 这条路时，焦点已经被交给隐藏 textarea，
+    // 现场再读 window.getSelection() 只会拿到空的。
+    const snapshot = tab && tab._pendingCopySel;
+    if (tab) tab._pendingCopySel = "";
+    const sel = snapshot || termSelectionText(tab);
     if (sel) {
       e.preventDefault();
       termCopyText(sel);

@@ -51,3 +51,20 @@ func TestRegisteredAPIRoutesStillWinOverCatchAll(t *testing.T) {
 		t.Fatalf("GET /api/v1/hosts 被 /api/ 兜底吃掉了：%d %s", rr.Code, rr.Body.String())
 	}
 }
+
+// 兜底要分清"方法用错"和"接口不存在"：前者仍是 405 且必须带 Allow，后者才是 404。
+// 混成一个的话，运维拿到"接口不存在"却其实只是方法写错了，方向照样是歪的。
+func TestWrongMethodOnRealPathStillReturns405WithAllow(t *testing.T) {
+	srv, _ := newTestServer(t)
+	mux := srv.Routes()
+	// POST /api/v1/hosts/folder/batch 是真实路由；换成 PUT 就该是 405 + Allow: POST。
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/hosts/folder/batch", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("真实路径上的错方法应回 405，得到 %d: %s", rr.Code, rr.Body.String())
+	}
+	if allow := rr.Header().Get("Allow"); !strings.Contains(allow, http.MethodPost) {
+		t.Errorf("405 必须带 Allow 指出可用方法，实际 Allow=%q", allow)
+	}
+}

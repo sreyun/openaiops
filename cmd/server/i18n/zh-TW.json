@@ -405,6 +405,7 @@
   "log.kind.plugin": "插件",
   "common.invalid_json": "JSON 格式不合法",
   "common.api_not_found": "介面 %s %s 在目前面板版本裡不存在。多半是面板二進位過舊（升級後容器沒真正換映像），請升級面板後重試。",
+  "common.api_method_not_allowed": "介面 %s %s 的方法不對，這條路徑支援：%s。",
   "common.host_not_found": "主機不存在",
   "common.invalid_id": "ID 不合法",
   "common.host_required": "主機必填",

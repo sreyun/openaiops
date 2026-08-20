@@ -413,6 +413,7 @@
   "log.kind.plugin": "插件",
   "common.invalid_json": "JSON 格式不合法",
   "common.api_not_found": "接口 %s %s 在当前面板版本里不存在。多半是面板二进制过旧（升级后容器没真正换镜像），请升级面板后重试。",
+  "common.api_method_not_allowed": "接口 %s %s 的方法不对，这条路径支持：%s。",
   "common.host_not_found": "主机不存在",
   "common.invalid_id": "ID 不合法",
   "common.host_required": "主机必填",
