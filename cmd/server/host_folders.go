@@ -917,40 +917,81 @@ func (s *Server) handleSetHostFolderBatch(w http.ResponseWriter, r *http.Request
 			"error": fmt.Sprintf("too many hosts in one batch (max %d)", maxBatchFolderHosts)})
 		return
 	}
+	// 目标分组先校验一次：分组可能在别的标签页里被删了，这时要说得出"分组没了"，
+	// 而不是让每台主机各自失败一遍。
+	targetID := sanitizeFolderID(req.FolderID)
+	if targetID != "" && targetID != HostFolderUngroupedID {
+		folders, _ := s.cfg.hostFoldersSnapshot()
+		if findFolderNode(folders, targetID) == nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "目标分组不存在（可能已被删除，请刷新后重试）"})
+			return
+		}
+	}
 	// currentUser 解析不出用户时按"不受限"处理，与读路径（filterHostsForUser）一致：
 	// 会话与角色已经由 authMiddleware 把过一遍，这里再 401 只会让老部署（登录用的是
 	// 旧版单账号、没有镜像进 cfg.Users）无论怎么点都失败——而单台改分组也是同一条路。
 	u, _ := s.currentUser(r)
+	// 能改的照改，改不了的如实报出来。
+	//
+	// 这里原来是"有一台不合格就整批拒绝"。听着稳妥，实际把用户堵死：界面上的勾选是几分钟前
+	// 的快照，中途有机器被删、或批里混进一台没授权的机器，用户看到的就是一句"失败"，
+	// 而且怎么点都失败——他既不知道是哪台，也没有别的入口把剩下的机器改掉。
+	// 真正必须守住的是"不给不存在的主机写归属"（那会在配置里留下回收不掉的孤儿记录），
+	// 跳过它就够了，不必牵连其余。
+	applied := make([]string, 0, len(ids))
+	skippedMissing := []string{}
+	skippedDenied := []string{}
 	for _, id := range ids {
 		if !s.userCanAccessHost(u, id) {
-			writeJSON(w, http.StatusForbidden, map[string]string{
-				"error": "无权访问该主机（主机组/标签授权）: " + id})
-			return
+			skippedDenied = append(skippedDenied, id)
+			continue
 		}
-		// 只接受确实存在的主机：界面上的选择可能是几分钟前的快照，中间主机被删掉了。
-		// 给不存在的 id 写归属，会在配置里留下永远回收不掉的孤儿记录。
 		if _, exists := s.store.GetHost(id); !exists {
-			writeJSON(w, http.StatusBadRequest, map[string]string{
-				"error": "主机不存在（可能已被删除，请刷新后重试）: " + id})
+			skippedMissing = append(skippedMissing, id)
+			continue
+		}
+		applied = append(applied, id)
+	}
+	if len(applied) == 0 {
+		// 一台都改不动才算失败，并且要说清楚是"没了"还是"没权限"。
+		if len(skippedDenied) > 0 && len(skippedMissing) == 0 {
+			writeJSON(w, http.StatusForbidden, map[string]string{
+				"error": fmt.Sprintf("无权访问所选主机（主机组/标签授权），共 %d 台", len(skippedDenied))})
 			return
 		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": fmt.Sprintf("所选主机都已不存在（可能已被删除，请刷新后重试），共 %d 台",
+				len(skippedMissing)+len(skippedDenied))})
+		return
 	}
-	if err := s.cfg.assignHostFoldersBatch(ids, sanitizeFolderID(req.FolderID)); err != nil {
+	if err := s.cfg.assignHostFoldersBatch(applied, targetID); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	folderName := "未分组"
-	if fid := sanitizeFolderID(req.FolderID); fid != "" && fid != HostFolderUngroupedID {
+	if targetID != "" && targetID != HostFolderUngroupedID {
 		folders, _ := s.cfg.hostFoldersSnapshot()
-		if p := folderPathMap(folders)[fid]; p != "" {
+		if p := folderPathMap(folders)[targetID]; p != "" {
 			folderName = p
 		} else {
 			folderName = "未知分组"
 		}
 	}
-	s.addAuditLog(r, LogEntry{Kind: KindOperation, Level: "info",
-		Message: fmt.Sprintf("批量变更分组：%d 台主机 → %s", len(ids), folderName)})
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "count": len(ids), "folder_id": req.FolderID})
+	msg := fmt.Sprintf("批量变更分组：%d 台主机 → %s", len(applied), folderName)
+	if n := len(skippedMissing) + len(skippedDenied); n > 0 {
+		msg += fmt.Sprintf("（跳过 %d 台：不存在 %d / 无权限 %d）", n, len(skippedMissing), len(skippedDenied))
+	}
+	s.addAuditLog(r, LogEntry{Kind: KindOperation, Level: "info", Message: msg})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":          "ok",
+		"count":           len(applied),
+		"folder_id":       req.FolderID,
+		"folder_path":     folderName,
+		"skipped":         append(append([]string{}, skippedMissing...), skippedDenied...),
+		"skipped_missing": len(skippedMissing),
+		"skipped_denied":  len(skippedDenied),
+	})
 }
 
 func (s *Server) handleDeleteHostFolder(w http.ResponseWriter, r *http.Request) {

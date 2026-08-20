@@ -613,7 +613,9 @@ section{scroll-margin-top:80px; margin-bottom:24px}
 }
 .host:hover{ border-color:var(--accent); background:var(--panel2) }
 .host-head{display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:4px; min-width:0}
-.host-name{display:flex; align-items:center; gap:8px; min-width:0; flex:1; overflow:hidden}
+/* 标题优先：名字先拿到宽度，标签行只在剩余空间里收缩（分组徽标自己会省略号）。
+   两侧都写 flex:1 的时候，标签行会把标题压到 0——主机名会整个消失。 */
+.host-name{display:flex; align-items:center; gap:8px; min-width:6.5em; flex:1 1 auto; overflow:hidden}
 .dot{width:8px; height:8px; border-radius:50%; flex:none; transition:all .3s}
 .dot.on{background:var(--ok); box-shadow:0 0 0 3px var(--ok-soft); animation:dotPulse 2s ease-in-out infinite}
 .dot.off{background:var(--crit); box-shadow:0 0 0 3px var(--crit-soft); animation:dotPulseRed 2s ease-in-out infinite}
@@ -627,7 +629,7 @@ section{scroll-margin-top:80px; margin-bottom:24px}
 }
 .hn{font-weight:650; font-size:14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer}
 .hn:hover{color:var(--accent)}
-.host-tags{display:flex; align-items:center; gap:5px; flex:1 1 auto; min-width:0; justify-content:flex-end; overflow:hidden}
+.host-tags{display:flex; align-items:center; gap:5px; flex:0 1 auto; min-width:0; justify-content:flex-end; overflow:hidden}
 .os-badge{font-size:9.5px; padding:2px 6px; border-radius:4px; background:var(--panel3); color:var(--muted); font-weight:600; letter-spacing:.02em; flex:none; white-space:nowrap}
 .agent-ver{font-size:9.5px; padding:2px 6px; border-radius:4px; font-weight:600; letter-spacing:.02em; font-variant-numeric:tabular-nums; background:var(--panel3); color:var(--muted)}
 .agent-ver.ok{background:var(--ok-soft, var(--accent-soft)); color:var(--ok-txt, var(--accent-txt))}
@@ -1375,7 +1377,9 @@ svg.sparkline{width:100%; height:46px; display:block}
 /* ---------- 版本标签 ---------- */
 
 /* 主机元信息：IP · OS 占满卡片全宽，避免挤在左侧窄栏截断 */
-.host-meta{display:flex;align-items:baseline;gap:6px;margin:0 0 10px;padding-bottom:8px;border-bottom:1px solid var(--line);min-width:0;font-size:11.5px;line-height:1.35;color:var(--txt2)}
+.host-meta{display:flex;align-items:baseline;gap:6px;margin:0;min-width:0;font-size:11.5px;line-height:1.35;color:var(--txt2)}
+/* 系统类型 + Agent 版本：从卡片头挪下来，跟在 IP 行后面单独一行（分隔线随之下移）。 */
+.host-sys{display:flex;align-items:center;flex-wrap:wrap;gap:5px;margin:4px 0 10px;padding-bottom:8px;border-bottom:1px solid var(--line);min-width:0}
 .host-meta .hm-ip{flex:none;font-variant-numeric:tabular-nums;letter-spacing:.01em}
 .host-meta .hm-sep{flex:none;color:var(--muted2)}
 .host-meta .hm-os{min-width:0;flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

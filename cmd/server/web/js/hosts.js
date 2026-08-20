@@ -80,41 +80,122 @@ function renderHostBatchBar() {
   if (!HOST_SELECT_MODE) { bar.hidden = true; bar.innerHTML = ""; return; }
   bar.hidden = false;
   const n = HOST_SELECTED.size;
+  // 「选中当前分组全部」：树上选中了某个分组（含未分组）时才出现。整组改分组的入口
+  // 只藏在右键菜单里等于没有——大多数人不会去右键一棵树。
+  const curCount = (typeof CUR_FOLDER === "string") ? hostIdsInFolderSubtree(CUR_FOLDER).length : 0;
+  const curBtn = (typeof CUR_FOLDER === "string" && CUR_FOLDER !== "" && curCount)
+    ? `<button type="button" class="btn" data-batch="folder-all">${esc(I18N.t("section.batch_select_folder", "选中本组全部").replace("{n}", String(curCount)))} (${curCount})</button>`
+    : "";
   bar.innerHTML = `
     <span class="hbb-count">${esc(I18N.t("section.batch_selected"))} <b>${n}</b></span>
     <button type="button" class="btn" data-batch="all">${esc(I18N.t("section.batch_select_page"))}</button>
+    ${curBtn}
     <button type="button" class="btn" data-batch="none"${n ? "" : " disabled"}>${esc(I18N.t("section.batch_clear"))}</button>
     <button type="button" class="btn primary" data-batch="folder"${n ? "" : " disabled"}>${esc(I18N.t("section.batch_move"))}</button>
     <button type="button" class="btn ghost" data-batch="exit">${esc(I18N.t("ui.cancel", "取消"))}</button>`;
 }
 
+/* 批量改分组。
+ *
+ * 两种用法都要一步到位：
+ *   - 从没分过组的机器：勾一批 → 选一个分组（或现场新建一个）；
+ *   - 已经分好组的机器：勾一批（树上"选中本组全部主机"一次勾完）→ 改到另一个分组。
+ *
+ * 报错这块吃过亏：以前请求成功之后还要跑一段刷新，刷新里但凡抛一次，
+ * catch 就补一个"更新失败"的 toast 盖在"已更新"上面——改其实成了，用户看到的是失败。
+ * 现在请求与刷新分成两段：请求失败说清楚是哪一步、服务端说了什么；刷新失败只提示
+ * "已更新，请手动刷新"，不再冒充失败。
+ */
 async function hostBatchMoveFolder() {
   const ids = Array.from(HOST_SELECTED);
   if (!ids.length) return;
-  const flat = flattenHostFolders(HOST_FOLDERS.folders || []);
-  const options = [{ id: "__ungrouped__", path: I18N.t("section.uncategorized") }]
-    .concat(flat.map(f => ({ id: f.id, path: f.path })));
-  const folderId = await promptMoveFolder({
-    hostname: I18N.t("section.batch_hosts_n").replace("{n}", String(ids.length)),
-    options,
-    currentId: ""
-  });
+  const folderId = await promptBatchFolderTarget(ids.length);
   if (folderId === null) return;
+
+  let data = null;
   try {
     const r = await fetch(`${API}/hosts/folder/batch`, {
       method: "POST", headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
       body: JSON.stringify({ host_ids: ids, folder_id: folderId })
     });
+    const body = await r.json().catch(() => ({}));
     if (!r.ok) {
-      const e = await r.json().catch(() => ({}));
-      toast(e.error || I18N.t("toast.update_failed2"), "err");
+      // 带上状态码：401/403/404 与业务校验失败是完全不同的排查方向，
+      // 只说一句"更新失败"等于把人留在原地。
+      const why = body.error || `HTTP ${r.status}`;
+      console.error("[aiops] batch folder failed", r.status, body, { ids, folderId });
+      toast(I18N.t("toast.update_failed2") + "：" + why, "err");
       return;
     }
-    toast(I18N.t("toast.category_updated"), "ok");
+    data = body;
+  } catch (e) {
+    console.error("[aiops] batch folder request error", e);
+    toast(I18N.t("toast.update_failed") + e, "err");
+    return;
+  }
+
+  const changed = typeof data.count === "number" ? data.count : ids.length;
+  const skipped = Array.isArray(data.skipped) ? data.skipped.length : 0;
+  toast(skipped
+    ? I18N.t("section.batch_moved_partial", "已变更 {n} 台，跳过 {m} 台（已删除或无权限）")
+        .replace("{n}", String(changed)).replace("{m}", String(skipped))
+    : I18N.t("toast.category_updated"), skipped ? "info" : "ok");
+
+  try {
     setHostSelectMode(false);
     await loadHostFolders();
     await afterHostFolderChange();
-  } catch (e) { toast(I18N.t("toast.update_failed") + e, "err"); }
+  } catch (e) {
+    // 已经改成了，只是界面没跟上——别再报一次"失败"。
+    console.error("[aiops] batch folder refresh failed", e);
+    toast(I18N.t("toast.saved_need_refresh", "已更新，界面刷新失败，请手动刷新页面"), "info");
+  }
+}
+
+/* 批量目标分组选择：在现有分组之外多给一个"新建分组…"。
+ *
+ * 用户要的"把这批机器换个分组名"，如果只能先去树上建一个、再回来勾一遍，
+ * 中间还要记住自己刚才选了哪些机器——选择态一散就得重来。 */
+async function promptBatchFolderTarget(count) {
+  const flat = flattenHostFolders(HOST_FOLDERS.folders || []);
+  const options = [{ id: "__ungrouped__", path: I18N.t("section.uncategorized") }]
+    .concat(flat.map(f => ({ id: f.id, path: f.path })))
+    .concat([{ id: "__new__", path: I18N.t("section.batch_new_folder", "＋ 新建分组…") }]);
+  const picked = await promptMoveFolder({
+    hostname: I18N.t("section.batch_hosts_n").replace("{n}", String(count)),
+    options,
+    currentId: ""
+  });
+  if (picked !== "__new__") return picked;
+
+  const res = await promptFolderName({
+    title: I18N.t("section.folder_add_root"),
+    parentPath: "",
+    defaultValue: "",
+    placeholder: I18N.t("section.folder_name_ph")
+  });
+  const name = res && String(res.name || "").trim();
+  if (!name) return null;
+  try {
+    const r = await fetch(`${API}/host-folders`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({ parent_id: "", name })
+    });
+    const body = await r.json().catch(() => ({}));
+    const newId = body && body.folder && body.folder.id;
+    if (!r.ok || !newId) {
+      toast(body.error || (I18N.t("toast.update_failed2") + `：HTTP ${r.status}`), "err");
+      return null;
+    }
+    await loadHostFolders();
+    renderHostTree();
+    return newId;
+  } catch (e) {
+    toast(I18N.t("toast.update_failed") + e, "err");
+    return null;
+  }
 }
 
 function bindHostBatchOnce() {
@@ -150,6 +231,7 @@ function bindHostBatchOnce() {
         renderHosts(LAST_HOSTS || []);
         renderHostBatchBar();
         break;
+      case "folder-all": pickHostsInFolder(CUR_FOLDER); break;
       case "folder": await hostBatchMoveFolder(); break;
       case "exit": setHostSelectMode(false); break;
     }
@@ -196,6 +278,10 @@ function hostCard(h) {
   const agentVer = (typeof agentVersionBadgeHTML === "function") ? agentVersionBadgeHTML(h) : "";
   const agentSel = (typeof agentSelectCheckboxHTML === "function") ? agentSelectCheckboxHTML(h) : "";
   const outdatedCls = (typeof agentHostCardClass === "function") ? agentHostCardClass(h) : "";
+  // 卡片头只留「主机名 + 分组 + 终端/桌面/删除」。系统类型与 Agent 版本挪到 IP 那行下面
+  // 单独一行：这两个徽标是定宽内容（"WINDOWS" + "Agent v0.19.68" 就 ~150px），与分组徽标、
+  // 三个按钮挤在同一行时，标题分到的宽度会被压到 0——主机名整个消失，头一行只剩一排标签。
+  // 名字是卡片上最该先看到的东西，不该和标签抢位置。
   return `<div class="host ${h.online ? "online" : "offline"}${outdatedCls}${HOST_SELECTED.has(h.id) ? " picked" : ""}" tabindex="0" data-id="${esc(h.id)}" data-name="${esc(hostDisplayTitle(h))}" data-cat="${esc(h.category || "")}" data-folder="${esc(h.folder_id || "")}">
     <div class="host-head">
       <div class="host-name">${hostSelectBoxHTML(h)}${agentSel}<span class="dot ${h.online ? "on" : "off"}"></span>
@@ -203,8 +289,6 @@ function hostCard(h) {
       </div>
       <div class="host-tags">
         ${hostCategoryBadgeHTML(h)}
-        <span class="os-badge">${esc((h.os || "?").toUpperCase())}</span>
-        ${agentVer}
         ${(h.online && TERMINAL_ENABLED) ? `<button class="term-btn" data-act="term" title="${I18N.t('section.terminal_desc')}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></button>` : ""}
         ${(h.online && DESKTOP_ENABLED) ? `<button class="term-btn desktop-btn" data-act="desktop" title="${I18N.t('desktop.btn_title')}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg></button>` : ""}
         <button class="x-btn" data-act="del" title="${I18N.t("ui.delete")}">✕</button>
@@ -214,6 +298,10 @@ function hostCard(h) {
       <span class="hm-ip mono">${h.ip ? esc(h.ip) : "—"}</span>
       <span class="hm-sep">·</span>
       <span class="hm-os">${esc(h.platform || "—")}${h.arch ? " · " + esc(h.arch) : ""}</span>
+    </div>
+    <div class="host-sys">
+      <span class="os-badge">${esc((h.os || "?").toUpperCase())}</span>
+      ${agentVer}
     </div>
     ${bar("CPU", m.cpu_percent || 0, (m.cpu_percent || 0).toFixed(1) + "% · " + (m.cpu_cores || 0) + I18N.t("ui.cores"), "cpu")}
     ${bar(I18N.t("ui.memory"), m.mem_percent || 0, (m.mem_percent || 0).toFixed(1) + "% · " + fmtGB(m.mem_used || 0) + "/" + fmtGB(m.mem_total || 0) + I18N.t("unit.gb"), "mem")}
@@ -364,6 +452,56 @@ function flattenHostFolders(folders, prefix) {
     out.push(...flattenHostFolders(n.children || [], path));
   });
   return out;
+}
+
+/** 主机的分组归属，归一化"未分组"的两种写法（没有条目 / 显式哨兵）。 */
+function hostFolderIdNorm(h) {
+  const fid = String((h && h.folder_id) || "").trim();
+  return fid && fid !== "__ungrouped__" ? fid : "__ungrouped__";
+}
+
+/** 分组自身 + 全部子孙分组的 id。整组搬迁要连子分组一起搬，否则"选中本组"名不副实。 */
+function folderSubtreeIds(folderId, folders) {
+  const list = folders || (HOST_FOLDERS.folders || []);
+  for (const n of list) {
+    if (n.id === folderId) {
+      const out = [n.id];
+      const walk = (nodes) => (nodes || []).forEach(c => { out.push(c.id); walk(c.children); });
+      walk(n.children);
+      return out;
+    }
+    const hit = folderSubtreeIds(folderId, n.children || []);
+    if (hit.length) return hit;
+  }
+  return [];
+}
+
+/** 某个分组（含子分组）下的全部主机 id——不受当前分页/筛选限制。 */
+function hostIdsInFolderSubtree(folderId) {
+  const hosts = Array.isArray(LAST_HOSTS) ? LAST_HOSTS : [];
+  if (!folderId) return hosts.map(h => h.id);   // 树根「全部主机」
+  if (folderId === "__ungrouped__") {
+    return hosts.filter(h => hostFolderIdNorm(h) === "__ungrouped__").map(h => h.id);
+  }
+  const ids = new Set(folderSubtreeIds(folderId));
+  if (!ids.size) return [];
+  return hosts.filter(h => ids.has(hostFolderIdNorm(h))).map(h => h.id);
+}
+
+/** 选中某个分组下的全部主机，直接进入批量模式（"整组改分组"就是一次点击 + 一次选择）。 */
+function pickHostsInFolder(folderId) {
+  const ids = hostIdsInFolderSubtree(folderId);
+  if (!ids.length) {
+    toast(I18N.t("section.batch_pick_empty", "该分组下没有主机"), "info");
+    return;
+  }
+  HOST_SELECT_MODE = true;
+  HOST_SELECTED.clear();
+  ids.forEach(id => HOST_SELECTED.add(id));
+  invalidateHostRenderCache();
+  renderHosts(LAST_HOSTS || []);
+  renderHostBatchBar();
+  toast(I18N.t("section.batch_picked_n", "已选中 {n} 台主机").replace("{n}", String(ids.length)), "ok");
 }
 
 function hostTypeKey(h) {
@@ -674,13 +812,17 @@ function hideHostTreeCtx() {
 function showHostTreeCtx(x, y, folderId) {
   hideHostTreeCtx();
   if (HOST_TREE_MODE !== "folder") return;
-  if (folderId === "__ungrouped__") return;
+  const ungrouped = folderId === "__ungrouped__";
   const menu = document.createElement("div");
   menu.id = "htxCtxMenu";
   menu.className = "htx-ctx";
   menu.style.left = x + "px";
   menu.style.top = y + "px";
-  menu.innerHTML = `
+  // "选中本组全部主机"对未分组同样有意义：把从没分过组的机器一次勾完再统一归组，
+  // 正是批量分组最常见的第一步，所以未分组节点也给菜单（只给这一项）。
+  const pickItem = `<button type="button" class="htx-ctx-item" data-ctx="pick" data-id="${esc(folderId || "")}">${esc(I18N.t("section.ctx_pick_hosts", "选中本组全部主机"))}</button>`;
+  menu.innerHTML = ungrouped ? pickItem : `
+    ${pickItem}
     <button type="button" class="htx-ctx-item" data-ctx="add" data-id="${esc(folderId || "")}">${I18N.t("section.ctx_create_node")}</button>
     ${folderId ? `<button type="button" class="htx-ctx-item" data-ctx="ren" data-id="${esc(folderId)}">${I18N.t("section.ctx_rename_node")}</button>
     <button type="button" class="htx-ctx-item danger" data-ctx="del" data-id="${esc(folderId)}">${I18N.t("section.ctx_delete_node")}</button>` : ""}`;
@@ -700,7 +842,8 @@ function showHostTreeCtx(x, y, folderId) {
     const act = item.getAttribute("data-ctx");
     const id = item.getAttribute("data-id") || "";
     hideHostTreeCtx();
-    if (act === "add") await hostFolderAdd(id);
+    if (act === "pick") pickHostsInFolder(id);
+    else if (act === "add") await hostFolderAdd(id);
     else if (act === "ren") await hostFolderRename(id);
     else if (act === "del") await hostFolderDelete(id);
   });

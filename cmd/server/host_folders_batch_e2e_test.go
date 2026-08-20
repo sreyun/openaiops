@@ -101,7 +101,11 @@ func TestBatchFolderRouteIsRegistered(t *testing.T) {
 	}
 }
 
-func TestBatchFolderRejectsUnknownHost(t *testing.T) {
+// 批里混进已经删掉的主机：不整批失败，能改的照改，不存在的跳过且绝不写进配置。
+//
+// （早先这里是"整批拒绝"。那条规则把用户堵死过：界面上的勾选是几分钟前的快照，
+// 中途删掉一台机器，整批就怎么点都失败，用户既不知道是哪台、也没有别的入口。）
+func TestBatchFolderSkipsUnknownHost(t *testing.T) {
 	srv, _ := newTestServer(t)
 	srv.store.RegisterHost("h1", "h1", "fp-h1")
 	f, _ := srv.cfg.addHostFolder("", "数据库")
@@ -110,12 +114,14 @@ func TestBatchFolderRejectsUnknownHost(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/hosts/folder/batch", bytes.NewReader(body))
 	rr := httptest.NewRecorder()
 	srv.handleSetHostFolderBatch(rr, req)
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("含不存在主机的批量请求应被拒绝，得到 %d: %s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusOK {
+		t.Fatalf("含已删除主机的批量请求不应整批失败，得到 %d: %s", rr.Code, rr.Body.String())
 	}
-	// 整批拒绝：不能改了一半
 	_, assign := srv.cfg.hostFoldersSnapshot()
-	if assign["h1"] != "" {
-		t.Errorf("被拒的批量操作仍改动了 h1：%q", assign["h1"])
+	if assign["h1"] != f.ID {
+		t.Errorf("能改的那台没改：%q want %q", assign["h1"], f.ID)
+	}
+	if _, orphan := assign["ghost"]; orphan {
+		t.Error("给不存在的主机写了归属记录（配置里会留下回收不掉的孤儿）")
 	}
 }

@@ -470,20 +470,47 @@ function pwPolicyOK(pw){
 
 /* 复制到剪贴板（兼容 HTTP 环境） */
 function copyToClipboard(text) {
-  if (navigator.clipboard && window.isSecureContext) {
-    return navigator.clipboard.writeText(text);
+  // 安全上下文（HTTPS / localhost）优先用异步剪贴板 API；**它被拒也要有下家**：
+  // 权限没给、文档没聚焦、浏览器策略拦截，writeText 都会 reject，而 execCommand
+  // 那条老路在这些情况下往往还是通的。以前这里直接把 reject 抛出去，
+  // 用户看到的就是一句"复制失败"——明明还有办法可试。
+  if (navigator.clipboard && navigator.clipboard.writeText && window.isSecureContext) {
+    return navigator.clipboard.writeText(text).catch(() => execCommandCopy(text));
   }
-  // Fallback: textarea + execCommand
+  // 明文 HTTP（非安全上下文）下 navigator.clipboard 根本不存在，只能走 execCommand。
+  return execCommandCopy(text);
+}
+
+// execCommandCopy — 兜底复制。临时 textarea 会抢走当前选区与焦点，复制完还回去：
+// 终端里拖选一段文字，复制之后高亮没了会让人以为"没复制上"。
+function execCommandCopy(text) {
   return new Promise((resolve, reject) => {
+    const sel = window.getSelection();
+    const saved = [];
+    if (sel) { for (let i = 0; i < sel.rangeCount; i++) saved.push(sel.getRangeAt(i)); }
+    const active = document.activeElement;
     const ta = document.createElement("textarea");
     ta.value = text;
+    ta.setAttribute("readonly", "readonly");
     ta.style.cssText = "position:fixed;left:-9999px;top:-9999px;opacity:0";
     document.body.appendChild(ta);
+    ta.focus({ preventScroll: true });
     ta.select();
+    ta.setSelectionRange(0, ta.value.length); // iOS Safari 只认这个
     try {
       document.execCommand("copy") ? resolve() : reject(new Error("execCommand failed"));
     } catch (e) { reject(e); }
-    finally { document.body.removeChild(ta); }
+    finally {
+      document.body.removeChild(ta);
+      // 先还焦点再还选区：焦点落回输入元素会清掉 document 选区，顺序反了高亮必没。
+      if (active && active !== document.body && typeof active.focus === "function") {
+        active.focus({ preventScroll: true });
+      }
+      if (sel && saved.length) {
+        sel.removeAllRanges();
+        saved.forEach(r => sel.addRange(r));
+      }
+    }
   });
 }
 function copyWithFeedback(btn, text, okMsg) {

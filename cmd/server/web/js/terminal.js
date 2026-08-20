@@ -82,7 +82,28 @@ document.addEventListener("visibilitychange", () => {
 // 当终端面板可见且焦点漂移到非终端元素时，自动恢复焦点。
 // 覆盖场景：窗口 resize 后、最大化/还原后、从 dock 展开后、WS 重连后、
 // 浏览器标签页切换回来后、用户点击终端区域但焦点未进入 textarea 等。
+//
+// 但它必须给"选文本"让路：focus() 会把选区上下文切到 textarea，document 选区当场清空。
+// 用户按下鼠标开始拖选时，<pre> 会先拿到焦点，守卫如果这时把焦点抢回 textarea，
+// 拖拽就永远选不出东西——这正是"Linux 终端里复制不了命令和窗口内容"的最后一条根因。
+function termFocusGuardBusy() {
+  for (const tab of TERM_TABS) {
+    if (tab && tab.screenEl && tab.screenEl._termDragging) return true;   // 正在拖选
+  }
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return false;
+  const text = sel.toString();
+  if (!text) return false;
+  const tab = TERM_ACTIVE >= 0 ? TERM_TABS[TERM_ACTIVE] : null;
+  if (!tab || !tab.screenEl) return false;
+  for (let i = 0; i < sel.rangeCount; i++) {
+    if (tab.screenEl.contains(sel.getRangeAt(i).commonAncestorContainer)) return true; // 选区还在，别动焦点
+  }
+  return false;
+}
+
 function _refocusActiveTermInput() {
+  if (termFocusGuardBusy()) return;
   if (TERM_ACTIVE < 0 || !TERM_TABS[TERM_ACTIVE]) return;
   const mask = $("termMask");
   if (!mask || !mask.classList.contains("show")) return; // 终端面板不可见
@@ -109,9 +130,13 @@ document.addEventListener("focusin", () => {
   // 如果焦点在终端区域外（如导航栏、弹窗等），不强制拉回
   if (document.activeElement && !tab.screenEl.contains(document.activeElement)
       && document.activeElement !== tab.inputEl) return;
-  // 焦点在 screen 但不在 textarea — 重定向
+  // 焦点在 screen 但不在 textarea — 重定向（拖选期间不动，否则选区当场没）
   if (document.activeElement === tab.screenEl) {
-    setTimeout(() => { if (document.activeElement === tab.screenEl) tab.inputEl.focus({ preventScroll: true }); }, 0);
+    if (termFocusGuardBusy()) return;
+    setTimeout(() => {
+      if (termFocusGuardBusy()) return;
+      if (document.activeElement === tab.screenEl) tab.inputEl.focus({ preventScroll: true });
+    }, 0);
   }
 });
 
@@ -193,21 +218,30 @@ function initTermContextMenu() {
   TERM_CMENU_EL.innerHTML = `
     <div class="term-cmenu-item" data-action="copy">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-      <span>复制</span><span class="cmenu-key">Ctrl+C</span>
+      <span>${esc(I18N.t("term.cmenu_copy", "复制"))}</span><span class="cmenu-key">Ctrl+C</span>
     </div>
     <div class="term-cmenu-item" data-action="paste">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg>
-      <span>粘贴</span><span class="cmenu-key">Ctrl+V</span>
+      <span>${esc(I18N.t("term.cmenu_paste", "粘贴"))}</span><span class="cmenu-key">Ctrl+V</span>
+    </div>
+    <div class="term-cmenu-sep"></div>
+    <div class="term-cmenu-item" data-action="select-all">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 12h8M12 8v8"/></svg>
+      <span>${esc(I18N.t("term.cmenu_select_all", "全选"))}</span>
+    </div>
+    <div class="term-cmenu-item" data-action="copy-all">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h10v4"/><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M4 4v10h4"/></svg>
+      <span>${esc(I18N.t("term.cmenu_copy_all", "复制全部内容"))}</span>
     </div>
     <div class="term-cmenu-sep"></div>
     <div class="term-cmenu-item" data-action="reconnect">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg>
-      <span>重新连接</span>
+      <span>${esc(I18N.t("term.cmenu_reconnect", "重新连接"))}</span>
     </div>
     <div class="term-cmenu-sep"></div>
     <div class="term-cmenu-item" data-action="clear">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
-      <span>清屏</span>
+      <span>${esc(I18N.t("term.cmenu_clear", "清屏"))}</span>
     </div>
   `;
   document.body.appendChild(TERM_CMENU_EL);
@@ -232,19 +266,28 @@ function initTermContextMenu() {
     TERM_CMENU_EL.classList.remove("show");
     if (!tab) return;
     switch (action) {
-      case "copy": {
-        const sel = getSelectedTermText(tab);
-        if (sel) copyToClipboard(sel).then(() => toast(I18N.t("toast.copied"), "ok"), () => toast(I18N.t("toast.copy_failed"), "err"));
+      case "copy":
+        // 用菜单弹出那一刻抓到的选区：读选区在极端情况下要 blur 隐藏 textarea 再读，
+        // 而把焦点还回去会清掉高亮——点菜单时再读就成了空的。
+        termCopyText(TERM_CMENU_EL._termSel || termSelectionText(tab));
         break;
-      }
+      case "select-all":
+        termSelectAllScreen(tab);
+        break;
+      case "copy-all":
+        termCopyText(termScreenText(tab));
+        break;
       case "paste": {
+        // 聚焦输入框：读剪贴板失败时（明文 HTTP 下 navigator.clipboard 根本不存在，
+        // 或用户拒绝了读取授权）用户还能自己按 Ctrl+V，走原生 paste 事件那条路。
+        if (tab.inputEl) tab.inputEl.focus({ preventScroll: true });
         if (navigator.clipboard && navigator.clipboard.readText) {
           navigator.clipboard.readText().then(t => {
             if (t && tab.ws && tab.ws.readyState === 1) termSend(tab.ws, t);
-          }).catch(() => {});
+          }).catch(() => toast(I18N.t("term.paste_manual", "浏览器不允许读取剪贴板，请按 Ctrl+V 粘贴"), "info"));
+        } else {
+          toast(I18N.t("term.paste_manual", "浏览器不允许读取剪贴板，请按 Ctrl+V 粘贴"), "info");
         }
-        // 聚焦输入框让用户手动粘贴
-        if (tab.inputEl) tab.inputEl.focus({ preventScroll: true });
         break;
       }
       case "reconnect":
@@ -269,8 +312,9 @@ function showTermContextMenu(tab, e) {
   // 更新菜单项状态
   const copyItem = TERM_CMENU_EL.querySelector('[data-action="copy"]');
   const reconnectItem = TERM_CMENU_EL.querySelector('[data-action="reconnect"]');
-  const hasSelection = getSelectedTermText(tab).length > 0;
-  if (copyItem) copyItem.classList.toggle("disabled", !hasSelection);
+  const selText = termSelectionText(tab);
+  TERM_CMENU_EL._termSel = selText;
+  if (copyItem) copyItem.classList.toggle("disabled", !selText);
   const disconnected = !tab.ws || tab.ws.readyState !== 1;
   if (reconnectItem) reconnectItem.classList.toggle("disabled", !disconnected);
   // 定位
@@ -659,29 +703,24 @@ function createTermTab(id, name, tabName, opts) {
       }
     }
   });
-  // mouseup 聚焦隐藏 textarea：在鼠标松开后聚焦，不干扰用户拖拽选区。
-  // （mousedown 时 focus() 会让浏览器把 textarea 作为选区上下文，
-  //  导致 window.getSelection().rangeCount 变为 0，选区不可见。）
-  screen.addEventListener("mouseup", function(ev) {
-    // 如果用户刚完成了一次拖拽选区（选中了文本），不要立即聚焦 textarea，
-    // 否则会清除选区。仅当用户单纯点击（无选区变化）时聚焦。
-    const sel = window.getSelection();
-    if (sel && sel.toString().length > 0) return;
-    if (document.activeElement !== input) {
-      input.focus({ preventScroll: true });
-    }
+  /* 鼠标与选区 —— 「终端里怎么拖都选不中、复制不了」的根因就在这几行。
+   *
+   * 隐藏 textarea 是键盘/输入法的入口，所以点一下终端要把焦点交给它。但 focus()
+   * 会把选区上下文切到 textarea：正在进行的拖拽选区当场作废，window.getSelection()
+   * 也随之变空。原来有两条抢焦点的路径都发生在**按下鼠标的瞬间**：
+   *   1) mousedown 里 setTimeout(0) 主动 focus()；
+   *   2) <pre tabindex=0> 被原生 mousedown 聚焦 → focus 监听再转交给 textarea。
+   * 于是用户永远选不出东西来，复制、右键"复制"、Ctrl+C 一起哑火。
+   *
+   * 现在只在"单纯点击"（松手时没有选区）之后才把焦点交回去，按住鼠标期间一律不碰
+   * 焦点；右键也不抢焦点，否则右键菜单弹出前选区就已经没了。
+   */
+  screen.addEventListener("mousedown", function(ev) {
+    if (ev.button === 0) screen._termDragging = true;
   });
-  // mousedown 兜底 — 点击终端区域时确保 textarea 获得焦点
-  // 某些浏览器中 mouseup 可能被取消（如快速点击、拖拽操作），
-  // 在 mousedown 阶段先设置一个延迟聚焦守卫。
-  screen.addEventListener("mousedown", function() {
-    // 延迟 0ms：等 mousedown 默认行为完成后再聚焦，避免干扰选区
-    setTimeout(() => {
-      const sel = window.getSelection();
-      if (sel && sel.toString().length > 0) return; // 有选区不聚焦
-      if (document.activeElement !== input) input.focus({ preventScroll: true });
-    }, 0);
-  });
+  // 松手统一由 document 上那一个监听收尾（见 ensureTermDragRelease）：松手可能落在终端外
+  // （拖到窗口边缘），而且每开一个标签就往 document 上挂一个监听是只增不减的泄漏。
+  ensureTermDragRelease();
   // Redirect focus to textarea; never synthesize untrusted keydown for printables
   // (preventDefault + fake KeyboardEvent drops characters on some browsers).
   screen.addEventListener("keydown", function(ev) {
@@ -695,14 +734,16 @@ function createTermTab(id, name, tabName, opts) {
     // Special keys: forward via termKeyDown on the real event after focus.
     termKeyDown(ev, tabObj);
   });
-  // <pre> 被直接聚焦时（Tab 键导航），重定向到 textarea
+  // <pre> 被直接聚焦时（Tab 键导航），重定向到 textarea。
+  // 鼠标按下期间不转交：那正是浏览器在建立选区的时刻，转交焦点会把选区清掉。
   screen.addEventListener("focus", function() {
+    if (screen._termDragging) return;
     if (input && document.activeElement !== input) input.focus({ preventScroll: true });
   });
-  // 右键菜单（暂时禁用，待修复后重新启用）
-  // screen.addEventListener("contextmenu", function(ev) {
-  //   showTermContextMenu(tabObj, ev);
-  // });
+  // 右键菜单：复制 / 粘贴 / 全选 / 复制全部内容 / 重连 / 清屏
+  screen.addEventListener("contextmenu", function(ev) {
+    showTermContextMenu(tabObj, ev);
+  });
   // JS fallback for :focus-within — toggle .term-focused class on screen
   // This ensures cursor blink animation works on iOS Safari where :focus-within
   // may not trigger for opacity:0 elements
@@ -1732,70 +1773,124 @@ function formatZmSize(bytes) {
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
   return (bytes / (1024 * 1024)).toFixed(1) + " MB";
 }
+// normalizeTermCopyText 规整复制出去的终端文本：统一换行、去掉每行尾部的填充空格。
+// 终端每行都补齐到列宽，直接复制会带一串看不见的空格，粘进编辑器/工单里很难看。
+function normalizeTermCopyText(text) {
+  return String(text || "")
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map(line => line.replace(/[ \t\u00a0]+$/, ""))
+    .join("\n");
+}
+
 // getSelectedTermText 获取当前终端屏幕内的选中文本。
-// 聚焦在隐藏 textarea 时 window.getSelection().rangeCount 为 0，
-// 因为浏览器为表单元素维护独立的选区上下文。此时临时 blur 再检查。
+//
+// 两处容易踩空：
+//   1) 焦点在隐藏 textarea 上时，浏览器为表单元素维护独立的选区上下文，
+//      window.getSelection().rangeCount 为 0——临时 blur 再读，读完把焦点还回去；
+//   2) 必须用 Selection.toString() 而不是 Range.toString()。后者只把文本节点拼起来，
+//      不认块级边界，跨行选中会被拼成一整行——整屏命令粘出来是一条长龙。
 function getSelectedTermText(tab) {
-  const sel = window.getSelection();
-  if (!sel || sel.rangeCount === 0) {
-    // 如果 textarea 聚焦导致 rangeCount=0，临时 blur 后再检查
+  const read = () => {
+    const s = window.getSelection();
+    if (!s || s.rangeCount === 0) return "";
+    if (!tab || !tab.screenEl) return "";
+    let inScreen = false;
+    for (let i = 0; i < s.rangeCount; i++) {
+      if (tab.screenEl.contains(s.getRangeAt(i).commonAncestorContainer)) { inScreen = true; break; }
+    }
+    if (!inScreen) return "";
+    return s.toString();
+  };
+  let text = read();
+  if (!text) {
     const ae = document.activeElement;
     if (ae && ae.classList.contains("term-input")) {
       ae.blur();
-      try {
-        const s2 = window.getSelection();
-        if (s2 && s2.rangeCount > 0) {
-          const t = s2.toString();
-          if (t) return t;
-        }
-      } finally {
-        ae.focus({ preventScroll: true });
-      }
-    }
-    return "";
-  }
-  // 方法1：直接取全局选区文本（大多数情况足够）
-  const text = sel.toString();
-  if (text) return text;
-  // 方法2：检查 range 是否落在当前 tab 的 screen 内
-  if (!tab || !tab.screenEl) return "";
-  for (let i = 0; i < sel.rangeCount; i++) {
-    const rng = sel.getRangeAt(i);
-    if (tab.screenEl.contains(rng.commonAncestorContainer)) {
-      return rng.toString();
+      try { text = read(); } finally { ae.focus({ preventScroll: true }); }
     }
   }
-  return "";
+  return text;
 }
+
+// termSelectionText 选区文本（已规整）——判空也走它，保证"有没有选区"与"复制什么"同一套判断。
+function termSelectionText(tab) {
+  return normalizeTermCopyText(getSelectedTermText(tab)).replace(/\n+$/, "");
+}
+
+// termScreenText 整个终端窗口的文本：回滚缓冲 + 当前屏，按 DOM 顺序逐行取。
+function termScreenText(tab) {
+  if (!tab || !tab.screenEl) return "";
+  const rows = tab.screenEl.querySelectorAll(".term-row");
+  const lines = [];
+  rows.forEach(row => lines.push(row.textContent || ""));
+  return normalizeTermCopyText(lines.join("\n")).replace(/\n+$/, "");
+}
+
+// termSelectAllScreen 选中整窗内容（右键菜单「全选」）。
+// 先 blur 隐藏 textarea：焦点在表单元素上时，加进去的 Range 落在另一个选区上下文里，
+// 用户看不到高亮，复制也读不到。
+function termSelectAllScreen(tab) {
+  if (!tab || !tab.screenEl) return false;
+  const rows = tab.screenEl.querySelectorAll(".term-row");
+  if (!rows.length) return false;
+  const ae = document.activeElement;
+  if (ae && ae.classList.contains("term-input")) ae.blur();
+  const range = document.createRange();
+  range.setStartBefore(rows[0]);
+  range.setEndAfter(rows[rows.length - 1]);
+  const sel = window.getSelection();
+  if (!sel) return false;
+  sel.removeAllRanges();
+  sel.addRange(range);
+  return true;
+}
+
+// termCopyText 复制到剪贴板并给出反馈。
+// 走 copyToClipboard：HTTPS 下用 navigator.clipboard，明文 HTTP（非安全上下文，
+// navigator.clipboard 根本不存在）退回 execCommand。以前这里各写各的，
+// 明文部署下右键复制是静默失败——用户只知道"复制不了"，看不到任何提示。
+function termCopyText(text) {
+  const out = normalizeTermCopyText(text);
+  if (!out) { toast(I18N.t("term.nothing_selected", "没有选中内容"), "info"); return; }
+  copyToClipboard(out).then(
+    () => toast(I18N.t("toast.copied"), "ok"),
+    () => toast(I18N.t("toast.copy_failed"), "err")
+  );
+}
+
+// ---- 拖拽选区收尾（全局仅一份）----
+// 只在"单纯点击"之后把焦点交回隐藏 textarea；拖出了选区就保住选区。
+// 松手事件挂在 document 上：用户经常拖到终端框外面才松手，那时 screen 收不到 mouseup。
+let TERM_DRAG_RELEASE_BOUND = false;
+function ensureTermDragRelease() {
+  if (TERM_DRAG_RELEASE_BOUND) return;
+  TERM_DRAG_RELEASE_BOUND = true;
+  document.addEventListener("mouseup", function(ev) {
+    TERM_TABS.forEach(tab => {
+      const screen = tab && tab.screenEl;
+      if (!screen || !screen._termDragging) return;
+      screen._termDragging = false;
+      if (ev && ev.button !== 0) return;
+      if (!screen.isConnected) return;
+      if (termSelectionText(tab)) return;               // 有选区 → 保住它
+      if (tab.inputEl && document.activeElement !== tab.inputEl) {
+        tab.inputEl.focus({ preventScroll: true });
+      }
+    });
+  });
+}
+
 // ---- 全局 copy 事件处理（终端文本复制）----
-// 仅注册一次。当用户通过右键菜单或 Ctrl+C 触发 copy 事件时，
-// 临时 blur 隐藏 textarea 让 window.getSelection() 可见，然后写入剪贴板。
+// 仅注册一次。用户在终端里按 Ctrl+C / 用浏览器菜单复制时，把规整过的选区文本写进
+// 剪贴板（去掉行尾填充空格、保留换行）。
 (function() {
   document.addEventListener("copy", function(ev) {
     const activeTab = TERM_ACTIVE >= 0 ? TERM_TABS[TERM_ACTIVE] : null;
     if (!activeTab || !activeTab.screenEl) return;
     const mask = document.getElementById("termMask");
     if (!mask || !mask.classList.contains("show")) return;
-    // 临时 blur textarea 使 pre 中的选区对 window.getSelection() 可见
-    const ae = document.activeElement;
-    const hasTermInput = ae && ae.classList.contains("term-input");
-    if (hasTermInput) ae.blur();
-    let sel = "";
-    try {
-      const s = window.getSelection();
-      if (s && s.rangeCount > 0) {
-        for (let i = 0; i < s.rangeCount; i++) {
-          const rng = s.getRangeAt(i);
-          if (activeTab.screenEl.contains(rng.commonAncestorContainer)) {
-            sel = rng.toString();
-            break;
-          }
-        }
-      }
-      if (!sel) sel = window.getSelection().toString();
-    } finally {
-      if (hasTermInput && ae) ae.focus({ preventScroll: true });
-    }
+    const sel = termSelectionText(activeTab);
     if (!sel) return;
     ev.preventDefault();
     ev.clipboardData.setData("text/plain", sel);
@@ -1823,48 +1918,18 @@ function termKeyDown(e, tab) {
   // Ctrl+Shift+C / Cmd+Shift+C / Ctrl+Insert → 强制复制
   if ((mod && (k === "c" || k === "C")) || (mod && k === "Insert")) {
     const shiftCopy = e.shiftKey;
-
-    // 临时 blur textarea 让 document 选区对 window.getSelection() 可见
-    const ae = document.activeElement;
-    const hasTermInput = ae && ae.classList.contains("term-input");
-    if (hasTermInput) ae.blur();
-
-    let sel = "";
-    try {
-      const s = window.getSelection();
-      if (s && s.rangeCount > 0) {
-        for (let i = 0; i < s.rangeCount; i++) {
-          const rng = s.getRangeAt(i);
-          if (tab && tab.screenEl && tab.screenEl.contains(rng.commonAncestorContainer)) {
-            sel = rng.toString();
-            break;
-          }
-        }
-      }
-      if (!sel) sel = window.getSelection().toString();
-    } finally {
-      if (hasTermInput && ae) ae.focus({ preventScroll: true });
-    }
-
-    if (shiftCopy || sel) {
+    const sel = termSelectionText(tab);
+    if (sel) {
       e.preventDefault();
-      if (sel) {
-        // 优先使用 navigator.clipboard API（现代浏览器），fallback 到 execCommand
-        if (navigator.clipboard && window.isSecureContext) {
-          navigator.clipboard.writeText(sel).then(() => {}, () => {});
-        } else {
-          const ta = document.createElement("textarea");
-          ta.value = sel;
-          ta.style.cssText = "position:fixed;left:-9999px;top:-9999px;opacity:0";
-          document.body.appendChild(ta);
-          ta.focus(); ta.select();
-          try { document.execCommand("copy"); } catch (_) {}
-          document.body.removeChild(ta);
-        }
-      }
+      termCopyText(sel);
       return;
     }
-
+    if (shiftCopy) {
+      // 明确要复制却没有选区：给一句话，而不是把 ^C 打进 shell。
+      e.preventDefault();
+      toast(I18N.t("term.nothing_selected", "没有选中内容"), "info");
+      return;
+    }
     // 无选区 → 发送 SIGINT (\x03)
   }
 
