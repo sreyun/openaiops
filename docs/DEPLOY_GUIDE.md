@@ -52,6 +52,23 @@
 - **VictoriaMetrics**：按保留策略与存储容量规划；如需长期归档，配置远端对象存储。本迭代 Web 备份**不包含** VM / `./data` 录音目录，请继续用外部方案。
 - **配置**：`AIOPS_SECRET_KEY`、`AIOPS_RELAY_SECRET` 等密钥请纳入密钥管理，升级时保持不变以避免数据不可解密。
 - **升级**：建议先在预发环境验证，再滚动升级服务端；采集端可分批灰度。
+- **升级命令（docker compose 部署，务必带 `pull`）**：
+
+  ```bash
+  docker compose pull        # 缺了这一步就不会真的升级
+  docker compose up -d
+  ```
+
+  `docker compose up -d` 单独跑**不会**换镜像：compose 对只声明 `image:` 的服务默认
+  `pull_policy: missing`，本地已经有一个 `latest` 就不再回源。于是"一路 up -d 升上来"
+  的站点可能长期停在几个月前的镜像上，而且不容易发现——控制台前端和后端在同一个二进制里，
+  界面和接口一起旧着，自洽。真正暴露的时候通常是照着新版文档操作，撞上"这个接口不存在"。
+
+  升级后核对版本：面板「关于我们」里的版本号，或
+  `docker compose images aiops-server`（看镜像创建时间）。
+
+  离线/内网环境无法回源时，请手工 `docker load` 新镜像后再 `up -d`；不要给服务加
+  `pull_policy: always`，那会让断网时连重启都起不来。
 
 ---
 
