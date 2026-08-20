@@ -288,3 +288,32 @@ func TestAgentDeniedPathCoversOwnSecretsAndEquivalents(t *testing.T) {
 		}
 	}
 }
+
+// 改写 Host 之后要把"改写前的地址"留在转发头里。
+//
+// 少了这一步，经中继打开面板的人一按保存就失败：面板拿 Origin（中继地址）与 Host
+// （已被改成上游域名）比对，判定为跨站写请求。X-Forwarded-Host 是标准写法；上游若还有
+// 一层 nginx 会把它覆盖成上游域名，所以另外再留一条 nginx 不会碰的 X-AIOps-Client-Host。
+func TestRelayProxyPreservesClientHostForOriginCheck(t *testing.T) {
+	var xfh, aiops string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		xfh = r.Header.Get("X-Forwarded-Host")
+		aiops = r.Header.Get("X-AIOps-Client-Host")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer up.Close()
+	target, err := url.Parse(up.URL)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "http://192.168.30.114:8529/api/v1/hosts/folder/batch", nil)
+	req.Host = "192.168.30.114:8529"
+	newRelayProxy(target, 0).ServeHTTP(httptest.NewRecorder(), req)
+
+	if xfh != "192.168.30.114:8529" {
+		t.Errorf("X-Forwarded-Host 应是中继地址，实际 %q", xfh)
+	}
+	if aiops != "192.168.30.114:8529" {
+		t.Errorf("X-AIOps-Client-Host 应是中继地址，实际 %q", aiops)
+	}
+}

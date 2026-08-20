@@ -139,14 +139,32 @@ func runRelay(listenAddr, upstream, relaySecret, installToken string) {
 // 为什么 /install.sh 与 /dl 不受影响、掩盖了这个坑：那两条路径走的是中继**自己构造**
 // 的请求（serveRelayInstallScript / relayDLCache.fetch），Host 天然就是上游域名。于是
 // 现场表现成"装得上、连不上"——最容易让人往 token 和指纹上想的组合。
+//
+// 改写 Host 的**副作用**要一起补掉：面板用"浏览器眼中的自己"做写请求的来源校验
+// （Origin vs Host）。经中继打开面板时，Origin 是中继地址、Host 已被改成上游域名，
+// 两边对不上 —— 读接口是 GET 不过这一关，于是又是那个熟悉的现象："界面一切正常，
+// 一按保存就失败"。所以这里把改写前的 Host 原样留在转发头里：
+//
+//   - X-Forwarded-Host：标准写法，中继直连面板时够用；
+//   - X-AIOps-Client-Host：上游若还有一层 nginx，`proxy_set_header X-Forwarded-Host`
+//     会把上一条覆盖掉，这条自定义头 nginx 不会碰，是这种两层代理下唯一活得下来的线索。
+//     它只参与来源校验，不参与安装地址生成（那条链有自己的端口补回逻辑，别互相干扰）。
 func newRelayProxy(target *url.URL, flush time.Duration) *httputil.ReverseProxy {
 	p := httputil.NewSingleHostReverseProxy(target)
 	p.FlushInterval = flush
 	p.Transport = relayTransport
 	orig := p.Director
 	p.Director = func(r *http.Request) {
+		clientHost := strings.TrimSpace(r.Host)
 		orig(r)
 		r.Host = target.Host
+		if clientHost == "" {
+			return
+		}
+		if r.Header.Get("X-Forwarded-Host") == "" {
+			r.Header.Set("X-Forwarded-Host", clientHost)
+		}
+		r.Header.Set("X-AIOps-Client-Host", clientHost)
 	}
 	return p
 }

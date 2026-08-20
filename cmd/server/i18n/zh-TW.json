@@ -5,6 +5,7 @@
   "auth.too_many_attempts": "登入嘗試過於頻繁，請 5 分鐘後再試",
   "api.rate_limited": "請求過於頻繁，請稍後再試",
   "auth.mfa_required_first": "請先完成兩步驗證綁定",
+  "auth.origin_rejected": "來源校驗未通過：瀏覽器發來的位址是 %s，伺服端看到的位址是 %s，兩者對不上，寫入操作被拒絕。多為反向代理沒有把真實網域/連接埠透傳給面板：nginx 請設定 proxy_set_header Host $http_host; 與 proxy_set_header X-Forwarded-Host $http_host;，或在「設定 → 系統」裡填寫 public_url。",
   "auth.insufficient_permission": "權限不足，該操作需要更高權限",
   "auth.invalid_username_format": "使用者名稱僅限字母/數字/-_.，長度 2–32 位",
   "auth.wrong_old_password": "原密碼錯誤",

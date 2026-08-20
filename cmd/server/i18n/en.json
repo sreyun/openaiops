@@ -5,6 +5,7 @@
   "auth.too_many_attempts": "Too many login attempts, please try again in 5 minutes",
   "api.rate_limited": "Too many requests, please try again shortly",
   "auth.mfa_required_first": "Please complete two-factor authentication first",
+  "auth.origin_rejected": "Origin check failed: the browser sent %s but this server sees %s, so the write was rejected. Usually the reverse proxy does not pass the real host/port through — set proxy_set_header Host $http_host; plus proxy_set_header X-Forwarded-Host $http_host; in nginx, or configure public_url under Settings.",
   "auth.insufficient_permission": "Insufficient permissions, this operation requires a higher privilege",
   "auth.invalid_username_format": "Username may only contain letters/digits/-_. (2-32 chars)",
   "auth.wrong_old_password": "Current password is incorrect",

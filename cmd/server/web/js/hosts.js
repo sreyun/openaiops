@@ -1399,14 +1399,37 @@ async function editCategory(id, cur) {
     currentId: curFid
   });
   if (folderId === null) return;
+  // 报错要说清楚是哪一步、服务端说了什么。原来这里失败只弹一句"修改失败"：
+  // 403（反代把 Origin/Host 弄拧了）、404/405（面板版本过旧）、400（分组已被删）
+  // 这三种情况的排查方向完全不同，一句笼统的失败等于把人留在原地。
+  // 与批量改分组保持同一套处理（见 hostBatchMoveFolder）。
   try {
     const r = await fetch(`${API}/hosts/${encodeURIComponent(id)}/folder`, {
       method: "POST", headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
       body: JSON.stringify({ folder_id: folderId })
     });
-    if (r.ok) { toast(I18N.t("toast.category_updated"), "ok"); await loadHostFolders(); await afterHostFolderChange(); }
-    else toast(I18N.t("toast.update_failed2"), "err");
-  } catch (e) { toast(I18N.t("toast.update_failed") + e, "err"); }
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      console.error("[aiops] set folder failed", r.status, body, { id, folderId });
+      if (r.status === 404 || r.status === 405) { toast(endpointUnavailableMsg(r.status, r), "err"); return; }
+      toast(I18N.t("toast.update_failed2") + "：" + (body.error || `HTTP ${r.status}`), "err");
+      return;
+    }
+  } catch (e) {
+    console.error("[aiops] set folder request error", e);
+    toast(I18N.t("toast.update_failed") + e, "err");
+    return;
+  }
+  toast(I18N.t("toast.category_updated"), "ok");
+  try {
+    await loadHostFolders();
+    await afterHostFolderChange();
+  } catch (e) {
+    // 已经改成了，只是界面没跟上——别再报一次"失败"。
+    console.error("[aiops] set folder refresh failed", e);
+    toast(I18N.t("toast.saved_need_refresh", "已更新，界面刷新失败，请手动刷新页面"), "info");
+  }
 }
 
 function promptMoveFolder(opts) {

@@ -122,10 +122,16 @@ server {
     location / {
         proxy_pass http://127.0.0.1:8529;
         proxy_http_version 1.1;
-        proxy_set_header Host              $host;
+        # $http_host keeps the port the browser used; $host drops it. Losing the port
+        # breaks the generated install command AND the Origin check on write requests.
+        proxy_set_header Host              $http_host;
         proxy_set_header X-Real-IP         $remote_addr;
         proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        # Fallback when Host must stay $host (or the gateway rewrites it): the panel
+        # uses this to recognise "itself as the browser sees it". Without either one,
+        # write requests (change folder, save settings…) are rejected with 403.
+        proxy_set_header X-Forwarded-Host  $http_host;
         # Required when the panel runs on a non-default port (e.g. https://a.bc.com:8443):
         # $host carries no port, so the generated install command / script SERVER= would
         # point at 443 — the panel works, agents never register.

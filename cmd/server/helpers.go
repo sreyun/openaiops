@@ -370,6 +370,24 @@ func forwardedHeaderPort(v string) string {
 	return ""
 }
 
+// forwardedHeaderHost pulls the host out of the first element's host= parameter
+// of an RFC 7239 Forwarded header (`for=1.2.3.4;host=a.bc.com:8443;proto=https`).
+// Used by the CSRF Origin check when the proxy rewrote Host to an internal address.
+func forwardedHeaderHost(v string) string {
+	first := firstForwardedValue(v)
+	if first == "" {
+		return ""
+	}
+	for _, part := range strings.Split(first, ";") {
+		k, val, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if !ok || !strings.EqualFold(strings.TrimSpace(k), "host") {
+			continue
+		}
+		return strings.Trim(strings.TrimSpace(val), `"`)
+	}
+	return ""
+}
+
 // browserOriginPort returns the port of an Origin/Referer header, but only when it
 // names the same host we already derived — a cross-origin page must not be able to
 // bend the generated install address.

@@ -97,6 +97,18 @@ func listMissingAgentDist(dir string) []string {
 // When CORSOrigins is configured, only matching Origin headers are echoed.
 // When empty, no Access-Control-Allow-Origin is set (same-origin only) —
 // the previous wildcard "*" was removed for enterprise CSRF hardening.
+// httpHandler 组装生产环境的中间件洋葱（从外到内）：
+//
+//	requestID → securityHeaders → CORS → csrfOrigin → gzip → bodyLimit → apiRateLimit → auth → Routes
+//
+// main 与测试共用这一条链。测试若自己拼一条更短的（只挂 csrf+auth），"线上多出来的那几层
+// 把请求挡了"这类故障就永远测不到——真实反馈里的"改分组一直失败"正是死在链上的 csrfOrigin，
+// 而不是任何一个 handler 里。
+func (s *Server) httpHandler() http.Handler {
+	return requestIDMiddleware(securityHeadersMiddleware(s.corsMiddleware(s.csrfOriginMiddleware(
+		gzipMiddleware(bodyLimitMiddleware(s.apiRateLimitMiddleware(s.authMiddleware(s.Routes()))))))))
+}
+
 func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origins := s.cfg.CORSOrigins()
@@ -446,7 +458,7 @@ func main() {
 
 	logProductionSecurityBaseline(cfg)
 	store.onAudit = server.exportAuditEntry
-	handler := requestIDMiddleware(securityHeadersMiddleware(server.corsMiddleware(server.csrfOriginMiddleware(gzipMiddleware(bodyLimitMiddleware(server.apiRateLimitMiddleware(server.authMiddleware(server.Routes()))))))))
+	handler := server.httpHandler()
 	srv := &http.Server{
 		Addr:    *addr,
 		Handler: handler,
