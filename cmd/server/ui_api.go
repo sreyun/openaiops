@@ -176,7 +176,10 @@ func (s *Server) handleDeleteHost(w http.ResponseWriter, r *http.Request) {
 	label := s.hostLabelForID(id)
 	ok := s.store.DeleteHost(id)
 	lastHistoryFallbackReason.Delete(id) // 主机没了，它的降级留痕也该走
-	_ = s.cfg.SetCategory(id, "") // drop override + folder assign for the removed host
+	// 必须用 forgetHost，不能 SetCategory("", "") / assignHostFolder(未分组)：
+	// 后者会留下"显式未分组"哨兵，删一台就多两条永不回收的配置记录
+	// （见 forgetHost 注释与 TestDeleteHostAPIForgetsFolderAssign）。
+	_ = s.cfg.forgetHost(id)
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "common.host_not_found")})
 		return
