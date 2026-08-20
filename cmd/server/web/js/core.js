@@ -1247,6 +1247,61 @@ function initActMenus() {
     if (e.key === "Escape") closeAllActMenus();
   });
 }
+// 下面这段与 frontend/src/shared/install-cmd.ts 同源；
+// frontend/scripts/check-install-cmd.mjs 会按标记把它抠出来，跑与新版同一张断言表。
+// ---- install-addr-port-block:start ----
+/**
+ * effectiveServerBase 补回面板对外地址里被反向代理抹掉的端口。
+ *
+ * 面板开在 https://a.bc.com:8443、nginx 按最常见的 `proxy_set_header Host $host`
+ * 转发时，服务端看到的 Host 只剩 a.bc.com，/install/info 返回的 server_url 也就没有
+ * 端口——生成的安装命令指向默认 443，Agent 注册直接连不上。服务端那边还有一层兜底
+ * （X-Forwarded-Port / Forwarded），但面板自己的响应头是 `Referrer-Policy: no-referrer`，
+ * 同源 GET 又不带 Origin，所以【只有浏览器】知道地址栏里的端口，必须由前端补。
+ *
+ * 与新版控制台 frontend/src/shared/install-cmd.ts 的同名函数保持一致。
+ */
+function effectiveServerBase(serverURL, fixed) {
+  const raw = String(serverURL || "").trim().replace(/\/+$/, "");
+  const org = String(location.origin || "").trim().replace(/\/+$/, "");
+  if (!raw) return org;
+  if (!org || fixed) return raw;
+  let u, o;
+  try {
+    u = new URL(raw);
+    o = new URL(org);
+  } catch (e) {
+    return raw;
+  }
+  if (u.port || !o.port) return raw;
+  if (u.hostname.toLowerCase() !== o.hostname.toLowerCase()) return raw;
+  u.port = o.port; // 默认端口（443/80）会被 URL 自动省掉
+  return u.toString().replace(/\/+$/, "");
+}
+
+/**
+ * installPortParam 返回要拼进安装命令的 &port= 值（默认端口/无端口时为空）。
+ * 目标机上那一跳是 curl / irm：没有 Referer、也未必经过配了 X-Forwarded-Port 的代理，
+ * 服务端渲染脚本里的 SERVER= 时同样会丢端口。面板知道端口，于是显式告诉它。
+ */
+function installPortParam(base) {
+  try {
+    const u = new URL(String(base || "").trim());
+    if (!u.port) return "";
+    if ((u.protocol === "https:" && u.port === "443") || (u.protocol === "http:" && u.port === "80")) return "";
+    return u.port;
+  } catch (e) {
+    return "";
+  }
+}
+
+/** 安装命令查询串里的 &port= 片段（没有端口时为空串）。 */
+function installPortQueryPart(base) {
+  const p = installPortParam(base);
+  return p ? "&port=" + encodeURIComponent(p) : "";
+}
+// ---- install-addr-port-block:end ----
+
 if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", initActMenus);
   document.addEventListener("DOMContentLoaded", initUiConfirm);

@@ -719,6 +719,8 @@ server {
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
         proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Port  $server_port;   # 面板开在非标准端口（:8443）时必备
         proxy_read_timeout 3600s;      # 长连接：终端会话不被中断
         proxy_buffering off;           # 关闭缓冲，实时流
     }
@@ -726,6 +728,10 @@ server {
 ```
 
 > 面向公网时**务必**置于反向代理之后并启用 HTTPS。远程终端为双鉴权（浏览器登录会话 + Agent Token）。
+
+> **非标准端口（如 `https://a.bc.com:8443`）**：`$host` 不带端口，少了 `X-Forwarded-Port` 服务端就只能看到 `a.bc.com`。
+> 面板会用地址栏的端口把安装命令补回来，安装脚本里的 `SERVER=` 也由命令里的 `?port=` 兜底；
+> 但把上面那行 `X-Forwarded-Port` 加上（或直接在设置里写死 `public_url`）最稳妥。
 
 ---
 

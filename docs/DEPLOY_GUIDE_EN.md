@@ -126,6 +126,10 @@ server {
         proxy_set_header X-Real-IP         $remote_addr;
         proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        # Required when the panel runs on a non-default port (e.g. https://a.bc.com:8443):
+        # $host carries no port, so the generated install command / script SERVER= would
+        # point at 443 — the panel works, agents never register.
+        proxy_set_header X-Forwarded-Port  $server_port;
 
         # Terminal WebSocket required
         proxy_set_header Upgrade    $http_upgrade;

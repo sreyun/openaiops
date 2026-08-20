@@ -233,6 +233,8 @@ func forwardedHTTPS(r *http.Request) bool {
 //     override for reverse-proxy / stable-domain deployments.
 //  2. The request address the admin's browser used: X-Forwarded-Host/Proto behind a
 //     proxy, otherwise r.Host (and r.TLS for scheme).
+//  3. 端口若被反代抹掉（`proxy_set_header Host $host` 不带端口），再用
+//     X-Forwarded-Port / Forwarded / Origin / 面板拼的 ?port= 补回来，见 recoverEdgePort。
 //
 // We deliberately do NOT guess a LAN IP by scanning interfaces. Inside a container
 // that resolves to the container's own docker-network address (e.g. 172.18.0.4),
@@ -240,35 +242,150 @@ func forwardedHTTPS(r *http.Request) bool {
 // at the wrong address". Browsing the panel via a real address, or setting public_url,
 // is both correct and predictable.
 func (s *Server) serverURL(r *http.Request) string {
-	var raw string
 	if u := s.cfg.PublicURL(); u != "" {
-		raw = u
-	} else {
-		scheme := "http"
-		if r.TLS != nil {
-			scheme = "https"
+		// 显式配置优先，端口也照抄：管理员写了 https://a.bc.com 就是不带端口，
+		// 不能再拿请求头去"补"一个他没写的端口。
+		if forwardedHTTPS(r) {
+			u = preferHTTPSPublicBase(u)
 		}
-		host := r.Host
-		// Honor X-Forwarded-* only when trust_proxy is on — same gate as client IP /
-		// Secure cookie — so a directly-exposed server cannot be tricked into minting
-		// install commands that point at an attacker-controlled host.
-		if s.cfg.TrustProxy() {
-			if p := firstForwardedValue(r.Header.Get("X-Forwarded-Proto")); p != "" {
-				scheme = p
-			}
-			if h := firstForwardedValue(r.Header.Get("X-Forwarded-Host")); h != "" {
-				host = h
-			}
-		}
-		raw = scheme + "://" + host
+		return strings.TrimRight(u, "/")
 	}
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	host := r.Host
+	// Honor X-Forwarded-* only when trust_proxy is on — same gate as client IP /
+	// Secure cookie — so a directly-exposed server cannot be tricked into minting
+	// install commands that point at an attacker-controlled host.
+	if s.cfg.TrustProxy() {
+		if p := firstForwardedValue(r.Header.Get("X-Forwarded-Proto")); p != "" {
+			scheme = p
+		}
+		if h := firstForwardedValue(r.Header.Get("X-Forwarded-Host")); h != "" {
+			host = h
+		}
+	}
+	raw := scheme + "://" + host
 	// If the admin reached the panel over HTTPS, never mint an http:// install URL
 	// for default ports. Reverse proxies that 301 http→https cause Go's default
 	// HTTP client to convert POST /api/v1/agent/register into GET → 404.
 	if forwardedHTTPS(r) {
 		raw = preferHTTPSPublicBase(raw)
 	}
-	return strings.TrimRight(raw, "/")
+	// 端口补回必须在协议升级之后：先升级（隐式 80 → https），再补 8443，
+	// 否则 preferHTTPSPublicBase 看见显式端口就不升级了，会生成 http://host:8443。
+	return strings.TrimRight(recoverEdgePort(raw, r), "/")
+}
+
+// recoverEdgePort 补回被反向代理抹掉的对外端口。
+//
+// 面板开在 https://a.bc.com:8443，nginx 却按最常见的写法 `proxy_set_header Host $host`
+// 转发（$host 不含端口），服务端看到的 r.Host 就只剩 a.bc.com——生成的安装命令与脚本里的
+// SERVER= 于是指向默认 443，Agent 注册直接连不上，而面板本身一切正常，极难自查。
+//
+// 只在地址【没有显式端口】时生效，永远不覆盖已有端口。按可信度取第一个命中的线索：
+//
+//  1. ?port=（面板自己拼进安装命令的兜底——curl 那一跳没有 Referer，只能靠它）
+//  2. X-Forwarded-Port（nginx/Traefik/ALB 的标准写法）
+//  3. Forwarded: host=…:port（RFC 7239）
+//  4. Origin / Referer 的端口（浏览器亲口说的地址，仅在主机名相同时采信）
+//
+// 与 forwardedHTTPS 同样不挂 trust_proxy 门禁，理由也相同：这些线索只能改端口、
+// 改不了主机，伪造者最多把【自己那一次】安装命令指到同一台机器的另一个端口上。
+func recoverEdgePort(raw string, r *http.Request) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u == nil || u.Host == "" || u.Port() != "" {
+		return raw
+	}
+	host := u.Hostname()
+	if host == "" {
+		return raw
+	}
+	scheme := strings.ToLower(u.Scheme)
+	hints := []string{
+		installScriptPortParam(r),
+		firstForwardedValue(r.Header.Get("X-Forwarded-Port")),
+		forwardedHeaderPort(r.Header.Get("Forwarded")),
+		browserOriginPort(r.Header.Get("Origin"), host),
+		browserOriginPort(r.Header.Get("Referer"), host),
+	}
+	for _, h := range hints {
+		if p := normalizeEdgePort(h, scheme); p != "" {
+			u.Host = net.JoinHostPort(host, p)
+			return u.String()
+		}
+	}
+	return raw
+}
+
+// installScriptPortParam reads the ?port= hint the panel appends to the install
+// one-liner. Restricted to the install scripts on purpose: those are the only
+// requests where nobody can hand us a Referer (curl / irm on the target machine),
+// and the OIDC/SSO callbacks build redirect URIs from the same serverURL — their
+// query string comes from the IdP, not from us.
+func installScriptPortParam(r *http.Request) string {
+	switch r.URL.Path {
+	case "/install.sh", "/install.ps1", "/install-relay.sh", "/install-relay.ps1":
+		return r.URL.Query().Get("port")
+	}
+	return ""
+}
+
+// normalizeEdgePort keeps only a real port number, and drops the scheme's implicit
+// default (adding ":443" to an https URL changes nothing but confuses operators).
+func normalizeEdgePort(raw, scheme string) string {
+	p := strings.TrimSpace(raw)
+	if p == "" || len(p) > 5 {
+		return ""
+	}
+	n, err := strconv.Atoi(p)
+	if err != nil || n < 1 || n > 65535 {
+		return ""
+	}
+	if (scheme == "http" && n == 80) || (scheme == "https" && n == 443) {
+		return ""
+	}
+	return strconv.Itoa(n)
+}
+
+// forwardedHeaderPort pulls the port out of the first element's host= parameter
+// of an RFC 7239 Forwarded header (`for=1.2.3.4;host=a.bc.com:8443;proto=https`).
+func forwardedHeaderPort(v string) string {
+	first := firstForwardedValue(v)
+	if first == "" {
+		return ""
+	}
+	for _, part := range strings.Split(first, ";") {
+		k, val, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if !ok || !strings.EqualFold(strings.TrimSpace(k), "host") {
+			continue
+		}
+		val = strings.Trim(strings.TrimSpace(val), `"`)
+		if _, port, err := net.SplitHostPort(val); err == nil {
+			return port
+		}
+		return ""
+	}
+	return ""
+}
+
+// browserOriginPort returns the port of an Origin/Referer header, but only when it
+// names the same host we already derived — a cross-origin page must not be able to
+// bend the generated install address.
+func browserOriginPort(raw, host string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || host == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u == nil {
+		return ""
+	}
+	if !strings.EqualFold(u.Hostname(), host) {
+		return ""
+	}
+	return u.Port()
 }
 
 // preferHTTPSPublicBase upgrades http://host[/] (implicit :80) to https://host.
@@ -282,7 +399,13 @@ func preferHTTPSPublicBase(raw string) string {
 		return raw
 	}
 	u.Scheme = "https"
-	u.Host = u.Hostname()
+	// Hostname() 返回的 IPv6 字面量是不带方括号的，直接写回 Host 会拼出
+	// https://2001:db8::1 —— 再解析就是"端口非法"，整条地址作废。
+	if h := u.Hostname(); strings.Contains(h, ":") {
+		u.Host = "[" + h + "]"
+	} else {
+		u.Host = h
+	}
 	u.RawQuery = ""
 	u.Fragment = ""
 	return strings.TrimRight(u.String(), "/")

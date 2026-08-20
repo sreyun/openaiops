@@ -821,6 +821,13 @@ document.addEventListener("click", async (e) => {
   }
 });
 
+/**
+ * 面板对外地址：server_url 是反代抹掉端口后的（少了 :8443）就用地址栏补回。
+ * server_url_fixed 表示管理员在 public_url 里写死了地址，那就一律照抄。
+ */
+function installServerBase() {
+  return effectiveServerBase(INSTALL.server_url || location.origin, INSTALL.server_url_fixed);
+}
 function normalizeInstallServerURL(u) {
   return String(u || "").trim().replace(/\/+$/, "").toLowerCase();
 }
@@ -861,7 +868,7 @@ function parseMultiServerExtras() {
 }
 /** Current panel + extras; current panel is always first. */
 function buildMultiServerTargets() {
-  const primary = INSTALL.server_url || location.origin;
+  const primary = installServerBase();
   const token = INSTALL.token || "";
   const out = [{ server: primary, token }];
   const seen = new Set([normalizeInstallServerURL(primary)]);
@@ -934,9 +941,9 @@ function renderInstallCmd() {
   }
   $("normalInstallSection").style.display = "";
   $("relaySection").style.display = "none";
-  const server = INSTALL.server_url || location.origin;
+  const server = installServerBase();
   const token = INSTALL.token || "";
-  let q = "token=" + encodeURIComponent(token) + installFolderQueryParts();
+  let q = "token=" + encodeURIComponent(token) + installFolderQueryParts() + installPortQueryPart(server);
   // 日志采集（可选）：把用户填写的路径（换行/逗号分隔）拼进安装命令，服务端写入 config.json 的 log_paths
   const lp = (($("installLogPaths") && $("installLogPaths").value) || "").trim();
   if (lp) q += "&log_paths=" + encodeURIComponent(lp);
@@ -1025,7 +1032,7 @@ function renderInstallCmd() {
     : `curl -fsSL "${server}/uninstall.sh" | sh`;
 }
 function renderRelayCmd() {
-  const server = INSTALL.server_url || location.origin;
+  const server = installServerBase();
   const token = INSTALL.token || "";
   let q = "token=" + encodeURIComponent(token) + installFolderQueryParts();
   // Internal agents (via relay) still accept log_paths; audit stays off in relay mode.
@@ -1039,7 +1046,7 @@ function renderRelayCmd() {
   // 网关命令必须带 token：网关在中继的同时照常采集上报，没有 token 就注册不上——
   // 现场症状是「内网机器全在，唯独这台网关在主机列表里找不到」，而转发一切正常。
   // 只带身份参数（token/归属），log_paths 是给 ② 的内网机器的。
-  const gwQ = "token=" + encodeURIComponent(token) + installFolderQueryParts();
+  const gwQ = "token=" + encodeURIComponent(token) + installFolderQueryParts() + installPortQueryPart(server);
   let gatewayCmd = "", internalCmd = "";
   if (port) {
     if (CUR_OS === "windows") {

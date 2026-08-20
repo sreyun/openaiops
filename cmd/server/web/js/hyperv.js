@@ -574,10 +574,11 @@ async function hvSubmitConfig(sel) {
 async function hvCopyGuestInstall(guestName) {
   try {
     const info = await fetch(`${API}/install/info`, { credentials: "same-origin" }).then(r => r.json());
-    const server = info.server_url || location.origin;
+    // 反代抹掉端口时 server_url 会少 :8443，用地址栏补回；?port= 再兜住 curl 那一跳。
+    const server = effectiveServerBase(info.server_url || location.origin, info.server_url_fixed);
     const token = info.token || "";
     const cat = encodeURIComponent(guestName || "hyperv-guest");
-    const cmd = `curl -fsSL "${server}/install.sh?token=${encodeURIComponent(token)}&category=${cat}" | sh`;
+    const cmd = `curl -fsSL "${server}/install.sh?token=${encodeURIComponent(token)}&category=${cat}${installPortQueryPart(server)}" | sh`;
     if (navigator.clipboard && navigator.clipboard.writeText) {
       await navigator.clipboard.writeText(cmd);
     } else {

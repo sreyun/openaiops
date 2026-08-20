@@ -130,7 +130,12 @@ func (s *Server) handleInstallInfo(w http.ResponseWriter, r *http.Request) {
 		tok = maskSecret(tok)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"server_url":       s.serverURL(r),
+		"server_url": s.serverURL(r),
+		// server_url_fixed 告诉面板"这个地址是管理员在 public_url 里写死的"。
+		// 面板响应头是 Referrer-Policy: no-referrer，同源 GET 也不带 Origin，
+		// 于是反代抹掉端口时服务端这边无从补回（详见 recoverEdgePort）——只有浏览器
+		// 知道地址栏里的 :8443。没写死时前端就用地址栏的端口补上；写死了则一律照抄。
+		"server_url_fixed": s.cfg.PublicURL() != "",
 		"token":            tok,
 		"require_token":    s.cfg.AgentTokenRequired(),
 		"max_uses":         maxUses,
