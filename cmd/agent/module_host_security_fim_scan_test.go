@@ -237,3 +237,32 @@ func TestFimChangeReasonPrefersContent(t *testing.T) {
 		t.Fatalf("mtime change, got %q", r)
 	}
 }
+
+// 点名的根目录不受自动排除项影响。
+//
+// 这条是真踩出来的：`/tmp` 在很多机器上是独立的 tmpfs 挂载（容器镜像、这台构建机都是），
+// 而 fimRemoteMountExcludes() 会把所有 tmpfs 挂载点排掉。于是 FIM 的四个测试在这类机器上
+// 一起报 "walked 0 files"——测试本身没错，是被挂载类型挡掉了。产品侧的隐患更值得修：
+// 运维在配置里点名一个目录（比如挂在 ramdisk 上的应用目录），扫描器一个文件都不走，
+// 界面上只有一句"0 个文件"，没有任何线索指向"因为它是 tmpfs"。
+func TestFimExplicitRootOverridesAutoExcludes(t *testing.T) {
+	// /var/log 在 fimDefaultExcludes() 里；点名它就该扫。
+	e := newFIMExcluder(nil, []string{"/var/log/myapp"})
+	if e.skipPath("/var/log/myapp/app.log") {
+		t.Error("点名 /var/log/myapp 之后，它下面的文件不该被默认排除项挡掉")
+	}
+	// 没点名的兄弟目录仍然排除。
+	if !e.skipPath("/var/log/other/sys.log") {
+		t.Error("/var/log 的其余部分仍应被默认排除项挡住")
+	}
+	// 运维自己写的排除项永远生效——那是他明确要排除的。
+	e = newFIMExcluder([]string{"/var/log/myapp/noisy"}, []string{"/var/log/myapp"})
+	if !e.skipPath("/var/log/myapp/noisy/x.log") {
+		t.Error("显式 Excludes 必须压过点名根目录")
+	}
+	// root 是 "/" 等于整盘扫，不该把 /proc、/sys 一起拖进来。
+	e = newFIMExcluder(nil, []string{"/"})
+	if !e.skipPath("/proc/1/maps") {
+		t.Error("整盘扫时默认排除项必须仍然生效")
+	}
+}

@@ -311,16 +311,39 @@ func unescapeMountPath(p string) string {
 
 // fimExcluder decides whether a path is out of scope.
 type fimExcluder struct {
+	// prefixes 是自动排除项（默认表 + tmpfs/网络挂载）。
 	prefixes []string
-	names    map[string]bool
+	// userPrefixes 是运维自己写的排除项，优先级最高，任何情况下都生效。
+	userPrefixes []string
+	// allow 是运维点名要扫的子树；落在里面的路径不受 prefixes 影响。
+	allow []string
+	names map[string]bool
 }
 
-func newFIMExcluder(extra []string) *fimExcluder {
+// newFIMExcluder builds the skip set.
+//
+// `explicitRoots` 是运维**点名要扫**的目录（fimOptions.Roots）。自动排除项对它们不生效：
+// 默认排除表和"跳过 tmpfs/overlay/网络挂载"这类规则，是给默认整盘扫（root = "/"）兜底的
+// ——一个 ramdisk 或容器 overlay 目录不值得进基线。但运维显式写下这个路径时，同一条规则
+// 会让扫描**一个文件都不走且不报错**，界面上只剩一句"0 个文件"，没人能从中看出是被
+// 挂载类型挡掉的。点名即授权：这时以运维的配置为准。
+//
+// `extra`（运维自己写的排除项）永远生效——那是他明确要排除的东西。
+func newFIMExcluder(extra []string, explicitRoots []string) *fimExcluder {
 	e := &fimExcluder{names: map[string]bool{}}
 	for _, n := range fimDefaultNameExcludes() {
 		e.names[strings.ToLower(n)] = true
 	}
-	add := func(list []string) {
+	// 只有"点名的子树"才豁免自动排除；root 是 "/" 等于整盘扫，豁免它会把
+	// /proc、/sys 一起拖进来。
+	for _, r := range explicitRoots {
+		key := fimMatchKey(fimNormPath(strings.TrimSpace(r)))
+		if key == "" || key == "/" {
+			continue
+		}
+		e.allow = append(e.allow, key)
+	}
+	add := func(list []string, dst *[]string) {
 		for _, p := range list {
 			p = strings.TrimSpace(p)
 			if p == "" {
@@ -331,14 +354,25 @@ func newFIMExcluder(extra []string) *fimExcluder {
 				e.names[strings.ToLower(p)] = true
 				continue
 			}
-			e.prefixes = append(e.prefixes, fimMatchKey(fimNormPath(p)))
+			*dst = append(*dst, fimMatchKey(fimNormPath(p)))
 		}
 	}
-	add(fimDefaultExcludes())
-	add(fimRemoteMountExcludes())
-	add(extra)
+	add(fimDefaultExcludes(), &e.prefixes)
+	add(fimRemoteMountExcludes(), &e.prefixes)
+	add(extra, &e.userPrefixes)
 	sort.Strings(e.prefixes)
+	sort.Strings(e.userPrefixes)
+	sort.Strings(e.allow)
 	return e
+}
+
+func underAny(key string, list []string) bool {
+	for _, p := range list {
+		if key == p || strings.HasPrefix(key, p+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *fimExcluder) skipName(name string) bool {
@@ -347,12 +381,15 @@ func (e *fimExcluder) skipName(name string) bool {
 
 func (e *fimExcluder) skipPath(norm string) bool {
 	key := fimMatchKey(norm)
-	for _, p := range e.prefixes {
-		if key == p || strings.HasPrefix(key, p+"/") {
-			return true
-		}
+	// 运维自己写的排除项最优先——那是他明确要排除的东西。
+	if underAny(key, e.userPrefixes) {
+		return true
 	}
-	return false
+	// 点名要扫的子树豁免自动排除项（否则一个 tmpfs 上的目录会被静默跳成 0 个文件）。
+	if underAny(key, e.allow) {
+		return false
+	}
+	return underAny(key, e.prefixes)
 }
 
 // --- content-audit whitelist ---
@@ -561,7 +598,7 @@ func collectFIMChanges(opts fimOptions) ([]hostSecFileChange, hostSecFIMStats) {
 	if len(roots) == 0 {
 		roots = fimDefaultRoots()
 	}
-	excl := newFIMExcluder(opts.Excludes)
+	excl := newFIMExcluder(opts.Excludes, opts.Roots)
 	patterns := fimEffectiveContentPatterns(opts.ContentPaths)
 	stats.ContentPaths = len(patterns)
 	cacheDir := ""

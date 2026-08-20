@@ -16,6 +16,8 @@ window.DICT_TW = {
   "toast.update_failed_detail": "修改失敗:",
   "toast.update_failed_detail2": "更新失敗:",
   "toast.category_updated": "已更新分類",
+  "section.kernel": "核心版本",
+  "toast.endpoint_unavailable": "伺服器沒有這個介面（HTTP {code}）。多半是面板版本過舊，或前面的反向代理/WAF 擋掉了 POST。請升級面板後重試。",
   "toast.test_sent": "測試訊息已傳送 ✅",
   "toast.test_failed": "測試失敗:",
   "toast.trigger_failed": "觸發失敗:",

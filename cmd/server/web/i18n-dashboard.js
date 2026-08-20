@@ -19,6 +19,8 @@
   "toast.update_failed_detail": "修改失败:",
   "toast.update_failed_detail2": "更新失败:",
   "toast.category_updated": "已更新分类",
+  "section.kernel": "内核版本",
+  "toast.endpoint_unavailable": "服务端没有这个接口（HTTP {code}）。多半是面板版本过旧，或前面的反向代理/WAF 拦掉了 POST。请升级面板后重试。",
   "toast.test_sent": "测试消息已发送 ✅",
   "toast.test_failed": "测试失败:",
   "toast.trigger_failed": "触发失败:",

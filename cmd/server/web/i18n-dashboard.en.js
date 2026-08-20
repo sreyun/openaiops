@@ -16,6 +16,8 @@ window.DICT_EN = {
   "toast.update_failed_detail": "Update failed: ",
   "toast.update_failed_detail2": "Update failed: ",
   "toast.category_updated": "Category updated",
+  "section.kernel": "Kernel",
+  "toast.endpoint_unavailable": "The server has no such endpoint (HTTP {code}). The panel build is likely too old, or a reverse proxy/WAF in front of it is blocking POST. Upgrade the panel and retry.",
   "toast.test_sent": "Test message sent ✅",
   "toast.test_failed": "Test failed: ",
   "toast.trigger_failed": "Trigger failed: ",

@@ -95,6 +95,16 @@ function renderHostBatchBar() {
     <button type="button" class="btn ghost" data-batch="exit">${esc(I18N.t("ui.cancel", "取消"))}</button>`;
 }
 
+/* 404/405 的专用文案。
+ *
+ * 这两个码说明请求压根没到业务逻辑：要么面板二进制里没有这条路由（版本过旧），要么前面
+ * 有反向代理/WAF 按方法把 POST 拦了。裸状态码对用户毫无指向性——他会以为是权限或参数。 */
+function endpointUnavailableMsg(code) {
+  return I18N.t("toast.endpoint_unavailable",
+    "服务端没有这个接口（HTTP {code}）。多半是面板版本过旧，或前面的反向代理/WAF 拦掉了 POST。请升级面板后重试。")
+    .replace("{code}", String(code));
+}
+
 /* 批量改分组。
  *
  * 两种用法都要一步到位：
@@ -123,8 +133,16 @@ async function hostBatchMoveFolder() {
     if (!r.ok) {
       // 带上状态码：401/403/404 与业务校验失败是完全不同的排查方向，
       // 只说一句"更新失败"等于把人留在原地。
+      //
+      // 404/405 要单独说：这两个码意味着**请求根本没走到业务逻辑**——路由不存在（面板版本
+      // 过旧）或被前置反代/WAF 按方法拦掉了。给用户一句裸的 "HTTP 405" 等于让他去猜是
+      // 权限、是参数还是版本；这三条的排查方向完全不同。
+      console.error("[aiops] batch folder failed", r.status, body, { url: `${API}/hosts/folder/batch`, ids, folderId });
+      if (r.status === 404 || r.status === 405) {
+        toast(endpointUnavailableMsg(r.status), "err");
+        return;
+      }
       const why = body.error || `HTTP ${r.status}`;
-      console.error("[aiops] batch folder failed", r.status, body, { ids, folderId });
       toast(I18N.t("toast.update_failed2") + "：" + why, "err");
       return;
     }
@@ -186,6 +204,7 @@ async function promptBatchFolderTarget(count) {
     const body = await r.json().catch(() => ({}));
     const newId = body && body.folder && body.folder.id;
     if (!r.ok || !newId) {
+      if (r.status === 404 || r.status === 405) { toast(endpointUnavailableMsg(r.status), "err"); return null; }
       toast(body.error || (I18N.t("toast.update_failed2") + `：HTTP ${r.status}`), "err");
       return null;
     }
@@ -276,6 +295,11 @@ function hostCard(h) {
       ? `<span class="g stale-tag" title="${I18N.t("section.data_stale")}，${I18N.t("section.last_seen")} ${fmtDateTime(h.last_seen)}">⚠ ${I18N.t("ui.data")} ${ago(h.last_seen)}</span>`
       : `<span class="g">${I18N.t("ui.running")} ${fmtUptime(m.uptime || 0)}</span>`;
   const agentVer = (typeof agentVersionBadgeHTML === "function") ? agentVersionBadgeHTML(h) : "";
+  // 内核版本跟在 Agent 版本后面，同一行。内核串可以很长（"6.12.100+deb13-amd64"），
+  // 所以这里只给它剩余空间并允许省略号——放不下不换行、不把卡片撑宽，鼠标悬停看全文。
+  const kernBadge = h.kernel
+    ? `<span class="kern-badge mono" title="${esc(I18N.t("section.kernel") + ": " + h.kernel)}">${esc(h.kernel)}</span>`
+    : "";
   const agentSel = (typeof agentSelectCheckboxHTML === "function") ? agentSelectCheckboxHTML(h) : "";
   const outdatedCls = (typeof agentHostCardClass === "function") ? agentHostCardClass(h) : "";
   // 卡片头只留「主机名 + 分组 + 终端/桌面/删除」。系统类型与 Agent 版本挪到 IP 那行下面
@@ -302,6 +326,7 @@ function hostCard(h) {
     <div class="host-sys">
       <span class="os-badge">${esc((h.os || "?").toUpperCase())}</span>
       ${agentVer}
+      ${kernBadge}
     </div>
     ${bar("CPU", m.cpu_percent || 0, (m.cpu_percent || 0).toFixed(1) + "% · " + (m.cpu_cores || 0) + I18N.t("ui.cores"), "cpu")}
     ${bar(I18N.t("ui.memory"), m.mem_percent || 0, (m.mem_percent || 0).toFixed(1) + "% · " + fmtGB(m.mem_used || 0) + "/" + fmtGB(m.mem_total || 0) + I18N.t("unit.gb"), "mem")}
