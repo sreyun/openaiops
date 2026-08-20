@@ -37,8 +37,8 @@ type SLO struct {
 	Threshold  float64 `json:"threshold,omitempty"`
 	GoodQuery  string  `json:"good_query,omitempty"`  // source_type=promql：达标(好)事件计数 PromQL，用 $window 占位滚动窗口
 	TotalQuery string  `json:"total_query,omitempty"` // source_type=promql：总事件计数 PromQL（$window 占位）
-	Target     float64 `json:"target"`      // objective %, e.g. 99.9
-	WindowDays int     `json:"window_days"` // rolling window
+	Target     float64 `json:"target"`                // objective %, e.g. 99.9
+	WindowDays int     `json:"window_days"`           // rolling window
 	CreatedAt  int64   `json:"created_at"`
 	UpdatedAt  int64   `json:"updated_at"`
 }
@@ -129,7 +129,7 @@ type sloManager struct {
 	metricSamples func(hostID string, fromTs int64) []shared.Sample
 	checkPoints   func(checkID string) []CheckPoint
 	apiPoints     func(apiID string, fromTs int64) []APIHistPoint
-	promScalar    func(query string) (float64, bool)                     // source_type=promql：即时标量查询（注入，内部走 VM）
+	promScalar    func(query string) (float64, bool)                              // source_type=promql：即时标量查询（注入，内部走 VM）
 	promRange     func(query string, from, to, step int64) ([]vmRangePoint, bool) // source_type=promql：区间查询（趋势用）
 	incidents     *incidentManager
 	burning       map[string]bool // sloID -> currently in a burn incident
@@ -398,8 +398,8 @@ func (m *sloManager) sloTrend(s SLO, fromTs, toTs int64) []sloTrendPoint {
 			continue
 		}
 		out = append(out, sloTrendPoint{
-			Ts:  fromTs + int64(i)*bw + bw/2, // 桶中点
-			SLI: float64(good[i]) / float64(total[i]) * 100,
+			Ts:   fromTs + int64(i)*bw + bw/2, // 桶中点
+			SLI:  float64(good[i]) / float64(total[i]) * 100,
 			Good: good[i], Total: total[i],
 		})
 	}
@@ -483,7 +483,7 @@ func (m *sloManager) ensureSLOFreezeWindow(s SLO, st SLOStatus) {
 	w := ChangeWindow{
 		ID: id, Name: "SLO 错误预算冻结：" + s.Name,
 		Start: now, End: now + ttlSec, Freeze: true,
-		Note: fmt.Sprintf("自动创建：SLI=%.3f target=%.3f budget=%.2f%%", st.SLI, s.Target, st.ErrorBudget),
+		Note:   fmt.Sprintf("自动创建：SLI=%.3f target=%.3f budget=%.2f%%", st.SLI, s.Target, st.ErrorBudget),
 		SLOIDs: []string{s.ID}, UpdatedAt: now,
 	}
 	_, _ = m.cfg.UpsertChangeWindow(w)

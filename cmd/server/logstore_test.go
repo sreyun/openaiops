@@ -10,7 +10,7 @@ import (
 )
 
 // TestLogSearchPageAndStats 覆盖服务端分页(offset/total/页不重叠)与统计口径
-//（ByLevel 在按某级别过滤列表时仍保留其它级别总数——需求核心）。
+// （ByLevel 在按某级别过滤列表时仍保留其它级别总数——需求核心）。
 func TestLogSearchPageAndStats(t *testing.T) {
 	ls := newLogStore()
 	var lines []shared.LogLine

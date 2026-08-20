@@ -4,10 +4,10 @@ import "strings"
 
 // AnalyzeInput carries offline SQL plus optional live metadata / EXPLAIN.
 type AnalyzeInput struct {
-	SQL      string
-	Dialect  Dialect
-	Meta     SchemaMeta
-	Explain  *ExplainAnalysis
+	SQL     string
+	Dialect Dialect
+	Meta    SchemaMeta
+	Explain *ExplainAnalysis
 }
 
 // Analyze runs Vitess parse → AST audit (+ regex fallback) → advisor → EXPLAIN/meta scoring.
@@ -18,7 +18,7 @@ func Analyze(in AnalyzeInput) AnalyzeResult {
 	}
 	raw := strings.TrimSpace(in.SQL)
 	out := AnalyzeResult{
-		Dialect: d,
+		Dialect:   d,
 		Breakdown: ScoreBreakdown{Base: 100},
 		Findings:  []Finding{},
 	}

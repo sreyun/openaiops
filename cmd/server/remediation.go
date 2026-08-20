@@ -32,9 +32,9 @@ type RemediationRule struct {
 	// RollbackPlaybookID: on failed auto-run, optionally trigger this playbook.
 	RollbackPlaybookID string `json:"rollback_playbook_id,omitempty"`
 	// Guards
-	RequireApproval bool `json:"require_approval"` // queue for operator approval instead of auto-running
-	CooldownSec     int  `json:"cooldown_sec"`     // min seconds between runs for the same host
-	MaxPerHour      int  `json:"max_per_hour"`     // per-rule hourly cap (0 = unlimited)
+	RequireApproval bool  `json:"require_approval"` // queue for operator approval instead of auto-running
+	CooldownSec     int   `json:"cooldown_sec"`     // min seconds between runs for the same host
+	MaxPerHour      int   `json:"max_per_hour"`     // per-rule hourly cap (0 = unlimited)
 	CreatedAt       int64 `json:"created_at"`
 	UpdatedAt       int64 `json:"updated_at"`
 }
@@ -63,8 +63,8 @@ type RemediationRun struct {
 	Verify     string `json:"verify,omitempty"`
 	VerifiedAt int64  `json:"verified_at,omitempty"`
 	CreatedAt  int64  `json:"created_at"`
-	DecidedAt          int64  `json:"decided_at,omitempty"`
-	DecidedBy          string `json:"decided_by,omitempty"`
+	DecidedAt  int64  `json:"decided_at,omitempty"`
+	DecidedBy  string `json:"decided_by,omitempty"`
 }
 
 const remediationRunCap = 300
@@ -390,9 +390,10 @@ func (m *remediationManager) finish(runID int64, ok bool, reason, rollbackPlaybo
 //
 // 为什么必须有这一步：整套自愈的价值主张是「发现 → 处置 → 确认」，而此前只有前两步。
 // 「剧本退出码 0」被直接当成「修复成功」推送出去，于是三件事同时发生：
-//   1. 运维收到一条**可能是假的**成功通知，从此不再盯这条告警；
-//   2. 每条规则的真实有效性无从回答——「这条自愈到底有没有用」没有任何数据支撑；
-//   3. 冷却窗被这次「成功」占满，真正该做的处置反而被推迟。
+//  1. 运维收到一条**可能是假的**成功通知，从此不再盯这条告警；
+//  2. 每条规则的真实有效性无从回答——「这条自愈到底有没有用」没有任何数据支撑；
+//  3. 冷却窗被这次「成功」占满，真正该做的处置反而被推迟。
+//
 // 现在把结论拆成两条消息：执行完一条，验证完一条。只在**没修好**时升级为告警级别，
 // 修好了则安静地标成 cleared——不给运维增加噪声。
 func (m *remediationManager) scheduleVerify(runID int64) {

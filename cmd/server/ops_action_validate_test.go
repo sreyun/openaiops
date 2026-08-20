@@ -13,7 +13,7 @@ func TestValidateOpsActionPlanRejectsUnknownType(t *testing.T) {
 
 func TestValidateOpsActionPlanRejectsDangerousPlaybook(t *testing.T) {
 	plan := &OpsActionPlan{Actions: []OpsAction{{
-		Type: "host_playbook",
+		Type:   "host_playbook",
 		Target: map[string]any{"host_id": "h1"},
 		Params: map[string]any{"steps": []any{
 			map[string]any{"name": "wipe", "command": "rm -rf /"},
@@ -26,7 +26,7 @@ func TestValidateOpsActionPlanRejectsDangerousPlaybook(t *testing.T) {
 
 func TestValidateOpsActionPlanOKHyperV(t *testing.T) {
 	plan := &OpsActionPlan{Actions: []OpsAction{{
-		Type: "hyperv_power",
+		Type:   "hyperv_power",
 		Target: map[string]any{"host_id": "h1", "vm_id": "vm1"},
 		Params: map[string]any{"action": "restart"},
 		Risk:   "low", // model claim ignored

@@ -248,7 +248,7 @@ func TestAPIRunnerProbe(t *testing.T) {
 	sys := APISystem{ID: "s1", Name: "订单系统", Level: "critical"}
 	ep := APIEndpoint{
 		ID: "ep1", Name: "查询", URL: srv.URL, Method: "GET",
-		Headers: map[string]string{"X-Token": "secret"},
+		Headers:      map[string]string{"X-Token": "secret"},
 		ExpectStatus: 200, JSONPath: "code", JSONExpect: "0", Enabled: true,
 	}
 	ar.probe(sys, ep)

@@ -333,4 +333,3 @@ func verifyJSONBytes(v *assistVerifyResult) json.RawMessage {
 	}
 	return b
 }
-

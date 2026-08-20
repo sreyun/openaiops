@@ -620,12 +620,12 @@ func (s *Server) splitHyperVInventories(rows []map[string]any) (kept []map[strin
 	now := time.Now().Unix()
 
 	type scored struct {
-		row    map[string]any
-		hostID string
-		live   bool
-		online bool
+		row     map[string]any
+		hostID  string
+		live    bool
+		online  bool
 		updated time.Time
-		guests int
+		guests  int
 	}
 	groups := map[string][]scored{}
 	order := []string{}

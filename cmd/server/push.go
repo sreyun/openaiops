@@ -11,9 +11,9 @@ import (
 
 // pushClient represents a connected browser WebSocket client receiving push updates.
 type pushClient struct {
-	ws           *wsConn
-	done         chan struct{}
-	closed       bool
+	ws            *wsConn
+	done          chan struct{}
+	closed        bool
 	lastRosterSig string // last pushed host-id roster; empty until first hosts_changed
 }
 

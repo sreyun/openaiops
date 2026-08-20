@@ -302,4 +302,3 @@ func TestHandleMetricsForecastObjectPoints(t *testing.T) {
 		t.Fatalf("want forecast series, got %+v", res.Series)
 	}
 }
-

@@ -131,9 +131,9 @@ type APIHistPoint struct {
 type APISystem struct {
 	ID            string            `json:"id"`
 	Name          string            `json:"name"`
-	IntervalSec   int               `json:"interval_sec"`   // 批量探测周期（秒，最小 5）
-	Level         string            `json:"level"`          // warning | critical
-	Env           string            `json:"env,omitempty"`  // 环境标签：prod|staging|dev（分组/过滤，迭代 E）
+	IntervalSec   int               `json:"interval_sec"`  // 批量探测周期（秒，最小 5）
+	Level         string            `json:"level"`         // warning | critical
+	Env           string            `json:"env,omitempty"` // 环境标签：prod|staging|dev（分组/过滤，迭代 E）
 	Enabled       bool              `json:"enabled"`
 	CommonHeaders map[string]string `json:"common_headers,omitempty"` // 业务系统级公共请求头，所有接口共用
 	CommonBody    string            `json:"common_body,omitempty"`    // 业务系统级公共请求体，所有接口共用（JSON 对象则与接口体字段级合并）

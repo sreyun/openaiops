@@ -60,7 +60,7 @@ type distProbeManager struct {
 	mu      sync.Mutex
 	results map[string]map[string]distResult // taskID -> hostID -> 最新结果
 	scope   map[string]string                // taskID -> 上次告警的范围，用于转换检测
-	ttlSec  int64                             // 探测点过期时间（超过则不计入聚合）
+	ttlSec  int64                            // 探测点过期时间（超过则不计入聚合）
 }
 
 func newDistProbeManager() *distProbeManager {

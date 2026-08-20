@@ -82,11 +82,11 @@ func (cs *ConfigStore) FindBusinessService(id string) (BusinessService, bool) {
 }
 
 type ServiceImpact struct {
-	Service       BusinessService   `json:"service"`
-	Hosts         []string          `json:"hosts"`
-	OpenIncidents []map[string]any  `json:"open_incidents"`
-	RecentChanges []ChangeRecord    `json:"recent_changes"`
-	DataSources   []string          `json:"datasources,omitempty"`
+	Service       BusinessService  `json:"service"`
+	Hosts         []string         `json:"hosts"`
+	OpenIncidents []map[string]any `json:"open_incidents"`
+	RecentChanges []ChangeRecord   `json:"recent_changes"`
+	DataSources   []string         `json:"datasources,omitempty"`
 }
 
 func (s *Server) computeServiceImpact(svc BusinessService) ServiceImpact {

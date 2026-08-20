@@ -21,17 +21,17 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	c.SMS.AccessKey = maskSecret(c.SMS.AccessKey)
 	c.VoiceCall.SecretKey = maskSecret(c.VoiceCall.SecretKey)
 	c.VoiceCall.AccessKey = maskSecret(c.VoiceCall.AccessKey)
-	c.AI.APIKey = maskSecret(c.AI.APIKey)                         // AI provider credential
-	c.AI.EmbedAPIKey = maskSecret(c.AI.EmbedAPIKey)               // 嵌入服务凭证（独立于对话）
+	c.AI.APIKey = maskSecret(c.AI.APIKey)           // AI provider credential
+	c.AI.EmbedAPIKey = maskSecret(c.AI.EmbedAPIKey) // 嵌入服务凭证（独立于对话）
 	c.AI.RerankAPIKey = maskSecret(c.AI.RerankAPIKey)
 	c.AI.MCPToken = maskSecret(c.AI.MCPToken)
 	if strings.TrimSpace(c.AI.MCPClientsJSON) != "" {
 		c.AI.MCPClientsJSON = maskMCPClientsJSONForAPI(c.AI.MCPClientsJSON)
 	}
 	c.AI.WeKnoraAPIKey = maskSecret(c.AI.WeKnoraAPIKey)
-	c.PostgresDSN = maskSecret(c.PostgresDSN)                     // DSN carries the PostgreSQL password
-	c.InstallToken = maskSecret(c.InstallToken)                   // agent enrollment token — not for viewers
-	c.PrevInstallToken = maskSecret(c.PrevInstallToken)           // grace-period token must not leak via config GET
+	c.PostgresDSN = maskSecret(c.PostgresDSN)           // DSN carries the PostgreSQL password
+	c.InstallToken = maskSecret(c.InstallToken)         // agent enrollment token — not for viewers
+	c.PrevInstallToken = maskSecret(c.PrevInstallToken) // grace-period token must not leak via config GET
 	c.PromWriteToken = maskSecret(c.PromWriteToken)
 	c.RelaySecret = maskSecret(c.RelaySecret)                     // gateway relay shared secret
 	c.CustomWebhook.Headers = maskSecret(c.CustomWebhook.Headers) // may carry auth tokens (e.g. X-Token)

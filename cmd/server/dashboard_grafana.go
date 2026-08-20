@@ -56,7 +56,7 @@ type grafanaPanel struct {
 		Overrides []grafanaFieldOverride `json:"overrides"`
 	} `json:"fieldConfig"`
 	Options json.RawMessage `json:"options"` // Grafana panel options (legend etc.)
-	Yaxes []struct {
+	Yaxes   []struct {
 		Format string `json:"format"`
 	} `json:"yaxes"`
 	Format  string         `json:"format"`
@@ -98,14 +98,14 @@ type grafanaFieldCustom struct {
 		Mode  string `json:"mode"` // none|normal|percent
 		Group string `json:"group"`
 	} `json:"stacking"`
-	AxisPlacement string `json:"axisPlacement"`
-	AxisLabel     string `json:"axisLabel"`
+	AxisPlacement string   `json:"axisPlacement"`
+	AxisLabel     string   `json:"axisLabel"`
 	AxisSoftMin   *float64 `json:"axisSoftMin"`
 	AxisSoftMax   *float64 `json:"axisSoftMax"`
 }
 
 type grafanaValueMapping struct {
-	Type    string `json:"type"` // value|range|regex|special
+	Type    string          `json:"type"` // value|range|regex|special
 	Options json.RawMessage `json:"options"`
 	// Legacy Grafana 7 flat form
 	Value   interface{} `json:"value"`
@@ -453,8 +453,8 @@ func mapGrafanaMappings(in []grafanaValueMapping) []DashValueMapping {
 				}
 			case "range":
 				var opt struct {
-					From  *float64 `json:"from"`
-					To    *float64 `json:"to"`
+					From   *float64 `json:"from"`
+					To     *float64 `json:"to"`
 					Result struct {
 						Text  string `json:"text"`
 						Color string `json:"color"`

@@ -66,15 +66,15 @@ func (s *Server) handleAICopilotContext(w http.ResponseWriter, r *http.Request) 
 	packs, _ := listEmbeddedSkillPacks()
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"generated_at":       time.Now().Unix(),
-		"notable":            notable,
-		"duty_context":       duty,
-		"open_incidents":     open,
+		"generated_at":        time.Now().Unix(),
+		"notable":             notable,
+		"duty_context":        duty,
+		"open_incidents":      open,
 		"pending_remediation": pendingRem,
-		"skill_hints":        skillHints,
-		"suggestions":        suggestions,
-		"skill_packs":        packs,
-		"assist_hint":        "可对未决事件一键打开诊断，或用 Assist task=generic 生成值班摘要",
+		"skill_hints":         skillHints,
+		"suggestions":         suggestions,
+		"skill_packs":         packs,
+		"assist_hint":         "可对未决事件一键打开诊断，或用 Assist task=generic 生成值班摘要",
 	})
 }
 

@@ -277,10 +277,10 @@ func TestDiagCommandAllowed(t *testing.T) {
 	allowed := []string{
 		"df -h",
 		"top -bn1",
-		"ps aux | grep nginx",                        // 管道到只读过滤
-		"journalctl -u nginx --no-pager | tail -50",  // 只读日志 + 过滤
+		"ps aux | grep nginx", // 管道到只读过滤
+		"journalctl -u nginx --no-pager | tail -50", // 只读日志 + 过滤
 		"free -m",
-		"systemctl status nginx",                     // 多词前缀精确匹配
+		"systemctl status nginx", // 多词前缀精确匹配
 		"docker ps",
 		"cat /proc/loadavg",
 	}

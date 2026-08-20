@@ -92,12 +92,12 @@ func TestUnmarshalMaybeString(t *testing.T) {
 
 func TestDetectTemplateFormat(t *testing.T) {
 	cases := map[string]string{
-		`{"configs":"{}"}`:                       "nightingale",
-		`{"var":[]}`:                             "nightingale",
-		`{"panels":[{"layout":{}}]}`:             "nightingale",
-		`{"templating":{"list":[]},"panels":[]}`: "grafana",
-		`{"panels":[{"gridPos":{}}]}`:            "grafana",
-		`{"schemaVersion":39,"panels":[]}`:       "grafana",
+		`{"configs":"{}"}`:                                        "nightingale",
+		`{"var":[]}`:                                              "nightingale",
+		`{"panels":[{"layout":{}}]}`:                              "nightingale",
+		`{"templating":{"list":[]},"panels":[]}`:                  "grafana",
+		`{"panels":[{"gridPos":{}}]}`:                             "grafana",
+		`{"schemaVersion":39,"panels":[]}`:                        "grafana",
 		`{"format":"aiops","dashboard":{"name":"x","panels":[]}}`: "aiops",
 		`{"name":"主机看板","panels":[{"title":"CPU","type":"stat","grid":{"x":0,"y":0,"w":6,"h":4},"targets":[{"expr":"aiops_cpu_percent"}]}]}`: "aiops",
 	}

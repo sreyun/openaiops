@@ -29,7 +29,7 @@ func strictReadOnly(sql string, mysql bool) string {
 		}
 		trimmed = strings.TrimSuffix(trimmed, ";")
 	}
-	if !IsReadOnlyQuery(trimmed + ";") && !IsReadOnlyQuery(trimmed) {
+	if !IsReadOnlyQuery(trimmed+";") && !IsReadOnlyQuery(trimmed) {
 		return "not a read-only statement"
 	}
 	kw := FirstKeyword(trimmed)

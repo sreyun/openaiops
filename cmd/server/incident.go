@@ -28,20 +28,20 @@ type IncidentEvent struct {
 
 // Incident is a tracked problem with a lifecycle and timeline.
 type Incident struct {
-	ID         int64           `json:"id"`
-	Key        string          `json:"key,omitempty"` // dedup key (alertKey / "slo/<id>"); empty for manual
-	Title      string          `json:"title"`
-	Severity   string          `json:"severity"` // critical|warning|info
-	Status     string          `json:"status"`   // open|acknowledged|resolved
-	Source     string          `json:"source"`   // alert|slo|manual
-	HostID     string          `json:"host_id,omitempty"`
-	Hostname   string          `json:"hostname,omitempty"`
-	Type       string          `json:"type,omitempty"` // alert type (cpu/memory/...) for auto incidents
-	Assignee   string          `json:"assignee,omitempty"`
-	Timeline   []IncidentEvent `json:"timeline"`
-	CreatedAt  int64           `json:"created_at"`
-	AckedAt    int64           `json:"acked_at,omitempty"`
-	ResolvedAt int64           `json:"resolved_at,omitempty"`
+	ID         int64              `json:"id"`
+	Key        string             `json:"key,omitempty"` // dedup key (alertKey / "slo/<id>"); empty for manual
+	Title      string             `json:"title"`
+	Severity   string             `json:"severity"` // critical|warning|info
+	Status     string             `json:"status"`   // open|acknowledged|resolved
+	Source     string             `json:"source"`   // alert|slo|manual
+	HostID     string             `json:"host_id,omitempty"`
+	Hostname   string             `json:"hostname,omitempty"`
+	Type       string             `json:"type,omitempty"` // alert type (cpu/memory/...) for auto incidents
+	Assignee   string             `json:"assignee,omitempty"`
+	Timeline   []IncidentEvent    `json:"timeline"`
+	CreatedAt  int64              `json:"created_at"`
+	AckedAt    int64              `json:"acked_at,omitempty"`
+	ResolvedAt int64              `json:"resolved_at,omitempty"`
 	TicketID   int64              `json:"ticket_id,omitempty"` // linked work order, if escalated
 	Links      []OpsLink          `json:"links,omitempty"`     // host / slo / alert / change / ticket
 	Loop       *IncidentLoopState `json:"loop,omitempty"`      // diagnose→verify→promote closed-loop state

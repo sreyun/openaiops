@@ -39,10 +39,10 @@ type SlowSQLReport struct {
 
 // SlowSQLPSLimits holds MySQL digest / SQL_TEXT length caps and remediation hints.
 type SlowSQLPSLimits struct {
-	MaxDigestLength int    `json:"max_digest_length"`
-	MaxSQLTextLength int   `json:"performance_schema_max_sql_text_length"`
-	RemedySQL       string `json:"remedy_sql,omitempty"`
-	RemedyNote      string `json:"remedy_note,omitempty"`
+	MaxDigestLength  int    `json:"max_digest_length"`
+	MaxSQLTextLength int    `json:"performance_schema_max_sql_text_length"`
+	RemedySQL        string `json:"remedy_sql,omitempty"`
+	RemedyNote       string `json:"remedy_note,omitempty"`
 }
 
 // SlowSQLDigestTrend compares digests against the previous completed report.
@@ -979,16 +979,16 @@ func dialectForConn(c MySQLConnection) sqltoolkit.Dialect {
 
 func analyzeSlowDigest(c MySQLConnection, row slowDigestRow) SlowSQLItem {
 	item := SlowSQLItem{
-		Schema:         row.Schema,
-		Digest:         row.Digest,
-		SQL:            row.SQL,
-		CountStar:      row.CountStar,
-		SumLatencyMs:   row.SumLatencyMs,
-		AvgLatencyMs:   row.AvgLatencyMs,
-		MaxLatencyMs:   row.MaxLatencyMs,
-		FirstSeen:      row.FirstSeen,
-		LastSeen:       row.LastSeen,
-		Score:          100,
+		Schema:           row.Schema,
+		Digest:           row.Digest,
+		SQL:              row.SQL,
+		CountStar:        row.CountStar,
+		SumLatencyMs:     row.SumLatencyMs,
+		AvgLatencyMs:     row.AvgLatencyMs,
+		MaxLatencyMs:     row.MaxLatencyMs,
+		FirstSeen:        row.FirstSeen,
+		LastSeen:         row.LastSeen,
+		Score:            100,
 		SQLTruncated:     row.Truncated,
 		SQLRecovered:     row.Recovered,
 		ParamsUnresolved: sqltoolkit.HasDigestPlaceholders(row.SQL),

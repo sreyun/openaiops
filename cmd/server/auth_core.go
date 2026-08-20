@@ -140,8 +140,8 @@ type Auth struct {
 }
 
 const (
-	loginWindowSec   = 300            // sliding window for brute-force throttling
-	loginMaxFailures = 8              // max failed attempts per IP per window
+	loginWindowSec   = 300              // sliding window for brute-force throttling
+	loginMaxFailures = 8                // max failed attempts per IP per window
 	proxyTokenTTL    = 60 * time.Second // HTTP proxy token lifetime
 
 	// v5.3.0: terminal verification rate limiting
@@ -171,7 +171,7 @@ func (a *Auth) generateProxyToken(user string) string {
 				delete(a.proxyTokens, k)
 			}
 		}
-	if len(a.proxyTokens) > 2048 {
+		if len(a.proxyTokens) > 2048 {
 			n, target := 0, len(a.proxyTokens)/2
 			for k := range a.proxyTokens {
 				delete(a.proxyTokens, k)

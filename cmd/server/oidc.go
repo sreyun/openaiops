@@ -16,13 +16,13 @@ import (
 
 // OIDCConfig enables enterprise IdP login (OIDC authorization code flow).
 type OIDCConfig struct {
-	Enabled      bool              `json:"enabled"`
-	Issuer       string            `json:"issuer,omitempty"`        // e.g. https://login.example.com/realms/ops
-	ClientID     string            `json:"client_id,omitempty"`
-	ClientSecret string            `json:"client_secret,omitempty"` // never echoed to browser
-	RedirectURL  string            `json:"redirect_url,omitempty"`  // optional; default {PublicURL}/api/v1/auth/oidc/callback
-	Scopes       string            `json:"scopes,omitempty"`        // default openid profile email groups
-	GroupClaim   string            `json:"group_claim,omitempty"`   // default groups
+	Enabled      bool   `json:"enabled"`
+	Issuer       string `json:"issuer,omitempty"` // e.g. https://login.example.com/realms/ops
+	ClientID     string `json:"client_id,omitempty"`
+	ClientSecret string `json:"client_secret,omitempty"` // never echoed to browser
+	RedirectURL  string `json:"redirect_url,omitempty"`  // optional; default {PublicURL}/api/v1/auth/oidc/callback
+	Scopes       string `json:"scopes,omitempty"`        // default openid profile email groups
+	GroupClaim   string `json:"group_claim,omitempty"`   // default groups
 	// GroupRoleMap maps IdP group name → admin|operator|viewer. First match wins.
 	GroupRoleMap map[string]string `json:"group_role_map,omitempty"`
 	DefaultRole  string            `json:"default_role,omitempty"` // when no group matches; empty = deny

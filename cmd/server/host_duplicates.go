@@ -121,7 +121,7 @@ func (s *Server) handleCleanupDuplicates(w http.ResponseWriter, r *http.Request)
 				continue
 			}
 			if s.store.DeleteHost(h.ID) {
-				_ = s.cfg.SetCategory(h.ID, "")
+				_ = s.cfg.forgetHost(h.ID)
 				s.removeHyperVForHost(h.ID)
 				deleted = append(deleted, h.ID)
 			}

@@ -75,8 +75,8 @@ func sanitizeClientIP(raw string) string {
 //  1. CF-Connecting-IP   — Cloudflare always sets this to the visitor's IP
 //  2. X-Real-IP          — commonly set by nginx (proxy_set_header X-Real-IP $remote_addr)
 //  3. X-Forwarded-For[0] — the LEFTMOST entry is the original client; each proxy
-//    appends the sender's address to the right, so in CDN→Nginx→Server the
-//    header reads "clientIP, cdnEdgeIP" and [0] = clientIP (the real public IP)
+//     appends the sender's address to the right, so in CDN→Nginx→Server the
+//     header reads "clientIP, cdnEdgeIP" and [0] = clientIP (the real public IP)
 //  4. RemoteAddr          — direct TCP connection (fallback)
 func (s *Server) clientIP(r *http.Request) string {
 	if s.cfg.TrustProxy() {

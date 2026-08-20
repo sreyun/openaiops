@@ -86,27 +86,27 @@ type TableRef struct {
 
 // QueryShape is a Vitess-derived structural summary of one SQL statement.
 type QueryShape struct {
-	StmtType     string      `json:"stmt_type"` // select|update|delete|insert|other
-	Tables       []TableRef  `json:"tables"`
-	SelectStar   bool        `json:"select_star"`
-	HasLimit     bool        `json:"has_limit"`
-	HasWhere     bool        `json:"has_where"`
-	HasOr        bool        `json:"has_or"`
-	HasNotIn     bool        `json:"has_not_in"`
-	OrderByRand  bool        `json:"order_by_rand"`
-	HasJoin      bool        `json:"has_join"`
-	JoinMissingOn bool       `json:"join_missing_on"`
-	HasIndexHint bool        `json:"has_index_hint"`
-	IsCTE        bool        `json:"is_cte"`
-	HasWindow    bool        `json:"has_window"`
-	IntoOutfile  bool        `json:"into_outfile"`
-	WherePreds   []Predicate `json:"where_preds,omitempty"`
-	JoinPreds    []Predicate `json:"join_preds,omitempty"`
-	OrderCols    []string    `json:"order_cols,omitempty"`
-	GroupCols    []string    `json:"group_cols,omitempty"`
-	MultiStmt    bool        `json:"multi_stmt"`
-	ParseOK      bool        `json:"parse_ok"`
-	ParseError   string      `json:"parse_error,omitempty"`
+	StmtType      string      `json:"stmt_type"` // select|update|delete|insert|other
+	Tables        []TableRef  `json:"tables"`
+	SelectStar    bool        `json:"select_star"`
+	HasLimit      bool        `json:"has_limit"`
+	HasWhere      bool        `json:"has_where"`
+	HasOr         bool        `json:"has_or"`
+	HasNotIn      bool        `json:"has_not_in"`
+	OrderByRand   bool        `json:"order_by_rand"`
+	HasJoin       bool        `json:"has_join"`
+	JoinMissingOn bool        `json:"join_missing_on"`
+	HasIndexHint  bool        `json:"has_index_hint"`
+	IsCTE         bool        `json:"is_cte"`
+	HasWindow     bool        `json:"has_window"`
+	IntoOutfile   bool        `json:"into_outfile"`
+	WherePreds    []Predicate `json:"where_preds,omitempty"`
+	JoinPreds     []Predicate `json:"join_preds,omitempty"`
+	OrderCols     []string    `json:"order_cols,omitempty"`
+	GroupCols     []string    `json:"group_cols,omitempty"`
+	MultiStmt     bool        `json:"multi_stmt"`
+	ParseOK       bool        `json:"parse_ok"`
+	ParseError    string      `json:"parse_error,omitempty"`
 }
 
 // ColumnMeta describes one column from information_schema.
@@ -125,11 +125,11 @@ type IndexMeta struct {
 
 // TableMeta is live schema/stats for one table.
 type TableMeta struct {
-	Name       string       `json:"name"`
-	TableRows  int64        `json:"table_rows"`
-	AvgRowLen  int64        `json:"avg_row_length,omitempty"`
-	Columns    []ColumnMeta `json:"columns,omitempty"`
-	Indexes    []IndexMeta  `json:"indexes,omitempty"`
+	Name      string       `json:"name"`
+	TableRows int64        `json:"table_rows"`
+	AvgRowLen int64        `json:"avg_row_length,omitempty"`
+	Columns   []ColumnMeta `json:"columns,omitempty"`
+	Indexes   []IndexMeta  `json:"indexes,omitempty"`
 }
 
 // SchemaMeta is a map of lower(table) -> TableMeta.
@@ -148,47 +148,47 @@ type ExplainHit struct {
 	UsingFilesort bool    `json:"using_filesort,omitempty"`
 	UsingTemp     bool    `json:"using_temporary_table,omitempty"`
 	Message       string  `json:"message,omitempty"`
-	Condition     string  `json:"condition,omitempty"`      // attached_condition / Filter
-	Ref           string  `json:"ref,omitempty"`            // key lookup refs
+	Condition     string  `json:"condition,omitempty"` // attached_condition / Filter
+	Ref           string  `json:"ref,omitempty"`       // key lookup refs
 	KeyLength     string  `json:"key_length,omitempty"`
-	Cost          float64 `json:"cost,omitempty"`           // read_cost+eval_cost if present
+	Cost          float64 `json:"cost,omitempty"` // read_cost+eval_cost if present
 	SelectID      int     `json:"select_id,omitempty"`
 }
 
 // ExplainAnalysis is a normalized EXPLAIN summary.
 type ExplainAnalysis struct {
-	Summary      string       `json:"summary"`
-	IndexHits    int          `json:"index_hits"`
-	FullScans    int          `json:"full_scans"`
-	Filesorts    int          `json:"filesorts,omitempty"`
-	TempTables   int          `json:"temp_tables,omitempty"`
-	TableAccess  []ExplainHit `json:"table_access"`
+	Summary     string       `json:"summary"`
+	IndexHits   int          `json:"index_hits"`
+	FullScans   int          `json:"full_scans"`
+	Filesorts   int          `json:"filesorts,omitempty"`
+	TempTables  int          `json:"temp_tables,omitempty"`
+	TableAccess []ExplainHit `json:"table_access"`
 }
 
 // ExplainStepDetail is a human-readable per-table EXPLAIN walkthrough.
 type ExplainStepDetail struct {
-	Table      string `json:"table,omitempty"`
-	AccessType string `json:"access_type,omitempty"`
-	Severity   string `json:"severity"` // ok | info | warn | crit
-	Verdict    string `json:"verdict"`
-	Analysis   string `json:"analysis"`
-	Suggest    string `json:"suggest,omitempty"`
-	Key        string `json:"key,omitempty"`
+	Table      string  `json:"table,omitempty"`
+	AccessType string  `json:"access_type,omitempty"`
+	Severity   string  `json:"severity"` // ok | info | warn | crit
+	Verdict    string  `json:"verdict"`
+	Analysis   string  `json:"analysis"`
+	Suggest    string  `json:"suggest,omitempty"`
+	Key        string  `json:"key,omitempty"`
 	Rows       float64 `json:"rows,omitempty"`
 	Filtered   float64 `json:"filtered,omitempty"`
-	Condition  string `json:"condition,omitempty"`
+	Condition  string  `json:"condition,omitempty"`
 }
 
 // ExplainReport is the detailed post-EXPLAIN analysis shown under EXPLAIN JSON.
 type ExplainReport struct {
-	Overview      string              `json:"overview"`
-	Health        string              `json:"health"` // good | caution | poor
-	Steps         []ExplainStepDetail `json:"steps,omitempty"`
-	Findings      []Finding           `json:"findings,omitempty"`
-	IndexHints    []IndexHint         `json:"index_hints,omitempty"`
-	Suggestions   []Finding           `json:"suggestions,omitempty"`
-	RewrittenSQL  string              `json:"rewritten_sql,omitempty"`
-	MetadataUsed  bool                `json:"metadata_used,omitempty"`
+	Overview     string              `json:"overview"`
+	Health       string              `json:"health"` // good | caution | poor
+	Steps        []ExplainStepDetail `json:"steps,omitempty"`
+	Findings     []Finding           `json:"findings,omitempty"`
+	IndexHints   []IndexHint         `json:"index_hints,omitempty"`
+	Suggestions  []Finding           `json:"suggestions,omitempty"`
+	RewrittenSQL string              `json:"rewritten_sql,omitempty"`
+	MetadataUsed bool                `json:"metadata_used,omitempty"`
 }
 
 // ScoreBreakdown explains how the composite score was formed.
@@ -202,19 +202,19 @@ type ScoreBreakdown struct {
 
 // AnalyzeResult is the unified output of /sql/analyze.
 type AnalyzeResult struct {
-	Dialect       Dialect          `json:"dialect"`
-	Parsed        bool             `json:"parsed"`
-	ParseError    string           `json:"parse_error,omitempty"`
-	Score         int              `json:"score"`
-	Breakdown     ScoreBreakdown   `json:"score_breakdown"`
-	Findings      []Finding        `json:"findings"`
-	Suggestions   []Finding        `json:"suggestions,omitempty"`
-	IndexHints    []IndexHint      `json:"index_hints,omitempty"`
-	RewrittenSQL  string           `json:"rewritten_sql,omitempty"`
-	MetadataUsed  bool             `json:"metadata_used"`
-	ExplainUsed   bool             `json:"explain_used"`
-	Explain       *ExplainAnalysis `json:"explain,omitempty"`
-	Shape         *QueryShape      `json:"shape,omitempty"`
+	Dialect      Dialect          `json:"dialect"`
+	Parsed       bool             `json:"parsed"`
+	ParseError   string           `json:"parse_error,omitempty"`
+	Score        int              `json:"score"`
+	Breakdown    ScoreBreakdown   `json:"score_breakdown"`
+	Findings     []Finding        `json:"findings"`
+	Suggestions  []Finding        `json:"suggestions,omitempty"`
+	IndexHints   []IndexHint      `json:"index_hints,omitempty"`
+	RewrittenSQL string           `json:"rewritten_sql,omitempty"`
+	MetadataUsed bool             `json:"metadata_used"`
+	ExplainUsed  bool             `json:"explain_used"`
+	Explain      *ExplainAnalysis `json:"explain,omitempty"`
+	Shape        *QueryShape      `json:"shape,omitempty"`
 }
 
 // Penalty returns score deduction for a finding level.

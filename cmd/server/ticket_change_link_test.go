@@ -9,7 +9,7 @@ func TestOpsLinkMergeAndNormalize(t *testing.T) {
 	links := mergeOpsLinks(nil,
 		OpsLink{Type: "host", ID: "h1", Role: "affects"},
 		OpsLink{Type: "HOST", ID: "h1", Role: "affects"}, // dedupe
-		OpsLink{Type: "bad", ID: "x"},                     // invalid
+		OpsLink{Type: "bad", ID: "x"},                    // invalid
 		OpsLink{Type: "slo", ID: "s1"},
 	)
 	if len(links) != 2 {

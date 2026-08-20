@@ -10,9 +10,9 @@ import (
 
 // HostOpenPort is a normalized listening socket from Agent net listen output.
 type HostOpenPort struct {
-	Proto   string `json:"proto"`             // tcp|udp
+	Proto   string `json:"proto"` // tcp|udp
 	Port    int    `json:"port"`
-	Addr    string `json:"addr,omitempty"`    // bind address
+	Addr    string `json:"addr,omitempty"` // bind address
 	Process string `json:"process,omitempty"`
 	Service string `json:"service,omitempty"` // well-known name
 	Risk    string `json:"risk,omitempty"`    // crit|high|medium|""

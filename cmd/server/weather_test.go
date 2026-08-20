@@ -4,15 +4,15 @@ import "testing"
 
 func TestCityCNCommonCities(t *testing.T) {
 	cases := map[string]string{
-		"hangzhou":  "杭州",
-		"HangZhou":  "杭州",
+		"hangzhou":    "杭州",
+		"HangZhou":    "杭州",
 		"hangzhoushi": "杭州",
-		"wuxi":      "无锡",
-		"fengxian":  "奉贤",
-		"beijing":   "北京",
-		"shanghai":  "上海",
-		"shenzhen":  "深圳",
-		"chengdu":   "成都",
+		"wuxi":        "无锡",
+		"fengxian":    "奉贤",
+		"beijing":     "北京",
+		"shanghai":    "上海",
+		"shenzhen":    "深圳",
+		"chengdu":     "成都",
 	}
 	for in, want := range cases {
 		if got := cityCN(in); got != want {

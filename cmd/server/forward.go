@@ -213,21 +213,21 @@ type forwardWaitInfo struct {
 
 // forwardInfo is the JSON view for the API.
 type forwardInfo struct {
-	ID            string `json:"id"`
-	HostID        string `json:"host_id"`
-	Hostname      string `json:"hostname"`
-	TargetPort    int    `json:"target_port"`
-	LocalPort     int    `json:"local_port"`
-	ListenAddr    string `json:"listen_addr"`
-	Status        string `json:"status"`
-	CreatedAt     int64  `json:"created_at"`
-	Operator      string `json:"operator"`
-	Sessions      int    `json:"sessions"`       // 当前活跃连接（会话）数
-	TotalSessions int64  `json:"total_sessions"` // 累计总连接（会话）数
-	Enabled       bool   `json:"enabled"`
-	Protocol      string `json:"protocol,omitempty"`       // "tcp" | "udp"
-	GroupID       string `json:"group_id,omitempty"`       // 端口范围批量组（同组共享），供整组操作
-	RemoteTarget  string `json:"remote_target,omitempty"` // 跳板目标地址
+	ID               string   `json:"id"`
+	HostID           string   `json:"host_id"`
+	Hostname         string   `json:"hostname"`
+	TargetPort       int      `json:"target_port"`
+	LocalPort        int      `json:"local_port"`
+	ListenAddr       string   `json:"listen_addr"`
+	Status           string   `json:"status"`
+	CreatedAt        int64    `json:"created_at"`
+	Operator         string   `json:"operator"`
+	Sessions         int      `json:"sessions"`       // 当前活跃连接（会话）数
+	TotalSessions    int64    `json:"total_sessions"` // 累计总连接（会话）数
+	Enabled          bool     `json:"enabled"`
+	Protocol         string   `json:"protocol,omitempty"`      // "tcp" | "udp"
+	GroupID          string   `json:"group_id,omitempty"`      // 端口范围批量组（同组共享），供整组操作
+	RemoteTarget     string   `json:"remote_target,omitempty"` // 跳板目标地址
 	WhitelistEnabled bool     `json:"whitelist_enabled,omitempty"`
 	Whitelist        []string `json:"whitelist,omitempty"`
 }
@@ -592,7 +592,7 @@ func infoFromRule(r *forwardRule, sessions int, total int64) forwardInfo {
 		CreatedAt: r.createdAt, Operator: r.operator,
 		Sessions: sessions, TotalSessions: total,
 		Enabled: r.enabled, Protocol: r.protocol, GroupID: r.groupID,
-		RemoteTarget: r.remoteTarget,
+		RemoteTarget:     r.remoteTarget,
 		WhitelistEnabled: enabled, Whitelist: append([]string(nil), list...),
 	}
 }

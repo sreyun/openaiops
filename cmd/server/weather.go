@@ -42,9 +42,9 @@ const weatherCacheTTL = 20 * time.Minute
 
 type weatherResult struct {
 	OK           bool   `json:"ok"`
-	Location     string `json:"location"`               // 展示用：优先「市 · 区县」，与上游 IP 定位粒度一致
-	City         string `json:"city,omitempty"`          // 地级市 / 直辖市
-	District     string `json:"district,omitempty"`      // 区 / 县（IP 落到区县时有值）
+	Location     string `json:"location"`           // 展示用：优先「市 · 区县」，与上游 IP 定位粒度一致
+	City         string `json:"city,omitempty"`     // 地级市 / 直辖市
+	District     string `json:"district,omitempty"` // 区 / 县（IP 落到区县时有值）
 	TempC        int    `json:"temp_c"`
 	Text         string `json:"text"`
 	Humidity     string `json:"humidity,omitempty"`
@@ -522,7 +522,7 @@ var weatherCityCN = map[string]string{
 	"luan": "六安", "bozhou": "亳州", "chizhou": "池州", "xuancheng": "宣城",
 	"fuzhou": "福州", "xiamen": "厦门", "putian": "莆田", "sanming": "三明",
 	"quanzhou": "泉州", "zhangzhou": "漳州", "nanping": "南平", "longyan": "龙岩",
-	"ningde": "宁德",
+	"ningde":   "宁德",
 	"nanchang": "南昌", "jingdezhen": "景德镇", "pingxiang": "萍乡", "jiujiang": "九江",
 	"xinyu": "新余", "yingtan": "鹰潭", "ganzhou": "赣州", "jian": "吉安",
 	"yichun": "宜春", "fuzhoujx": "抚州", "shangrao": "上饶",
@@ -535,13 +535,13 @@ var weatherCityCN = map[string]string{
 	"puyang": "濮阳", "xuchang": "许昌", "luohe": "漯河", "sanmenxia": "三门峡",
 	"nanyang": "南阳", "shangqiu": "商丘", "xinyang": "信阳", "zhoukou": "周口",
 	"zhumadian": "驻马店",
-	"wuhan": "武汉", "huangshi": "黄石", "shiyan": "十堰", "yichang": "宜昌",
+	"wuhan":     "武汉", "huangshi": "黄石", "shiyan": "十堰", "yichang": "宜昌",
 	"xiangyang": "襄阳", "ezhou": "鄂州", "jingmen": "荆门", "xiaogan": "孝感",
 	"jingzhou": "荆州", "huanggang": "黄冈", "xianning": "咸宁", "suizhou": "随州",
 	"changsha": "长沙", "zhuzhou": "株洲", "xiangtan": "湘潭", "hengyang": "衡阳",
 	"shaoyang": "邵阳", "yueyang": "岳阳", "changde": "常德", "zhangjiajie": "张家界",
 	"yiyang": "益阳", "chenzhou": "郴州", "yongzhou": "永州", "huaihua": "怀化",
-	"loudi": "娄底",
+	"loudi":     "娄底",
 	"guangyuan": "广元", "chengdu": "成都", "mianyang": "绵阳", "deyang": "德阳",
 	"nanchong": "南充", "yibin": "宜宾", "luzhou": "泸州", "leshan": "乐山",
 	"meishan": "眉山", "zigong": "自贡", "panzhihua": "攀枝花", "suining": "遂宁",

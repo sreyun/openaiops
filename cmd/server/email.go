@@ -125,9 +125,9 @@ type passwordResetToken struct {
 // first successful verification.
 type emailManager struct {
 	mu         sync.Mutex
-	codes      map[string]emailCode       // key: lowercase email
+	codes      map[string]emailCode          // key: lowercase email
 	resetToken map[string]passwordResetToken // key: token
-	lastSent   map[string]time.Time        // key: lowercase email — rate limit
+	lastSent   map[string]time.Time          // key: lowercase email — rate limit
 }
 
 func newEmailManager() *emailManager {

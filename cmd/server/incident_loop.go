@@ -206,7 +206,7 @@ func (s *Server) loopPropose(w http.ResponseWriter, r *http.Request, inc Inciden
 	mode, _ := body["mode"].(string)
 	if strings.EqualFold(mode, "emergency_change") {
 		rec, err := s.changes.Upsert(ChangeRecord{
-			Title: "应急变更 · 事件 #" + strconv.FormatInt(inc.ID, 10),
+			Title:   "应急变更 · 事件 #" + strconv.FormatInt(inc.ID, 10),
 			Summary: inc.Title, Kind: "emergency", Risk: "high",
 			Status: ChangePendingApproval, HostIDs: []string{inc.HostID},
 			LinkedIncidentIDs: []int64{inc.ID},
@@ -448,7 +448,7 @@ func (s *Server) loopVerify(w http.ResponseWriter, r *http.Request, inc Incident
 		s.patchAIRunVerify(loop.RunID, verifyPayload, ok)
 	} else {
 		s.persistAIRun(AIRun{
-			ID: "loop-verify-" + strconv.FormatInt(inc.ID, 10) + "-" + strconv.FormatInt(loop.VerifyAt, 10),
+			ID:   "loop-verify-" + strconv.FormatInt(inc.ID, 10) + "-" + strconv.FormatInt(loop.VerifyAt, 10),
 			Kind: "diagnose", Task: "loop_verify", Actor: actor, IncidentID: inc.ID,
 			OK: ok, VerifyJSON: verifyPayload, Answer: strings.Join(notes, "; "),
 		})

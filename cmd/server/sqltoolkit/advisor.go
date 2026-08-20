@@ -96,9 +96,9 @@ func AdviseIndexes(shape *QueryShape, meta SchemaMeta) []IndexHint {
 }
 
 type tableAdvice struct {
-	table      string
-	eq, rng    []string
-	ord, grp   []string
+	table    string
+	eq, rng  []string
+	ord, grp []string
 }
 
 func buildIndexCols(a *tableAdvice) []string {

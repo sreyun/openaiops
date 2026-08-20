@@ -23,10 +23,10 @@ func (h *SreyunCore) registerSecurityTools() {
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"kind":        map[string]string{"type": "string", "description": "事件类型"},
-				"source":      map[string]string{"type": "string", "description": "来源 IP / 主机 / Token 名"},
-				"target":      map[string]string{"type": "string", "description": "目标账户 / URL / 主机"},
-				"summary":     map[string]string{"type": "string", "description": "事件摘要"},
+				"kind":          map[string]string{"type": "string", "description": "事件类型"},
+				"source":        map[string]string{"type": "string", "description": "来源 IP / 主机 / Token 名"},
+				"target":        map[string]string{"type": "string", "description": "目标账户 / URL / 主机"},
+				"summary":       map[string]string{"type": "string", "description": "事件摘要"},
 				"create_ticket": map[string]any{"type": "boolean", "description": "是否创建 SRE 事件单，默认 true"},
 			},
 			"required": []string{"kind", "summary"},
@@ -126,12 +126,12 @@ type securityDefenseResult struct {
 }
 
 type securityDefenseEvent struct {
-	Kind      string `json:"kind"`
-	Source    string `json:"source,omitempty"`
-	Target    string `json:"target,omitempty"`
-	Summary   string `json:"summary"`
-	Incident  int64  `json:"incident_id,omitempty"`
-	Ts        int64  `json:"ts"`
+	Kind     string `json:"kind"`
+	Source   string `json:"source,omitempty"`
+	Target   string `json:"target,omitempty"`
+	Summary  string `json:"summary"`
+	Incident int64  `json:"incident_id,omitempty"`
+	Ts       int64  `json:"ts"`
 }
 
 var (

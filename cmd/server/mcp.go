@@ -30,7 +30,7 @@ var mcpReadonlyTools = map[string]bool{
 	"query_hardware_changes": true, "query_netflow": true, "query_hyperv": true,
 	"query_snmp": true, "query_interface_traffic": true, "query_traps": true,
 	"query_netflow_flows": true,
-	"query_containers": true, "query_k8s": true, "locate_resource": true,
+	"query_containers":    true, "query_k8s": true, "locate_resource": true,
 	"render_chart": true, "query_metric_range": true, "query_promql_range": true,
 	"show_instant_stat": true, "analyze_metric_trend": true, "forecast_metric": true,
 	"list_dashboards": true, "get_dashboard": true,

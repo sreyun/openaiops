@@ -916,7 +916,7 @@ func (cr *checkRunner) DownAlerts() []Alert {
 					out = append(out, Alert{
 						Level: lv, Type: "check", Scope: c.ID + "/ping_loss", Hostname: c.Name,
 						Message: Tz("alert.check_ping_loss", st.LossPct),
-						Value: st.LossPct, Timestamp: now,
+						Value:   st.LossPct, Timestamp: now,
 					})
 				}
 			}
@@ -927,7 +927,7 @@ func (cr *checkRunner) DownAlerts() []Alert {
 					out = append(out, Alert{
 						Level: lv, Type: "check", Scope: c.ID + "/ping_latency", Hostname: c.Name,
 						Message: Tz("alert.check_ping_latency", st.LatencyMs),
-						Value: st.LatencyMs, Timestamp: now,
+						Value:   st.LatencyMs, Timestamp: now,
 					})
 				}
 			}
@@ -939,7 +939,7 @@ func (cr *checkRunner) DownAlerts() []Alert {
 					out = append(out, Alert{
 						Level: lv, Type: "check", Scope: c.ID + "/tcp_timeout", Hostname: c.Name,
 						Message: Tz("alert.check_tcp_timeout", st.LatencyMs),
-						Value: st.LatencyMs, Timestamp: now,
+						Value:   st.LatencyMs, Timestamp: now,
 					})
 				}
 			}
@@ -951,7 +951,7 @@ func (cr *checkRunner) DownAlerts() []Alert {
 					out = append(out, Alert{
 						Level: lv, Type: "check", Scope: c.ID + "/udp_timeout", Hostname: c.Name,
 						Message: Tz("alert.check_udp_timeout", st.LatencyMs),
-						Value: st.LatencyMs, Timestamp: now,
+						Value:   st.LatencyMs, Timestamp: now,
 					})
 				}
 			}
@@ -963,7 +963,7 @@ func (cr *checkRunner) DownAlerts() []Alert {
 					out = append(out, Alert{
 						Level: lv, Type: "check", Scope: c.ID + "/dns_timeout", Hostname: c.Name,
 						Message: Tz("alert.check_dns_timeout", st.LatencyMs),
-						Value: st.LatencyMs, Timestamp: now,
+						Value:   st.LatencyMs, Timestamp: now,
 					})
 				}
 			}
@@ -975,7 +975,7 @@ func (cr *checkRunner) DownAlerts() []Alert {
 					out = append(out, Alert{
 						Level: lv, Type: "check", Scope: c.ID + "/http_resp", Hostname: c.Name,
 						Message: Tz("alert.check_http_resp", st.LatencyMs),
-						Value: st.LatencyMs, Timestamp: now,
+						Value:   st.LatencyMs, Timestamp: now,
 					})
 				}
 			}
@@ -989,7 +989,7 @@ func (cr *checkRunner) DownAlerts() []Alert {
 						out = append(out, Alert{
 							Level: lv, Type: "check", Scope: c.ID + "/http_status", Hostname: c.Name,
 							Message: Tz("alert.check_http_status", st.StatusCode, cr.failCount[c.ID]),
-							Value: fc, Timestamp: now,
+							Value:   fc, Timestamp: now,
 						})
 					}
 				}
@@ -1004,7 +1004,7 @@ func (cr *checkRunner) DownAlerts() []Alert {
 						out = append(out, Alert{
 							Level: lv, Type: "check", Scope: c.ID + "/proc_fail", Hostname: c.Name,
 							Message: Tz("alert.check_proc_fail", cr.failCount[c.ID]),
-							Value: fc, Timestamp: now,
+							Value:   fc, Timestamp: now,
 						})
 					}
 				}

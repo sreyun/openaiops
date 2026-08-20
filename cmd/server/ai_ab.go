@@ -13,12 +13,12 @@ import (
 
 // aiExperiment is a lightweight A/B definition stored in PG.
 type aiExperiment struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Task      string `json:"task,omitempty"` // empty = all tasks
-	Enabled   bool   `json:"enabled"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Task    string `json:"task,omitempty"` // empty = all tasks
+	Enabled bool   `json:"enabled"`
 	// Variants: name → traffic percent (sum should be 100).
-	Variants  map[string]int `json:"variants"`
+	Variants map[string]int `json:"variants"`
 	// VariantModels: variant → model override (optional).
 	VariantModels map[string]string `json:"variant_models,omitempty"`
 	// VariantPromptSuffix: variant → extra system prompt (optional).

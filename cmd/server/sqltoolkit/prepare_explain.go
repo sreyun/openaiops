@@ -57,7 +57,7 @@ var sqlBuiltinFuncs = map[string]struct{}{
 	"UUID": {}, "UUID_SHORT": {}, "VALUES": {}, "VAR_POP": {}, "VAR_SAMP": {}, "VARIANCE": {},
 	"VERSION": {}, "WEEK": {}, "WEEKDAY": {}, "WEEKOFYEAR": {}, "WEIGHT_STRING": {}, "YEAR": {},
 	"YEARWEEK": {},
-	"CAST": {}, // CAST (x AS …) with a space → Error 1630 same as SUM (
+	"CAST":     {}, // CAST (x AS …) with a space → Error 1630 same as SUM (
 	// Postgres-only extras (shared names already listed above)
 	"TO_CHAR": {}, "TO_DATE": {}, "TO_TIMESTAMP": {}, "DATE_TRUNC": {}, "AGE": {},
 	"ARRAY_AGG": {}, "STRING_AGG": {}, "JSON_AGG": {}, "JSONB_AGG": {},

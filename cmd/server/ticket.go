@@ -27,33 +27,33 @@ type TicketComment struct {
 
 // Ticket is a tracked unit of work.
 type Ticket struct {
-	ID           int64           `json:"id"`
-	Title        string          `json:"title"`
-	Description  string          `json:"description,omitempty"`
-	Kind         string          `json:"kind,omitempty"`          // incident|service_request|task
-	Category     string          `json:"category,omitempty"`      // service request category
-	CatalogItem  string          `json:"catalog_item,omitempty"`  // service request catalog id
-	Priority     string          `json:"priority"`                // p1|p2|p3|p4
-	Status       string          `json:"status"`                  // open|in_progress|resolved|closed
-	Assignee     string          `json:"assignee,omitempty"`
-	Reporter     string          `json:"reporter,omitempty"`
-	IncidentID   int64           `json:"incident_id,omitempty"`
-	SLOID        string          `json:"slo_id,omitempty"`
-	ChangeID     int64           `json:"change_id,omitempty"`
-	SQLChangeID  string          `json:"sql_change_id,omitempty"`
-	Source       string          `json:"source,omitempty"` // manual|incident|alert|dashboard|sql|api
+	ID          int64  `json:"id"`
+	Title       string `json:"title"`
+	Description string `json:"description,omitempty"`
+	Kind        string `json:"kind,omitempty"`         // incident|service_request|task
+	Category    string `json:"category,omitempty"`     // service request category
+	CatalogItem string `json:"catalog_item,omitempty"` // service request catalog id
+	Priority    string `json:"priority"`               // p1|p2|p3|p4
+	Status      string `json:"status"`                 // open|in_progress|resolved|closed
+	Assignee    string `json:"assignee,omitempty"`
+	Reporter    string `json:"reporter,omitempty"`
+	IncidentID  int64  `json:"incident_id,omitempty"`
+	SLOID       string `json:"slo_id,omitempty"`
+	ChangeID    int64  `json:"change_id,omitempty"`
+	SQLChangeID string `json:"sql_change_id,omitempty"`
+	Source      string `json:"source,omitempty"` // manual|incident|alert|dashboard|sql|api
 	// AIRunID ties the ticket back to the AI answer it was created from
 	// (/api/v1/ai/followup). Resolving such a ticket is an objective verdict on
 	// that answer, so it feeds the learning loop — see learnFromAIFollowupTicket.
 	// Server-set only: Create clears whatever a client sends, or anyone could
 	// claim AI provenance and get arbitrary conclusions marked "verified".
-	AIRunID      string          `json:"ai_run_id,omitempty"`
-	DueAt        int64           `json:"due_at,omitempty"`
-	Links        []OpsLink       `json:"links,omitempty"`
-	Attachments  []Attachment    `json:"attachments,omitempty"`
-	Comments     []TicketComment `json:"comments,omitempty"`
-	CreatedAt    int64           `json:"created_at"`
-	UpdatedAt    int64           `json:"updated_at"`
+	AIRunID     string          `json:"ai_run_id,omitempty"`
+	DueAt       int64           `json:"due_at,omitempty"`
+	Links       []OpsLink       `json:"links,omitempty"`
+	Attachments []Attachment    `json:"attachments,omitempty"`
+	Comments    []TicketComment `json:"comments,omitempty"`
+	CreatedAt   int64           `json:"created_at"`
+	UpdatedAt   int64           `json:"updated_at"`
 }
 
 var ticketPriorities = map[string]bool{"p1": true, "p2": true, "p3": true, "p4": true}

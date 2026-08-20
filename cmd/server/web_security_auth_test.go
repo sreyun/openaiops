@@ -48,7 +48,7 @@ func TestResolveWebAuthHeadersBearer(t *testing.T) {
 
 func TestResolveWebAuthHeadersCookie(t *testing.T) {
 	hs, err := resolveWebAuthHeaders(WebScanTarget{
-		AuthType: "cookie",
+		AuthType:   "cookie",
 		AuthHeader: "Cookie: sid=abc\nX-Trace: 1",
 	}, false)
 	if err != nil {

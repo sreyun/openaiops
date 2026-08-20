@@ -2,9 +2,9 @@
 // The remote terminal is the most powerful feature in the platform (full shell
 // access), so it requires a second layer of authentication beyond the login
 // session:
-//   1. One-time protocol agreement (liability disclaimer)
-//   2. Terminal password setup (guardian password, different from login)
-//   3. Per-session verification (once per login, cached in session)
+//  1. One-time protocol agreement (liability disclaimer)
+//  2. Terminal password setup (guardian password, different from login)
+//  3. Per-session verification (once per login, cached in session)
 package main
 
 import (
@@ -138,8 +138,8 @@ func (s *Server) handleTerminalPasswordVerify(w http.ResponseWriter, r *http.Req
 	allowed, remaining := s.auth.terminalAttemptAllowed(acc.Username)
 	if !allowed {
 		writeJSON(w, http.StatusTooManyRequests, map[string]any{
-			"error":   Tr(r, "terminal_auth.locked"),
-			"locked":  true,
+			"error":       Tr(r, "terminal_auth.locked"),
+			"locked":      true,
 			"retry_after": 300,
 		})
 		return

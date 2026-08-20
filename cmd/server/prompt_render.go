@@ -18,8 +18,8 @@ type promptVars map[string]string
 // 若 AIConfig.PromptOverridesDir 指向的目录存在同名 .md，则优先读部署目录（私有化客户
 // 可改提示词而无需重编译）。渲染结果带 prompt_version（模板内容哈希），供成本账本溯源。
 type promptStore struct {
-	mu      sync.RWMutex
-	dir     string
+	mu  sync.RWMutex
+	dir string
 }
 
 var defaultPromptStore = &promptStore{}

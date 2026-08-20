@@ -122,13 +122,13 @@ type Event struct {
 // Category is an operator-defined group label (e.g. prod / db / office-endpoint)
 // used by the dashboard to group and filter hosts.
 type Report struct {
-	HostID      string             `json:"host_id"`
-	Hostname    string             `json:"hostname"`
-	OS          string             `json:"os"`
-	Platform    string             `json:"platform"` // OS / distribution version
-	Arch        string             `json:"arch"`
-	IP          string             `json:"ip,omitempty"`
-	Kernel      string             `json:"kernel,omitempty"`
+	HostID   string `json:"host_id"`
+	Hostname string `json:"hostname"`
+	OS       string `json:"os"`
+	Platform string `json:"platform"` // OS / distribution version
+	Arch     string `json:"arch"`
+	IP       string `json:"ip,omitempty"`
+	Kernel   string `json:"kernel,omitempty"`
 	Category string `json:"category,omitempty"`
 	// FolderID is the asset-tree node id from install (any depth). Prefer this over
 	// Category for placement; Category remains the leaf label / legacy L1 hint.
@@ -137,10 +137,10 @@ type Report struct {
 	AgentVersion string `json:"agent_version,omitempty"`
 	// ServerURL is the agent's configured primary report base (relay or cloud).
 	// Server uses this for fleet update /dl URLs so intranet agents download via relay.
-	ServerURL   string `json:"server_url,omitempty"`
-	Token       string `json:"token,omitempty"`       // install token (registration only)
-	Fingerprint string `json:"fingerprint,omitempty"` // machine fingerprint (machine-id+MAC), authenticates reports
-	Metrics      Metrics `json:"metrics"`
+	ServerURL   string             `json:"server_url,omitempty"`
+	Token       string             `json:"token,omitempty"`       // install token (registration only)
+	Fingerprint string             `json:"fingerprint,omitempty"` // machine fingerprint (machine-id+MAC), authenticates reports
+	Metrics     Metrics            `json:"metrics"`
 	Custom      map[string]float64 `json:"custom,omitempty"`
 	Events      []Event            `json:"events,omitempty"`
 	// Desktop is optional probe of local RDP/VNC listeners for remote desktop mode.
@@ -186,7 +186,7 @@ type DesktopInfo struct {
 	RDP           bool   `json:"rdp"`
 	VNC           bool   `json:"vnc"`
 	Ports         []int  `json:"ports,omitempty"`
-	Preferred     string `json:"preferred,omitempty"`      // "rdp" | "vnc"
+	Preferred     string `json:"preferred,omitempty"` // "rdp" | "vnc"
 	PreferredPort int    `json:"preferred_port,omitempty"`
 }
 

@@ -14,8 +14,8 @@ func (h *SreyunCore) registerEvolveTools() {
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"distill": map[string]any{"type": "boolean", "description": "是否提炼技能，默认 true"},
-				"journal": map[string]any{"type": "boolean", "description": "是否写成长日记，默认 true"},
+				"distill":       map[string]any{"type": "boolean", "description": "是否提炼技能，默认 true"},
+				"journal":       map[string]any{"type": "boolean", "description": "是否写成长日记，默认 true"},
 				"lookback_days": map[string]any{"type": "integer", "description": "技能提炼回溯天数，默认 14"},
 			},
 		},

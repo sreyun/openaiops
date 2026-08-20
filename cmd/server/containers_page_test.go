@@ -151,11 +151,11 @@ func TestContainerListComposeProjectFilter(t *testing.T) {
 
 func TestCompactContainerRowPreservesCreated(t *testing.T) {
 	row := compactContainerRow(map[string]any{
-		"id":      "abcdefabcdef",
-		"name":    "api",
-		"image":   "api:1",
-		"state":   "running",
-		"created": "2026-08-08 10:00:00 +0000 UTC",
+		"id":              "abcdefabcdef",
+		"name":            "api",
+		"image":           "api:1",
+		"state":           "running",
+		"created":         "2026-08-08 10:00:00 +0000 UTC",
 		"compose_project": "shop",
 		"compose_service": "api",
 	})

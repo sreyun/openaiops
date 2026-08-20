@@ -667,6 +667,30 @@ func (cs *ConfigStore) assignHostFolder(hostID, folderID string) error {
 	return cs.save()
 }
 
+// forgetHost 抹掉一台主机在配置里的全部痕迹（分类覆盖 + 分组归属）。
+//
+// 删主机时**不能**用 assignHostFolder(id, "未分组")：那会写下一个"显式未分组"的哨兵。
+// 哨兵是给活着的主机用的（防止 Agent 上报的旧分类把它重新归档），主机都删了还留着，
+// 只会让 config.json 随主机来来去去单向增长——弹性伸缩的环境里，每台短命节点都会留下
+// 两条永不回收的记录。
+func (cs *ConfigStore) forgetHost(hostID string) error {
+	hostID = strings.TrimSpace(hostID)
+	if hostID == "" {
+		return nil
+	}
+	cs.mu.Lock()
+	_, hadCat := cs.cfg.Categories[hostID]
+	_, hadFolder := cs.cfg.HostFolderAssign[hostID]
+	if !hadCat && !hadFolder {
+		cs.mu.Unlock()
+		return nil // 没有痕迹就不写盘
+	}
+	delete(cs.cfg.Categories, hostID)
+	delete(cs.cfg.HostFolderAssign, hostID)
+	cs.mu.Unlock()
+	return cs.save()
+}
+
 // setCategoryWithFolder syncs the legacy category API into L1 folders.
 func (cs *ConfigStore) setCategoryWithFolder(hostID, cat string) error {
 	cat = sanitizeFolderName(cat)
@@ -893,15 +917,21 @@ func (s *Server) handleSetHostFolderBatch(w http.ResponseWriter, r *http.Request
 			"error": fmt.Sprintf("too many hosts in one batch (max %d)", maxBatchFolderHosts)})
 		return
 	}
-	u, ok := s.currentUser(r)
-	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-		return
-	}
+	// currentUser 解析不出用户时按"不受限"处理，与读路径（filterHostsForUser）一致：
+	// 会话与角色已经由 authMiddleware 把过一遍，这里再 401 只会让老部署（登录用的是
+	// 旧版单账号、没有镜像进 cfg.Users）无论怎么点都失败——而单台改分组也是同一条路。
+	u, _ := s.currentUser(r)
 	for _, id := range ids {
 		if !s.userCanAccessHost(u, id) {
 			writeJSON(w, http.StatusForbidden, map[string]string{
 				"error": "无权访问该主机（主机组/标签授权）: " + id})
+			return
+		}
+		// 只接受确实存在的主机：界面上的选择可能是几分钟前的快照，中间主机被删掉了。
+		// 给不存在的 id 写归属，会在配置里留下永远回收不掉的孤儿记录。
+		if _, exists := s.store.GetHost(id); !exists {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "主机不存在（可能已被删除，请刷新后重试）: " + id})
 			return
 		}
 	}

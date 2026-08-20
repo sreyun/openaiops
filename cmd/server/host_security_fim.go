@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	fimMaxStoredInv = 80
+	fimMaxStoredInv  = 80
 	fimMaxStoredDiff = 48 << 10
 	// Full-scope FIM legitimately produces many changes; keep enough to be useful
 	// while bounding the persisted scan record.
@@ -95,8 +95,8 @@ func convertAgentFileChanges(in []hsAgentFileChange, contentDiff bool) []HostFil
 		seen[p] = true
 		ch := HostFileChange{
 			Path: p, Change: c.Change, Reason: c.Reason, Kind: c.Kind,
-			OldSHA: strings.ToLower(strings.TrimSpace(c.OldSHA)),
-			NewSHA: strings.ToLower(strings.TrimSpace(c.NewSHA)),
+			OldSHA:  strings.ToLower(strings.TrimSpace(c.OldSHA)),
+			NewSHA:  strings.ToLower(strings.TrimSpace(c.NewSHA)),
 			OldSize: c.OldSize, NewSize: c.NewSize,
 			OldMtime: c.OldMtime, NewMtime: c.NewMtime,
 			OldMode: c.OldMode, NewMode: c.NewMode,

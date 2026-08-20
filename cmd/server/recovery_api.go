@@ -208,7 +208,7 @@ func (s *Server) finalizeRecovery(w http.ResponseWriter, r *http.Request, user A
 	tok := s.emailMgr.issueResetToken(user.Username, user.Email)
 	s.store.AddLog(LogEntry{Kind: KindOperation, Level: "info", Actor: s.clientIP(r), Message: Tz("log.reset_token_issued", user.Username)})
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":         true,
+		"ok":          true,
 		"reset_token": tok,
 	})
 }

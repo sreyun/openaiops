@@ -76,12 +76,12 @@ func parseWeKnoraKBIDs(s string) []string {
 
 // weknoraKBInfo 可见知识库摘要。
 type weknoraKBInfo struct {
-	ID          string `json:"id"`
-	Name        string `json:"name,omitempty"`
-	Type        string `json:"type,omitempty"`
-	Temporary   bool   `json:"is_temporary,omitempty"`
-	KnowledgeN  int    `json:"knowledge_count,omitempty"`
-	ChunkCount  int    `json:"chunk_count,omitempty"`
+	ID         string `json:"id"`
+	Name       string `json:"name,omitempty"`
+	Type       string `json:"type,omitempty"`
+	Temporary  bool   `json:"is_temporary,omitempty"`
+	KnowledgeN int    `json:"knowledge_count,omitempty"`
+	ChunkCount int    `json:"chunk_count,omitempty"`
 }
 
 type weknoraKBCacheEntry struct {
@@ -130,11 +130,11 @@ type weknoraSearchReq struct {
 
 // weknoraSearchMeta 描述一次检索实际覆盖的范围（供测试/调试）。
 type weknoraSearchMeta struct {
-	KBCount      int      `json:"kb_count"`
-	KBIDs        []string `json:"kb_ids,omitempty"`
-	AutoListed   bool     `json:"auto_listed"`
-	Strategy     string   `json:"strategy,omitempty"` // batch | fanout | hybrid | legacy
-	HitCount     int      `json:"hit_count"`
+	KBCount    int      `json:"kb_count"`
+	KBIDs      []string `json:"kb_ids,omitempty"`
+	AutoListed bool     `json:"auto_listed"`
+	Strategy   string   `json:"strategy,omitempty"` // batch | fanout | hybrid | legacy
+	HitCount   int      `json:"hit_count"`
 }
 
 // weknoraSearch 调用 WeKnora 知识搜索，返回格式化文本（供工具/测试使用）。
@@ -460,10 +460,10 @@ func weknoraDoHybridSearch(client *http.Client, base, apiKey, kbID, query string
 		return nil, fmt.Errorf("空知识库 ID")
 	}
 	payload, _ := json.Marshal(map[string]any{
-		"query_text":         query,
-		"match_count":        topK,
-		"vector_threshold":   0.3,
-		"keyword_threshold":  0.3,
+		"query_text":        query,
+		"match_count":       topK,
+		"vector_threshold":  0.3,
+		"keyword_threshold": 0.3,
 	})
 	url := base + "/knowledge-bases/" + kbID + "/hybrid-search"
 	do := func(method string) ([]weknoraChunk, error) {

@@ -138,12 +138,12 @@ func (s *Server) handleDiffPlaybookRevisions(w http.ResponseWriter, r *http.Requ
 
 func playbookDiffSummary(a, b Playbook) map[string]any {
 	return map[string]any{
-		"name_changed":  a.Name != b.Name,
-		"steps_a":       len(a.Steps),
-		"steps_b":       len(b.Steps),
-		"desc_changed":  strings.TrimSpace(a.Description) != strings.TrimSpace(b.Description),
-		"schedule_a":    a.Schedule != nil && a.Schedule.Enabled,
-		"schedule_b":    b.Schedule != nil && b.Schedule.Enabled,
+		"name_changed": a.Name != b.Name,
+		"steps_a":      len(a.Steps),
+		"steps_b":      len(b.Steps),
+		"desc_changed": strings.TrimSpace(a.Description) != strings.TrimSpace(b.Description),
+		"schedule_a":   a.Schedule != nil && a.Schedule.Enabled,
+		"schedule_b":   b.Schedule != nil && b.Schedule.Enabled,
 	}
 }
 

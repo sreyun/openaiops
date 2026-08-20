@@ -9,7 +9,7 @@ func TestDiffHostFindings(t *testing.T) {
 	}
 	cur := []HostFinding{
 		{Category: "cve", ID: "1", Title: "old", Level: "critical", CVE: "CVE-1"}, // worsened
-		{Category: "malware", ID: "m1", Title: "new malware", Level: "high"},       // added
+		{Category: "malware", ID: "m1", Title: "new malware", Level: "high"},      // added
 	}
 	d := diffHostFindings(prev, cur, "prev-1")
 	if d == nil {

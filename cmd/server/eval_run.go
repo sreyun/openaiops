@@ -17,13 +17,13 @@ var evalCasesFS embed.FS
 // 评测素材：离线（mock LLM）+ 在线（真实 provider）两套评测共用同一份 case 定义，
 // 使周报里的「验证通过率」从自证（AI 验证自己）变成他证（对照 ground truth 判定）。
 type evalCase struct {
-	ID                  string   `json:"id"`
-	Task                string   `json:"task"`
-	Severity            string   `json:"severity"`
-	Input               string   `json:"input"`
-	GroundTruthRootCause []string `json:"ground_truth_root_cause"`
-	ExpectedActions     []string `json:"expected_actions"`
-	Evals               []evalRule `json:"evals"`
+	ID                   string     `json:"id"`
+	Task                 string     `json:"task"`
+	Severity             string     `json:"severity"`
+	Input                string     `json:"input"`
+	GroundTruthRootCause []string   `json:"ground_truth_root_cause"`
+	ExpectedActions      []string   `json:"expected_actions"`
+	Evals                []evalRule `json:"evals"`
 }
 
 type evalRule struct {

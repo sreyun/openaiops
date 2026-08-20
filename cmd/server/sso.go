@@ -28,13 +28,13 @@ const (
 
 // SSOProviderConfig is one OAuth login application.
 type SSOProviderConfig struct {
-	Enabled     bool              `json:"enabled"`
-	AppID       string            `json:"app_id,omitempty"`     // Feishu app_id / DingTalk client_id / WeChat appid / WeCom corpid
-	AppSecret   string            `json:"app_secret,omitempty"` // never echoed to browser
-	AgentID     string            `json:"agent_id,omitempty"`   // WeCom agentid (required for WeCom QR)
-	RedirectURL string            `json:"redirect_url,omitempty"`
-	DefaultRole string            `json:"default_role,omitempty"` // admin|operator|viewer; empty = deny
-	AutoCreate  bool              `json:"auto_create,omitempty"`
+	Enabled     bool   `json:"enabled"`
+	AppID       string `json:"app_id,omitempty"`     // Feishu app_id / DingTalk client_id / WeChat appid / WeCom corpid
+	AppSecret   string `json:"app_secret,omitempty"` // never echoed to browser
+	AgentID     string `json:"agent_id,omitempty"`   // WeCom agentid (required for WeCom QR)
+	RedirectURL string `json:"redirect_url,omitempty"`
+	DefaultRole string `json:"default_role,omitempty"` // admin|operator|viewer; empty = deny
+	AutoCreate  bool   `json:"auto_create,omitempty"`
 	// DeptRoleMap / TagRoleMap map IdP department or tag names → role (first match).
 	DeptRoleMap map[string]string `json:"dept_role_map,omitempty"`
 	TagRoleMap  map[string]string `json:"tag_role_map,omitempty"`
@@ -62,13 +62,13 @@ var (
 
 // ssoProfile is the normalized identity returned by a provider adapter.
 type ssoProfile struct {
-	Provider    string
-	Subject     string // stable: prefer union_id, else open_id / sub
+	Provider     string
+	Subject      string // stable: prefer union_id, else open_id / sub
 	UsernameHint string
-	DisplayName string
-	Email       string
-	Depts       []string
-	Tags        []string
+	DisplayName  string
+	Email        string
+	Depts        []string
+	Tags         []string
 }
 
 func (cs *ConfigStore) SSOConfig() SSOConfig {
@@ -351,11 +351,11 @@ func (s *Server) handleListSSOIdentities(w http.ResponseWriter, r *http.Request)
 	cfg := s.cfg.SSOConfig()
 	oidc := s.cfg.OIDCConfig()
 	type avail struct {
-		ID       string `json:"id"`
-		Name     string `json:"name"`
-		BindURL  string `json:"bind_url"`
-		Bound     bool   `json:"bound"`
-		Enabled  bool   `json:"enabled"`
+		ID      string `json:"id"`
+		Name    string `json:"name"`
+		BindURL string `json:"bind_url"`
+		Bound   bool   `json:"bound"`
+		Enabled bool   `json:"enabled"`
 	}
 	bound := map[string]bool{}
 	for _, id := range ids {
@@ -669,10 +669,10 @@ func feishuAppAccessToken(appID, secret string) (string, error) {
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	var j struct {
-		Code                    int    `json:"code"`
-		Msg                     string `json:"msg"`
-		AppAccessToken          string `json:"app_access_token"`
-		TenantAccessToken       string `json:"tenant_access_token"`
+		Code              int    `json:"code"`
+		Msg               string `json:"msg"`
+		AppAccessToken    string `json:"app_access_token"`
+		TenantAccessToken string `json:"tenant_access_token"`
 	}
 	if err := json.Unmarshal(raw, &j); err != nil {
 		return "", err
@@ -707,7 +707,7 @@ func feishuUserAccessToken(appTok, code string) (string, error) {
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	var j struct {
-		Code int `json:"code"`
+		Code int    `json:"code"`
 		Msg  string `json:"msg"`
 		Data struct {
 			AccessToken string `json:"access_token"`
@@ -828,11 +828,11 @@ func wechatSSOProfile(cfg SSOProviderConfig, code string) (ssoProfile, error) {
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	var tok struct {
-		AccessToken  string `json:"access_token"`
-		OpenID       string `json:"openid"`
-		UnionID      string `json:"unionid"`
-		ErrCode      int    `json:"errcode"`
-		ErrMsg       string `json:"errmsg"`
+		AccessToken string `json:"access_token"`
+		OpenID      string `json:"openid"`
+		UnionID     string `json:"unionid"`
+		ErrCode     int    `json:"errcode"`
+		ErrMsg      string `json:"errmsg"`
 	}
 	if err := json.Unmarshal(raw, &tok); err != nil {
 		return out, err
@@ -850,11 +850,11 @@ func wechatSSOProfile(cfg SSOProviderConfig, code string) (ssoProfile, error) {
 	defer uresp.Body.Close()
 	uraw, _ := io.ReadAll(io.LimitReader(uresp.Body, 1<<20))
 	var u struct {
-		OpenID     string `json:"openid"`
-		Nickname   string `json:"nickname"`
-		UnionID    string `json:"unionid"`
-		ErrCode    int    `json:"errcode"`
-		ErrMsg     string `json:"errmsg"`
+		OpenID   string `json:"openid"`
+		Nickname string `json:"nickname"`
+		UnionID  string `json:"unionid"`
+		ErrCode  int    `json:"errcode"`
+		ErrMsg   string `json:"errmsg"`
 	}
 	_ = json.Unmarshal(uraw, &u)
 	out.Subject = oidcFirstNonEmpty(u.UnionID, tok.UnionID, u.OpenID, tok.OpenID)
@@ -925,10 +925,10 @@ func wecomSSOProfile(cfg SSOProviderConfig, code string) (ssoProfile, error) {
 			defer dresp.Body.Close()
 			draw, _ := io.ReadAll(io.LimitReader(dresp.Body, 1<<20))
 			var detail struct {
-				Name  string `json:"name"`
-				Email string `json:"email"`
+				Name    string `json:"name"`
+				Email   string `json:"email"`
 				BizMail string `json:"biz_mail"`
-				ErrCode int  `json:"errcode"`
+				ErrCode int    `json:"errcode"`
 			}
 			if json.Unmarshal(draw, &detail) == nil && detail.ErrCode == 0 {
 				out.DisplayName = oidcFirstNonEmpty(detail.Name, out.DisplayName)

@@ -1,12 +1,12 @@
 package main
 
 import (
-	"sync"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -104,8 +104,8 @@ func TestHandleMCPUnauthorizedAndDisabled(t *testing.T) {
 
 func TestHandleMCPScopedToolCallDenied(t *testing.T) {
 	s := newMCPTestServer(t, AIConfig{
-		MCPEnabled: true,
-		MCPToken:   "primary-token",
+		MCPEnabled:          true,
+		MCPToken:            "primary-token",
 		MCPScopedTokensJSON: `[{"name":"logs","token":"logs-only-token","scopes":["logs"]}]`,
 	})
 	body := `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"query_metrics","arguments":{}}}`

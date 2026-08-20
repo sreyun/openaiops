@@ -33,10 +33,10 @@ type SREEffectReport struct {
 	AlertNoiseDetail string  `json:"alert_noise_detail,omitempty"`
 
 	// Change / DORA CFR
-	ChangeCount         int     `json:"change_count"`
-	ChangeFailedCount   int     `json:"change_failed_count"`
-	ChangeFailureRate   float64 `json:"change_failure_rate"`
-	ChangeLeadTimeP75Sec int64  `json:"change_lead_time_p75_sec"`
+	ChangeCount          int     `json:"change_count"`
+	ChangeFailedCount    int     `json:"change_failed_count"`
+	ChangeFailureRate    float64 `json:"change_failure_rate"`
+	ChangeLeadTimeP75Sec int64   `json:"change_lead_time_p75_sec"`
 
 	// AI adoption / verify
 	AIRunCount       int     `json:"ai_run_count"`

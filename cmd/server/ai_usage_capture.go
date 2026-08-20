@@ -102,7 +102,7 @@ func captureAIUsageFromJSONCtx(ctx context.Context, raw []byte) {
 type aiModelAgg struct {
 	Count        int     `json:"count"`
 	Fail         int     `json:"fail"`
-	Tokens       int64   `json:"tokens"`  // 精确 token（provider usage 捕获）
+	Tokens       int64   `json:"tokens"`        // 精确 token（provider usage 捕获）
 	ApproxTokens int64   `json:"approx_tokens"` // 估算 token（字符粗估）
 	Cost         float64 `json:"cost"`
 	AvgMs        int64   `json:"avg_ms"`
@@ -145,11 +145,11 @@ GROUP BY 1 ORDER BY COUNT(*) DESC LIMIT 40`, sinceTs)
 }
 
 type aiTaskCostAgg struct {
-	Count int     `json:"count"`
-	Fail  int     `json:"fail"`
-	Cost  float64 `json:"cost"`
-	Tokens int64  `json:"tokens"`
-	AvgMs int64   `json:"avg_ms"`
+	Count  int     `json:"count"`
+	Fail   int     `json:"fail"`
+	Cost   float64 `json:"cost"`
+	Tokens int64   `json:"tokens"`
+	AvgMs  int64   `json:"avg_ms"`
 }
 
 func (p *pgStore) aiCallByTaskCostFromPG(sinceTs int64) map[string]aiTaskCostAgg {

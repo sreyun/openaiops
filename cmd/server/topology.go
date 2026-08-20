@@ -26,16 +26,16 @@ type TopologyEdge struct {
 
 // TopologyRCA 某主机/事件的轻量根因与影响面摘要。
 type TopologyRCA struct {
-	HostID       string              `json:"host_id"`
-	Hostname     string              `json:"hostname,omitempty"`
-	Category     string              `json:"category,omitempty"`
-	Upstream     []TopologyNodeHit   `json:"upstream"`               // 可能根因（本机依赖的上游）
-	Downstream   []TopologyNodeHit   `json:"downstream"`             // 影响面（依赖本机的下游）
-	RelatedHosts []TopologyHostHit   `json:"related_hosts"`          // 扩散到的具体主机
-	OpenIncidents []TopologyIncHit   `json:"open_incidents"`         // 关联主机上的未决事件
-	RecentChanges []TopologyChangeHit `json:"recent_changes"`        // 近期硬件/资产变更
-	Summary      string              `json:"summary"`                // 给时间线 / 提示词的短文
-	Hints        []string            `json:"hints,omitempty"`
+	HostID        string              `json:"host_id"`
+	Hostname      string              `json:"hostname,omitempty"`
+	Category      string              `json:"category,omitempty"`
+	Upstream      []TopologyNodeHit   `json:"upstream"`       // 可能根因（本机依赖的上游）
+	Downstream    []TopologyNodeHit   `json:"downstream"`     // 影响面（依赖本机的下游）
+	RelatedHosts  []TopologyHostHit   `json:"related_hosts"`  // 扩散到的具体主机
+	OpenIncidents []TopologyIncHit    `json:"open_incidents"` // 关联主机上的未决事件
+	RecentChanges []TopologyChangeHit `json:"recent_changes"` // 近期硬件/资产变更
+	Summary       string              `json:"summary"`        // 给时间线 / 提示词的短文
+	Hints         []string            `json:"hints,omitempty"`
 }
 
 type TopologyNodeHit struct {
@@ -121,7 +121,7 @@ func normalizeTopoKind(k string) string {
 // computeTopologyRCA 基于配置边 + 当前主机分类，计算轻量 RCA。
 func (s *Server) computeTopologyRCA(hostID string, lookbackDays int) TopologyRCA {
 	out := TopologyRCA{
-		HostID: hostID,
+		HostID:   hostID,
 		Upstream: []TopologyNodeHit{}, Downstream: []TopologyNodeHit{},
 		RelatedHosts: []TopologyHostHit{}, OpenIncidents: []TopologyIncHit{},
 		RecentChanges: []TopologyChangeHit{}, Hints: []string{},

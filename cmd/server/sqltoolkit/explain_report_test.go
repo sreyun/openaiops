@@ -5,9 +5,9 @@ import "testing"
 func TestBuildExplainReportFullScanIndex(t *testing.T) {
 	sql := `SELECT name, tel FROM user WHERE name = '熊俊峰'`
 	analysis := &ExplainAnalysis{
-		Summary:    "表访问 1 处；命中索引 0；全表/索引扫描风险 1",
-		FullScans:  1,
-		IndexHits:  0,
+		Summary:   "表访问 1 处；命中索引 0；全表/索引扫描风险 1",
+		FullScans: 1,
+		IndexHits: 0,
 		TableAccess: []ExplainHit{{
 			Table: "user", AccessType: "ALL", Rows: 10, Filtered: 10,
 			FullScanRisk: true, Condition: "(`user`.`name` = '熊俊峰')",

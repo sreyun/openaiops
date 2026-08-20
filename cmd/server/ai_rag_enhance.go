@@ -16,10 +16,10 @@ import (
 
 // RAGCitation 是注入提示词 / SSE 元数据中的一条可溯源引用。
 type RAGCitation struct {
-	Kind    string `json:"kind"`               // resolution|diagnosis|knowledge|skill|pitfall|weknora|metric|log|alert|inspect|…
-	Source  string `json:"source,omitempty"`   // incident:12 / host:xxx / weknora / …
-	Title   string `json:"title"`              // 展示名
-	Summary string `json:"summary,omitempty"`  // 短摘要（证据卡）
+	Kind    string `json:"kind"`              // resolution|diagnosis|knowledge|skill|pitfall|weknora|metric|log|alert|inspect|…
+	Source  string `json:"source,omitempty"`  // incident:12 / host:xxx / weknora / …
+	Title   string `json:"title"`             // 展示名
+	Summary string `json:"summary,omitempty"` // 短摘要（证据卡）
 }
 
 // ragMeta 是 writeRAGMetaSSE 的完整载荷。

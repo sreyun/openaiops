@@ -10,11 +10,11 @@ import (
 
 // CustomerSkillPack is a portable private skill export/import package.
 type CustomerSkillPack struct {
-	ID        string               `json:"id"`
-	Name      string               `json:"name"`
-	Version   string               `json:"version"`
+	ID         string              `json:"id"`
+	Name       string              `json:"name"`
+	Version    string              `json:"version"`
 	ExportedAt int64               `json:"exported_at"`
-	Skills    []CustomerSkillItem  `json:"skills"`
+	Skills     []CustomerSkillItem `json:"skills"`
 }
 
 type CustomerSkillItem struct {

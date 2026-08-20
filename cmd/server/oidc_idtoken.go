@@ -39,15 +39,15 @@ type oidcJWK struct {
 }
 
 type oidcIDClaims struct {
-	Iss   string      `json:"iss"`
-	Sub   string      `json:"sub"`
-	Aud   json.RawMessage `json:"aud"`
-	Exp   int64       `json:"exp"`
-	Iat   int64       `json:"iat"`
-	Nonce string      `json:"nonce"`
-	Email string      `json:"email"`
-	Name  string      `json:"name"`
-	PreferredUsername string `json:"preferred_username"`
+	Iss               string          `json:"iss"`
+	Sub               string          `json:"sub"`
+	Aud               json.RawMessage `json:"aud"`
+	Exp               int64           `json:"exp"`
+	Iat               int64           `json:"iat"`
+	Nonce             string          `json:"nonce"`
+	Email             string          `json:"email"`
+	Name              string          `json:"name"`
+	PreferredUsername string          `json:"preferred_username"`
 }
 
 var (

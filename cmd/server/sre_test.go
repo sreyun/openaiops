@@ -251,7 +251,11 @@ func TestRemediationRateLimit(t *testing.T) {
 	launched := 0
 	m.getPlaybook = func(id string) (Playbook, bool) { return Playbook{ID: "pb1", Name: "x"}, true }
 	m.resolveHost = func(id string) *Host { return &Host{ID: "h1", Hostname: "web"} }
-	m.trigger = func(pb Playbook, host *Host, op string, onDone func(ok bool)) int64 { launched++; onDone(true); return 1 }
+	m.trigger = func(pb Playbook, host *Host, op string, onDone func(ok bool)) int64 {
+		launched++
+		onDone(true)
+		return 1
+	}
 	// No cooldown, but max 2 per hour. Different hosts so cooldown-per-host never blocks.
 	rule := RemediationRule{ID: "r1", Enabled: true, PlaybookID: "pb1", MaxPerHour: 2}
 	for i := 0; i < 5; i++ {

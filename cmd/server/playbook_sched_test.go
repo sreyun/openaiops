@@ -123,8 +123,8 @@ func TestScheduleSkipsBusy(t *testing.T) {
 	pm := newTestPM(t)
 	id := mustUpsert(t, pm, "interval", &PlaybookSchedule{Enabled: true, Kind: "interval", IntervalMin: 5})
 	base := time.Date(2026, 7, 10, 10, 0, 0, 0, time.Local)
-	pm.dueSchedules(base)                                          // baseline
-	if !fireIDs(pm.dueSchedules(base.Add(5 * time.Minute)))[id] {  // fires, sets schedBusy
+	pm.dueSchedules(base)                                         // baseline
+	if !fireIDs(pm.dueSchedules(base.Add(5 * time.Minute)))[id] { // fires, sets schedBusy
 		t.Fatalf("expected first fire")
 	}
 	// Still "running" (busy not cleared): a later due tick must skip it.

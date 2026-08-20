@@ -27,13 +27,13 @@ type openAPIGroup struct {
 }
 
 type openAPIFetchResult struct {
-	Spec           string         `json:"spec"`
-	Groups         []openAPIGroup `json:"groups,omitempty"`
-	SelectedGroup  string         `json:"selected_group,omitempty"`
-	SuggestedName  string         `json:"suggested_name,omitempty"`
-	SuggestedBase  string         `json:"suggested_base,omitempty"`
-	SourceURL      string         `json:"source_url"`
-	Notes          []string       `json:"notes,omitempty"`
+	Spec          string         `json:"spec"`
+	Groups        []openAPIGroup `json:"groups,omitempty"`
+	SelectedGroup string         `json:"selected_group,omitempty"`
+	SuggestedName string         `json:"suggested_name,omitempty"`
+	SuggestedBase string         `json:"suggested_base,omitempty"`
+	SourceURL     string         `json:"source_url"`
+	Notes         []string       `json:"notes,omitempty"`
 }
 
 type swaggerResource struct {

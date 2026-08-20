@@ -718,6 +718,9 @@ function showHostTreeCtx(x, y, folderId) {
  */
 async function afterHostFolderChange() {
   renderHostTree();
+  // 作废差量缓存：分组信息已经进了渲染键，这里再显式清一次，是为了不依赖"服务端这一次
+  // 一定把新值返回来"的时序——即使回读慢一拍，下一拍也一定是全量重画而不是差量补丁。
+  invalidateHostRenderCache();
   await refresh(true);
 }
 
@@ -1151,8 +1154,14 @@ function renderHosts(hosts) {
     ? ("q:" + searchQ)
     : (HOST_TREE_MODE === "type" ? ("t:" + CUR_TYPE) : ("f:" + CUR_FOLDER));
   // Include filter/sort/search so incremental update never skips a real list change.
+  // 缓存键必须覆盖"这一屏画出来的每一样东西"，否则命中缓存时走的是 updateHostCard，
+  // 而它只补在线状态与 CPU/内存/磁盘三个数值——**分组标签它不管**。
+  // 于是改分组（单台/批量）或改分组名之后，主机列表上的分组还是旧的：数据早就回来了，
+  // 只是没人重画。分组信息全在 folder_path/category 里，直接进键，代价是每屏 ≤50 次取值。
+  const folderSig = pageHosts.map(h => (h.folder_id || "") + ":" + (h.folder_path || h.category || "")).join(",");
   const newKey = pageHosts.map(h => h.id).join(",") + "|" + HOST_VIEW + "|" + HOST_PAGE + "|" + filterKey + "|" + HOST_TREE_MODE + "|" + HOST_FILTER + "|" + HOST_SORT
-    + "|sel:" + (HOST_SELECT_MODE ? "1" : "0") + ":" + HOST_SELECTED.size;
+    + "|sel:" + (HOST_SELECT_MODE ? "1" : "0") + ":" + HOST_SELECTED.size
+    + "|grp:" + folderSig;
   if (LAST_RENDER_KEY === newKey && Object.keys(HOST_DOM_CACHE).length > 0) {
     pageHosts.forEach(h => updateHostCard(h));
     renderPager(pages, shown.length);
