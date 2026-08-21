@@ -199,3 +199,73 @@ func fimRegionVisited(p string, visited, blocked map[string]bool) bool {
 	}
 	return false
 }
+
+// fimMinVolumeQuota 是每个卷每轮至少要走的文件数。
+//
+// 多盘机器上必须给每个盘留份额：C 盘上百万文件，如果不设下限，按"总额/卷数"分下来
+// D/E 盘可能只分到几千个，覆盖一圈遥遥无期。同时它也是"总额很小时别把某个盘饿死"的兜底。
+const fimMinVolumeQuota = 20000
+
+// fimGroupRootsByVolume 把扫描根分成可以**并发**走的若干组。
+//
+// 规则很简单：**互相嵌套的根必须同组**（顺序走），**互不相干的根各成一组**（并发走）。
+//
+//   - Windows：C:\Users、C:\ProgramData、C:\ 都在 C 盘这棵树上 → 一组；D:\ 自成一组。
+//     于是多盘机器上每个盘每一轮都能分到份额——"只扫了 C 盘"的第二层原因就在这里。
+//   - 类 Unix：默认根（/etc、/home…、/）全都挂在 / 下面 → 一组。它们相互嵌套，必须顺序
+//     走，否则"同一棵子树不重复走"的去重会失效、同一片被扫两遍。
+//   - 显式配置了互不相干的根（fim_roots=/data,/srv）：各成一组，并发走，纯赚。
+//
+// 判据用路径包含关系而不是盘符，所以三个平台一套逻辑，也不必去猜挂载点。
+func fimGroupRootsByVolume(roots []string) [][]string {
+	if len(roots) == 0 {
+		return [][]string{{}}
+	}
+	// 并查集：把有包含关系的根并到一起。根的数量是个位数，O(n²) 完全够用。
+	parent := make([]int, len(roots))
+	for i := range parent {
+		parent[i] = i
+	}
+	var find func(int) int
+	find = func(i int) int {
+		for parent[i] != i {
+			parent[i] = parent[parent[i]]
+			i = parent[i]
+		}
+		return i
+	}
+	union := func(a, b int) {
+		ra, rb := find(a), find(b)
+		if ra != rb {
+			parent[rb] = ra
+		}
+	}
+	keys := make([]string, len(roots))
+	for i, r := range roots {
+		keys[i] = fimMatchKey(fimNormPath(r))
+	}
+	nested := func(a, b string) bool {
+		return a == b || strings.HasPrefix(b, strings.TrimSuffix(a, "/")+"/")
+	}
+	for i := range roots {
+		for j := i + 1; j < len(roots); j++ {
+			if nested(keys[i], keys[j]) || nested(keys[j], keys[i]) {
+				union(i, j)
+			}
+		}
+	}
+	order := []int{}
+	groups := map[int][]string{}
+	for i, r := range roots {
+		g := find(i)
+		if _, ok := groups[g]; !ok {
+			order = append(order, g)
+		}
+		groups[g] = append(groups[g], r)
+	}
+	out := make([][]string, 0, len(order))
+	for _, g := range order {
+		out = append(out, groups[g])
+	}
+	return out
+}

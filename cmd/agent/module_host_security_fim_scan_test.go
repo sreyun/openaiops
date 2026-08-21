@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -454,5 +455,76 @@ func TestFimPriorityRootsAreRealDirectories(t *testing.T) {
 	}
 	if len(roots) == 0 {
 		t.Fatal("至少应当保留刚建出来的临时目录")
+	}
+}
+
+// —— 多卷覆盖：这一组守的是"Windows 上只扫了 C 盘，D/E 盘完全没进来" ——
+
+func TestFimGroupRootsByVolume(t *testing.T) {
+	// 相互嵌套的根必须同组顺序走：并发会重复扫同一片，
+	// 还会让"同一棵子树不重复走"的去重失效。
+	got := fimGroupRootsByVolume([]string{"/etc", "/home", "/"})
+	if len(got) != 1 || len(got[0]) != 3 {
+		t.Fatalf("嵌套的根应当归成一组：%+v", got)
+	}
+	if got[0][0] != "/etc" {
+		t.Fatalf("组内顺序要保持（要害目录在前）：%+v", got[0])
+	}
+
+	// 互不相干的根各成一组，可以并发——Windows 上的 C:\ 与 D:\ 就是这种关系。
+	got = fimGroupRootsByVolume([]string{"/data", "/srv", "/data/app"})
+	if len(got) != 2 {
+		t.Fatalf("互不相干的根应当分成两组：%+v", got)
+	}
+	if len(got[0]) != 2 || got[0][0] != "/data" || got[0][1] != "/data/app" {
+		t.Fatalf("/data 与 /data/app 有包含关系，必须同组：%+v", got)
+	}
+
+	// 前缀相同但并不嵌套（/data 与 /database）不能被误并到一起。
+	got = fimGroupRootsByVolume([]string{"/data", "/database"})
+	if len(got) != 2 {
+		t.Fatalf("/data 与 /database 只是前缀像，不该同组：%+v", got)
+	}
+}
+
+// 每个卷每一轮都必须分到自己的份额，否则大盘一个人就把预算吃光，
+// 其余的盘永远排不上队——那正是"只扫了 C 盘"的第二层原因。
+func TestCollectFIMCoversEveryRootInOneScan(t *testing.T) {
+	volA := t.TempDir()
+	volB := t.TempDir()
+	for i := 0; i < 30; i++ {
+		writeFile(t, filepath.Join(volA, "big", string(rune('a'+i%26))+strconv.Itoa(i)+".txt"), "x\n")
+	}
+	writeFile(t, filepath.Join(volB, "only-here.txt"), "y\n")
+
+	opts := fimTestOpts(t, volA)
+	opts.Roots = []string{volA, volB}
+	opts.MaxFiles = 10 // 逼出截断：第一个根远远走不完
+
+	collectFIMChanges(opts) // 基线轮
+	base, ok := fimLoadBaseline(fimBaselinePath())
+	if !ok {
+		t.Fatal("基线读不出来")
+	}
+	want := fimNormPath(filepath.Join(volB, "only-here.txt"))
+	if _, ok := base[want]; !ok {
+		t.Fatalf("第二个根在第一轮就应当被覆盖到（各卷有独立份额），基线里没有 %s", want)
+	}
+}
+
+// 每卷的保底份额不能凌驾于操作员设的总上限之上，否则"调小上限"就不起作用了。
+func TestFimVolumeQuotaRespectsSmallLimit(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < 40; i++ {
+		writeFile(t, filepath.Join(root, "f"+strconv.Itoa(i)+".txt"), "x\n")
+	}
+	opts := fimTestOpts(t, root)
+	opts.MaxFiles = 6
+	_, stats := collectFIMChanges(opts)
+	if stats.Files > 8 { // 6 + 少量目录条目的容差
+		t.Fatalf("上限设成 6 却走了 %d 个文件——保底份额压过了操作员的设定", stats.Files)
+	}
+	if !stats.LimitHit {
+		t.Fatalf("应当因为上限被截断：%+v", stats)
 	}
 }

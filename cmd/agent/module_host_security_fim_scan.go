@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -171,18 +172,25 @@ func fimMatchKey(p string) string {
 }
 
 // fimDefaultRoots returns every local filesystem root worth walking.
+//
+// Windows 上这就是**每一个本地盘**——只扫 C 盘是不完整的，D/E 盘上同样会被放东西。
+// 盘符列表走 Win32 的正规接口并按驱动器类型过滤（见 fimLocalDriveRoots）：
+// 网络驱动器不是这台机器的状态，光驱/内存盘扫了也没意义。
 func fimDefaultRoots() []string {
 	if runtime.GOOS != "windows" {
 		return []string{"/"}
 	}
-	var roots []string
-	for c := 'A'; c <= 'Z'; c++ {
-		root := string(c) + ":\\"
-		fi, err := os.Stat(root)
-		if err != nil || !fi.IsDir() {
-			continue
+	roots := fimLocalDriveRoots()
+	if len(roots) == 0 {
+		// 接口拿不到时退回逐个盘符探测，至少别把整个模块弄哑。
+		for c := 'A'; c <= 'Z'; c++ {
+			root := string(c) + ":\\"
+			fi, err := os.Stat(root)
+			if err != nil || !fi.IsDir() {
+				continue
+			}
+			roots = append(roots, root)
 		}
-		roots = append(roots, root)
 	}
 	if len(roots) == 0 {
 		if sd := os.Getenv("SystemDrive"); sd != "" {
@@ -207,8 +215,16 @@ func fimDefaultExcludes() []string {
 	switch runtime.GOOS {
 	case "darwin":
 		return append(common,
-			"/System/Volumes/Data/private/var/folders", "/private/var/folders",
-			"/private/var/vm", "/Volumes", "/.Spotlight-V100", "/.fseventsd",
+			// 数据卷本身：macOS 10.15 起系统盘是只读的，用户数据在 /System/Volumes/Data 上，
+			// 并通过 firmlink 出现在 /Users、/Applications、/private 等位置。从 / 走下去
+			// 已经覆盖了这些内容，再走一遍数据卷等于**整台机器扫两遍**，同一个文件还会以
+			// 两个路径各报一次变更。
+			"/System/Volumes/Data",
+			"/System/Volumes/VM", "/System/Volumes/Preboot", "/System/Volumes/Update",
+			"/private/var/folders", "/private/var/vm",
+			// /Volumes 是外接盘与网络卷的挂载点：那不是这台机器自身的状态，
+			// 而且插一块移动硬盘就会让扫描规模失控。需要时用 fim_roots 显式指定。
+			"/Volumes", "/.Spotlight-V100", "/.fseventsd",
 			"/Library/Caches", "/System/Library/Caches",
 		)
 	case "windows":
@@ -605,6 +621,150 @@ func fimModeString(m fs.FileMode) string {
 // collectFIMChanges walks every in-scope directory, diffs against the local
 // baseline and returns metadata-only changes plus content diffs for whitelisted
 // paths. The baseline is rewritten so the next scan reports only new deltas.
+// fimWalkOutcome 是一个卷（一组根）走完之后的产物。
+// 每个卷各走各的，最后统一并起来——并发只发生在卷之间，卷内仍是顺序遍历
+// （"要害目录优先 + 同一棵子树不重复走"这套去重依赖顺序）。
+type fimWalkOutcome struct {
+	cur         map[string]fimEntry
+	visitedDirs map[string]bool
+	blockedDirs map[string]bool
+	cursors     map[string]fimRootState
+	roots       []string
+	stopAt      string
+	files       int
+	dirs        int
+	skipped     int
+	hashed      int
+	limitHit    bool
+	budgetHit   bool
+}
+
+// fimWalkVolume 顺序走完一个卷里的所有根，返回这一卷的结果。
+//
+// quota 是这一卷本轮最多能走多少个文件：多盘机器上必须给每个盘留份额，否则 C 盘一个人
+// 就把预算吃光，D/E 盘永远排不上队——那正是"只扫了 C 盘"的第二层原因。
+func fimWalkVolume(group []string, opts fimOptions, excl *fimExcluder, patterns []string, cacheDir string,
+	prevCursors map[string]fimRootState, quota int, deadline time.Time) fimWalkOutcome {
+	out := fimWalkOutcome{
+		cur:         make(map[string]fimEntry, 4096),
+		visitedDirs: make(map[string]bool, 1024),
+		blockedDirs: make(map[string]bool, 8),
+		cursors:     make(map[string]fimRootState, len(group)),
+	}
+	for _, root := range group {
+		if out.limitHit || out.budgetHit {
+			break
+		}
+		norm := fimNormPath(root)
+		rootKey := fimMatchKey(norm)
+		out.roots = append(out.roots, norm)
+		resume := prevCursors[rootKey].Next
+		rootDone := true
+		_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+			np := fimNormPath(p)
+			if err != nil {
+				out.skipped++
+				if d != nil && d.IsDir() {
+					// 读不进去的目录不算"完整枚举过"，否则里面的文件会被误判成已删除。
+					delete(out.visitedDirs, fimMatchKey(np))
+					out.blockedDirs[fimMatchKey(np)] = true
+					return fs.SkipDir
+				}
+				return nil
+			}
+			if out.files >= quota {
+				out.limitHit = true
+				out.stopAt = np
+				rootDone = false
+				return filepath.SkipAll
+			}
+			if out.files&511 == 0 && time.Now().After(deadline) {
+				out.budgetHit = true
+				out.stopAt = np
+				rootDone = false
+				return filepath.SkipAll
+			}
+			if d.IsDir() {
+				if excl.skipName(d.Name()) || excl.skipPath(np) {
+					return fs.SkipDir
+				}
+				// 已经被前面的"要害目录"根走过了：整棵子树跳过，别扫两遍。
+				if out.visitedDirs[fimMatchKey(np)] {
+					return fs.SkipDir
+				}
+				// 续扫：这棵子树整体排在游标之前就跳过（不是逐文件空转）。
+				if resume != "" && fimSubtreeBefore(np, resume) {
+					return fs.SkipDir
+				}
+				fi, err := d.Info()
+				if err != nil {
+					out.skipped++
+					return nil
+				}
+				out.cur[np] = fimEntry{Mtime: fi.ModTime().UnixNano(), Mode: fimModeString(fi.Mode()), Dir: true}
+				out.visitedDirs[fimMatchKey(np)] = true
+				out.dirs++
+				return nil
+			}
+			// Regular files only: symlinks, sockets, devices and FIFOs are not
+			// content-bearing and their metadata churns for unrelated reasons.
+			if !d.Type().IsRegular() {
+				return nil
+			}
+			if excl.skipName(d.Name()) || excl.skipPath(np) {
+				return nil
+			}
+			if resume != "" && fimPathBefore(np, resume) {
+				return nil
+			}
+			// Tabs/newlines would corrupt the baseline line format; skip (vanishingly rare).
+			if strings.ContainsAny(np, "\t\n\r") {
+				out.skipped++
+				return nil
+			}
+			fi, err := d.Info()
+			if err != nil {
+				out.skipped++
+				return nil
+			}
+			e := fimEntry{Size: fi.Size(), Mtime: fi.ModTime().UnixNano(), Mode: fimModeString(fi.Mode())}
+			// Content-audit whitelist: hash so modification is content-truth, not mtime noise.
+			if fimContentAllowed(np, patterns) && fi.Size() <= fimMaxHashBytes {
+				if h, ok := hashFileLimited(p, fimMaxHashBytes); ok {
+					e.SHA = h.SHA256
+					out.hashed++
+					fimSeedTextCache(cacheDir, np, h.SHA256)
+				}
+			}
+			out.cur[np] = e
+			out.files++
+			return nil
+		})
+		st := prevCursors[rootKey]
+		if rootDone {
+			// 这个根走完一圈：游标归零，下一轮从头开始（这样删除才有机会被发现）。
+			if st.Next != "" {
+				st.Cycles++
+			}
+			st.Next = ""
+		} else {
+			st.Next = out.stopAt
+		}
+		out.cursors[rootKey] = st
+	}
+	// 被截断时，停点的各级祖先目录都**没有枚举完**，不能算"已知目录"——
+	// 否则下一轮走到它们剩下的部分时，那些文件会被当成新增。
+	if out.stopAt != "" {
+		for d := fimParentDir(out.stopAt); d != ""; d = fimParentDir(d) {
+			delete(out.visitedDirs, fimMatchKey(d))
+			delete(out.cur, d)
+		}
+		delete(out.visitedDirs, fimMatchKey(out.stopAt))
+		delete(out.cur, out.stopAt)
+	}
+	return out
+}
+
 func collectFIMChanges(opts fimOptions) ([]hostSecFileChange, hostSecFIMStats) {
 	start := time.Now()
 	stats := hostSecFIMStats{Mode: "full"}
@@ -632,133 +792,65 @@ func collectFIMChanges(opts fimOptions) ([]hostSecFileChange, hostSecFIMStats) {
 		state.Roots = map[string]fimRootState{}
 	}
 
-	cur := make(map[string]fimEntry, len(prev)+1024)
-	// visitedDirs 是**本轮完整枚举过**的目录。删除判定只在这些目录里做：
-	// 没走到的地方当然"看不见"文件，那不等于文件被删了。
-	visitedDirs := make(map[string]bool, 1024)
-	// blockedDirs 是本轮读不进去的目录（权限不足、设备忙）：它们下面的东西这一轮
-	// "看不见"，绝不能因此报成删除。
-	blockedDirs := make(map[string]bool, 8)
 	deadline := start.Add(opts.Budget)
 	maxFiles := opts.MaxFiles
 	if maxFiles <= 0 {
 		maxFiles = fimDefaultMaxFiles
 	}
-	stopAt := "" // 截断发生的位置（归一化路径）
 
-	for _, root := range roots {
-		if stats.LimitHit || stats.BudgetHit {
-			break
-		}
-		norm := fimNormPath(root)
-		rootKey := fimMatchKey(norm)
-		stats.Roots = append(stats.Roots, norm)
-		resume := state.Roots[rootKey].Next
-		rootDone := true
-		_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-			np := fimNormPath(p)
-			if err != nil {
-				stats.Skipped++
-				if d != nil && d.IsDir() {
-					// 读不进去的目录不算"完整枚举过"，否则里面的文件会被误判成已删除。
-					delete(visitedDirs, fimMatchKey(np))
-					blockedDirs[fimMatchKey(np)] = true
-					return fs.SkipDir
-				}
-				return nil
-			}
-			if stats.Files >= maxFiles {
-				stats.LimitHit = true
-				stopAt = np
-				rootDone = false
-				return filepath.SkipAll
-			}
-			if stats.Files&1023 == 0 && time.Now().After(deadline) {
-				stats.BudgetHit = true
-				stopAt = np
-				rootDone = false
-				return filepath.SkipAll
-			}
-			if d.IsDir() {
-				if excl.skipName(d.Name()) || excl.skipPath(np) {
-					return fs.SkipDir
-				}
-				// 已经被前面的"要害目录"根走过了：整棵子树跳过，别扫两遍。
-				if visitedDirs[fimMatchKey(np)] {
-					return fs.SkipDir
-				}
-				// 续扫：这棵子树整体排在游标之前就跳过（不是逐文件空转）。
-				if resume != "" && fimSubtreeBefore(np, resume) {
-					return fs.SkipDir
-				}
-				fi, err := d.Info()
-				if err != nil {
-					stats.Skipped++
-					return nil
-				}
-				cur[np] = fimEntry{Mtime: fi.ModTime().UnixNano(), Mode: fimModeString(fi.Mode()), Dir: true}
-				visitedDirs[fimMatchKey(np)] = true
-				stats.Dirs++
-				return nil
-			}
-			// Regular files only: symlinks, sockets, devices and FIFOs are not
-			// content-bearing and their metadata churns for unrelated reasons.
-			if !d.Type().IsRegular() {
-				return nil
-			}
-			if excl.skipName(d.Name()) || excl.skipPath(np) {
-				return nil
-			}
-			if resume != "" && fimPathBefore(np, resume) {
-				return nil
-			}
-			// Tabs/newlines would corrupt the baseline line format; skip (vanishingly rare).
-			if strings.ContainsAny(np, "\t\n\r") {
-				stats.Skipped++
-				return nil
-			}
-			fi, err := d.Info()
-			if err != nil {
-				stats.Skipped++
-				return nil
-			}
-			e := fimEntry{Size: fi.Size(), Mtime: fi.ModTime().UnixNano(), Mode: fimModeString(fi.Mode())}
-			// Content-audit whitelist: hash so modification is content-truth, not mtime noise.
-			if fimContentAllowed(np, patterns) && fi.Size() <= fimMaxHashBytes {
-				if h, ok := hashFileLimited(p, fimMaxHashBytes); ok {
-					e.SHA = h.SHA256
-					stats.Hashed++
-					fimSeedTextCache(cacheDir, np, h.SHA256)
-				}
-			}
-			cur[np] = e
-			stats.Files++
-			return nil
-		})
-		st := state.Roots[rootKey]
-		if rootDone {
-			// 这个根走完一圈：游标归零，下一轮从头开始（这样删除才有机会被发现）。
-			if st.Next != "" {
-				st.Cycles++
-			}
-			st.Next = ""
-		} else {
-			st.Next = stopAt
-		}
-		state.Roots[rootKey] = st
+	// 按卷分组：Windows 上一个盘符一组，类 Unix 只有一组（都挂在同一棵树上）。
+	// 不同卷之间**并发**走——多盘机器上这既是覆盖面问题（每个盘每轮都要轮到），
+	// 也是性能问题（不同物理盘的 I/O 队列本来就是独立的）。同一卷内保持顺序，
+	// 因为"要害目录优先 + 同一棵子树不重复走"这套去重依赖遍历顺序。
+	groups := fimGroupRootsByVolume(roots)
+	quota := maxFiles / len(groups)
+	// 每卷保底份额：盘多的时候按"总额/卷数"分下来可能只有几千个文件，覆盖一圈遥遥无期。
+	// 保底会让总量略微超过 fim_max_files——盘特别多时才会发生，覆盖面优先于那点超额。
+	// 但保底本身不能超过操作员设定的总额，否则调小上限就完全不起作用了。
+	if floor := minInt(fimMinVolumeQuota, maxFiles); quota < floor {
+		quota = floor
 	}
-	stats.ResumeFrom = stopAt
 
-	// 被截断时，停点的各级祖先目录都**没有枚举完**，不能算"已知目录"——
-	// 否则下一轮走到它们剩下的部分时，那些文件会被当成新增。
-	if stopAt != "" {
-		for d := fimParentDir(stopAt); d != ""; d = fimParentDir(d) {
-			delete(visitedDirs, fimMatchKey(d))
-			delete(cur, d)
-		}
-		delete(visitedDirs, fimMatchKey(stopAt))
-		delete(cur, stopAt)
+	outcomes := make([]fimWalkOutcome, len(groups))
+	var wg sync.WaitGroup
+	for i, g := range groups {
+		wg.Add(1)
+		go func(i int, g []string) {
+			defer wg.Done()
+			outcomes[i] = fimWalkVolume(g, opts, excl, patterns, cacheDir, state.Roots, quota, deadline)
+		}(i, g)
 	}
+	wg.Wait()
+
+	cur := make(map[string]fimEntry, len(prev)+1024)
+	visitedDirs := make(map[string]bool, 1024)
+	blockedDirs := make(map[string]bool, 8)
+	var stopPoints []string
+	for _, o := range outcomes {
+		for p, e := range o.cur {
+			cur[p] = e
+		}
+		for d := range o.visitedDirs {
+			visitedDirs[d] = true
+		}
+		for d := range o.blockedDirs {
+			blockedDirs[d] = true
+		}
+		for k, v := range o.cursors {
+			state.Roots[k] = v
+		}
+		stats.Roots = append(stats.Roots, o.roots...)
+		stats.Files += o.files
+		stats.Dirs += o.dirs
+		stats.Skipped += o.skipped
+		stats.Hashed += o.hashed
+		stats.LimitHit = stats.LimitHit || o.limitHit
+		stats.BudgetHit = stats.BudgetHit || o.budgetHit
+		if o.stopAt != "" {
+			stopPoints = append(stopPoints, o.stopAt)
+		}
+	}
+	stats.ResumeFrom = strings.Join(stopPoints, " | ")
 	fimSaveScanState(state)
 
 	if !hadBaseline {
@@ -787,7 +879,7 @@ func collectFIMChanges(opts fimOptions) ([]hostSecFileChange, hostSecFIMStats) {
 	for p, e := range cur {
 		merged[p] = e
 	}
-	// 本轮完整枚举过的目录里，基线中已经不存在的条目要真的删掉——留着它们，
+	// 本轮完整枚举过的位置上，基线中已经不存在的条目要真的删掉——留着它们，
 	// 下一轮还会重复报同一条删除。
 	for p := range prev {
 		if _, ok := cur[p]; ok {
