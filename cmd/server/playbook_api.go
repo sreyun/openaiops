@@ -580,11 +580,13 @@ func (s *Server) handleRejectPlaybookExecution(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// execPickupTimeout bounds how long a summoned agent has to attach before we
+// declare a no-pickup. Covers a full long-poll cycle, busy-agent queueing, and
+// WAN/VPN jitter — 40s was too aggressive and caused false no-pickup retries.
+// 变量而非常量：waitAgentPickup 的分支要在测试里跑完整条路径，90s 的等待没法测。
+var execPickupTimeout = 90 * time.Second
+
 const (
-	// execPickupTimeout bounds how long a summoned agent has to attach before we
-	// declare a no-pickup. Covers a full long-poll cycle, busy-agent queueing, and
-	// WAN/VPN jitter — 40s was too aggressive and caused false no-pickup retries.
-	execPickupTimeout = 90 * time.Second
 	// playbookMaxAttempts is the total number of tries per step per host: 1 initial
 	// + retries. Only infrastructure-class failures (no-pickup/timeout/abnormal) are
 	// retried; a genuine non-zero command exit is never retried.

@@ -55,9 +55,50 @@ type termSession struct {
 	changeID       int64                      // linked approved change (audit glue)
 	incidentID     int64                      // linked incident loop (audit glue)
 	execID         int64                      // playbook execution id (exec mode); 0 = unrelated
+
+	// --- "Agent 到底接没接单" 的旁证（见 edge_proxy_diag.go）---
+	// agentUp 只在 tx 上行流的请求头到达时才关闭，而 nginx 默认的
+	// proxy_request_buffering 会把整个请求体收全了才转发上游 —— 命令跑完之前
+	// tx 根本不会到达服务端。下面两个信号走的是不受请求体缓冲影响的通道
+	// （alive 是小 GET，rx 是无请求体的流式 GET），用来区分"Agent 没接单"
+	// 与"Agent 接了单，但它的上行流卡在反代里"。
+	attachMu    sync.Mutex
+	rxOpen      int       // 当前挂着的 rx 流数量（交互式会话）
+	lastAliveAt time.Time // 最近一次 /agent/terminal/alive 心跳（exec 会话每 1.5s 一次）
 }
 
 func (s *termSession) markAgentUp() { s.upOnce.Do(func() { close(s.agentUp) }) }
+
+// markAgentAlive 记录一次 Agent 的会话存活心跳。
+func (s *termSession) markAgentAlive() {
+	s.attachMu.Lock()
+	s.lastAliveAt = time.Now()
+	s.attachMu.Unlock()
+}
+
+// markAgentRx 记录 rx 下行流的开合（+1 / -1）。
+func (s *termSession) markAgentRx(delta int) {
+	s.attachMu.Lock()
+	s.rxOpen += delta
+	if s.rxOpen < 0 {
+		s.rxOpen = 0
+	}
+	s.attachMu.Unlock()
+}
+
+// agentAttachStale 是心跳可以停多久还算"Agent 还在"。Agent 侧是 1.5s 一次，
+// 留出十倍余量以容忍一次网络抖动或一轮 GC。
+const agentAttachStale = 15 * time.Second
+
+// agentAttached 报告"Agent 确实接了这个会话并且还活着"——与 agentUp（tx 到达）无关。
+func (s *termSession) agentAttached() bool {
+	s.attachMu.Lock()
+	defer s.attachMu.Unlock()
+	if s.rxOpen > 0 {
+		return true
+	}
+	return !s.lastAliveAt.IsZero() && time.Since(s.lastAliveAt) < agentAttachStale
+}
 func (s *termSession) close() {
 	s.doneOnce.Do(func() {
 		close(s.done)
@@ -626,7 +667,13 @@ func (s *Server) serveTerminalWS(ws *wsConn, sess *termSession, hostID, hostname
 		select {
 		case <-sess.agentUp:
 		case <-time.After(35 * time.Second):
-			_ = ws.WriteBinary([]byte("\r\n\x1b[31m" + Tz("terminal.timeout") + "\x1b[0m\r\n" + Tz("terminal.timeout_hint_https") + "\r\n"))
+			hint := Tz("terminal.timeout_hint_https")
+			// Agent 把 rx 挂上来了、tx 却一直没到 —— 不是 Agent 的问题，是反代
+			// 在缓冲上行流。这里把矛头指对地方，否则运维会去重装 Agent。
+			if sess.agentAttached() {
+				hint = s.noteEdgeUpstreamBuffered(hostID, hostname)
+			}
+			_ = ws.WriteBinary([]byte("\r\n\x1b[31m" + Tz("terminal.timeout") + "\x1b[0m\r\n" + hint + "\r\n"))
 			sess.close()
 		case <-sess.done:
 		}
@@ -814,6 +861,9 @@ func (s *Server) handleAgentTermAlive(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": Tr(r, "auth.unauthorized")})
 		return
 	}
+	// 这一跳是"Agent 确实接了单并且还活着"的旁证：它是个不带请求体的小 GET，
+	// 不会被 proxy_request_buffering 憋住，因此在 tx 上行流被反代缓冲时依然照常到达。
+	sess.markAgentAlive()
 	select {
 	case <-sess.done:
 		writeJSON(w, http.StatusGone, map[string]any{"alive": false, "reason": "closed"})
@@ -834,6 +884,10 @@ func (s *Server) handleAgentTermRx(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": Tr(r, "auth.unauthorized")})
 		return
 	}
+	// 同上：rx 是无请求体的流式 GET，请求头一定会立刻到达上游，所以"rx 挂着"
+	// 同样是 Agent 已接单的旁证（交互式会话没有 alive 心跳，只有这一条）。
+	sess.markAgentRx(1)
+	defer sess.markAgentRx(-1)
 	flusher, _ := w.(http.Flusher)
 	w.Header().Set("Content-Type", "application/octet-stream")
 	// Tell nginx (and other X-Accel-aware proxies) NOT to buffer this response —

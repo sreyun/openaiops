@@ -1667,6 +1667,47 @@ function renderChartControls(currentRange, prefix) {
   ).join("");
 }
 
+/**
+ * 详情弹窗那台主机的在线态。主机列表还没到手时（从告警/Hyper-V 直接跳进来就可能）
+ * 返回 null —— 此时按"未知"处理，宁可把按钮显出来，也不要因为缓存没热而凭空少掉入口。
+ */
+function detailHostOnline() {
+  if (!DETAIL_HOST_ID) return null;
+  const list = (typeof LAST_HOSTS !== "undefined" && Array.isArray(LAST_HOSTS) && LAST_HOSTS.length)
+    ? LAST_HOSTS
+    : (Array.isArray(window._cachedHosts) ? window._cachedHosts : []);
+  const h = list.find(x => x && (x.id === DETAIL_HOST_ID || x.host_id === DETAIL_HOST_ID));
+  return h ? !!h.online : null;
+}
+
+/**
+ * 趋势弹窗右上角的远程动作：终端 / 桌面。
+ *
+ * 从概览点开一台机器看趋势，接下来十有八九就是要上去看一眼——没有这两个入口，用户得先关
+ * 掉弹窗、切到主机页、再在列表里把这台机器找出来。图标与主机卡片上的那两个按钮完全一致，
+ * 可见性规则也照抄（服务端开关 + 主机在线）：一个点了只会等 35 秒然后超时的按钮比没有更糟。
+ *
+ * 不关趋势弹窗：终端/桌面的遮罩在 DOM 里排在详情之后，天然盖在上面，Esc 也是一层层退
+ * （见 nav.js 的 Escape 处理），关掉终端就回到刚才那张图。
+ */
+function renderDetailRemoteActions() {
+  if (!DETAIL_HOST_ID || detailHostOnline() === false) return "";
+  const btn = (act, key, fallback, svg) =>
+    `<button type="button" class="chip-btn chip-icon-btn" data-detail-${act}
+      title="${esc(I18N.t(key, fallback))}" aria-label="${esc(I18N.t(key, fallback))}">${svg}</button>`;
+  const stroke = `viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"`;
+  let html = "";
+  if (typeof TERMINAL_ENABLED === "undefined" || TERMINAL_ENABLED) {
+    html += btn("term", "ui.remote_terminal", "远程终端",
+      `<svg ${stroke}><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>`);
+  }
+  if (typeof DESKTOP_ENABLED === "undefined" || DESKTOP_ENABLED) {
+    html += btn("desktop", "desktop.btn_title", "远程桌面（浏览器内推流）",
+      `<svg ${stroke}><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>`);
+  }
+  return html ? `<span class="chart-actions">${html}</span>` : "";
+}
+
 function renderDetailToolbar(from, to) {
   const f = (typeof toLocalDatetimeValue === "function") ? toLocalDatetimeValue(from) : "";
   const t = (typeof toLocalDatetimeValue === "function") ? toLocalDatetimeValue(to) : "";
@@ -1681,6 +1722,7 @@ function renderDetailToolbar(from, to) {
           <input type="datetime-local" id="detailCustomTo" class="dt-input" value="${t}">
           <button type="button" class="chip-btn primary" data-custom-apply>${I18N.t("time.custom_apply") || "应用"}</button>
         </span>
+        ${renderDetailRemoteActions()}
       </div>`;
 }
 
@@ -2413,6 +2455,15 @@ document.addEventListener("chart-forecast-toggle", (ev) => {
 });
 
 safeAddEventListener("detailBody", "click", e => {
+  // 趋势 → 远程终端 / 远程桌面。趋势弹窗不关：终端/桌面盖在它上面，退出后回到原来那张图。
+  if (e.target.closest("[data-detail-term]")) {
+    if (typeof openTerminal === "function") openTerminal(DETAIL_HOST_ID, DETAIL_HOST_NAME);
+    return;
+  }
+  if (e.target.closest("[data-detail-desktop]")) {
+    if (typeof openDesktop === "function") openDesktop(DETAIL_HOST_ID, DETAIL_HOST_NAME);
+    return;
+  }
   const en = e.target.closest(".chart-enlarge");
   if (en) {
     const id = en.dataset.chart;

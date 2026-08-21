@@ -31,6 +31,11 @@
 ```
 
 - **反向代理**：生产环境建议在服务端前放置 Nginx，由其终止 TLS、做访问限流与上游保护。
+  照抄仓库里的 [`deploy/nginx-aiops.conf`](../deploy/nginx-aiops.conf)，**别只写 `proxy_pass`**：
+  远程终端、远程桌面、端口转发、Agent 自动升级跑在 Agent 拨出的长连接/流式通道上，Nginx 的默认值
+  （不转发 `Upgrade`、双向缓冲、`proxy_read_timeout 60s`）恰好会把它们掐断，而症状极具欺骗性——
+  主机在线、指标正常，只有终端连不上、Agent 自动升级永远失败。逐条说明见
+  [USER_GUIDE.md 第六节](USER_GUIDE.md#六跨网络部署nginx-反代)。
 - **防火墙**：服务端仅暴露必要端口；Agent 通过出站连接上报，无需在服务端开放 Agent 入站端口。
 
 ---

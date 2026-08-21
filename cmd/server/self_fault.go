@@ -263,12 +263,21 @@ func (s *Server) handlePlatformFaults(w http.ResponseWriter, r *http.Request) {
 			open++
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	// 反代缓冲那条故障刻意不带 hostID（故障在边缘那一跳，不在某台主机上），但排障时
+	// 又需要知道"到底哪些机器被拖住了"。这里把按主机的判定一并给出，两者互补。
+	resp := map[string]any{
 		"faults":        list,
 		"count":         len(list),
 		"with_incident": open,
 		"threshold":     platformFaultIncidentThreshold,
-	})
+	}
+	if v := s.edgeDiag.snapshot(); len(v) > 0 {
+		if len(v) > limit {
+			v = v[:limit]
+		}
+		resp["edge_proxy"] = v
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // platformFaultSink 是给**拿不到 *Server** 的组件用的上报口（vmWriter、pgStore、

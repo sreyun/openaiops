@@ -261,10 +261,9 @@ func (s *Server) isHTTPS(r *http.Request) bool {
 // forwardedHTTPS reports whether the request reached the *edge* over TLS: either
 // directly, or at a reverse proxy that said so via X-Forwarded-Proto.
 //
-// 它只喂给 preferHTTPSPublicBase，也就是只对**隐式 80 端口**的地址生效：
-// http://panel.example.com → https://panel.example.com，而 http://10.0.0.9:8529
-// 这种显式端口原样保留。所以 trust_proxy 关着时"忽略转发头"的既有约定没有被推翻——
-// 变的只是"面板在 TLS 后面、地址又没写端口"这一种情形，那里 http 一定是错的。
+// 它只喂给 preferHTTPSPublicBase：既然边缘确实是 TLS，那么这个地址上的 http 一定
+// 是错的——无论它带不带端口。所以 trust_proxy 关着时"忽略转发头"的既有约定没有被
+// 推翻，变的只是"面板在 TLS 后面"这一种情形下的协议位（主机与端口都不动）。
 //
 // 与 isHTTPS 分开是刻意的：isHTTPS 决定 Cookie 的 Secure 位，那条路径继续受
 // trust_proxy 门禁保护，不在这次改动范围内。这里只用来**生成对外地址**（安装命令、
@@ -330,8 +329,7 @@ func (s *Server) serverURL(r *http.Request) string {
 	if forwardedHTTPS(r) {
 		raw = preferHTTPSPublicBase(raw)
 	}
-	// 端口补回必须在协议升级之后：先升级（隐式 80 → https），再补 8443，
-	// 否则 preferHTTPSPublicBase 看见显式端口就不升级了，会生成 http://host:8443。
+	// 端口补回必须在协议升级之后：先升级协议，再补被反代抹掉的 8443。
 	return strings.TrimRight(recoverEdgePort(raw, r), "/")
 }
 
@@ -463,23 +461,37 @@ func browserOriginPort(raw, host string) string {
 	return u.Port()
 }
 
-// preferHTTPSPublicBase upgrades http://host[/] (implicit :80) to https://host.
-// Explicit non-80 ports (lab :8529 etc.) are left alone.
+// preferHTTPSPublicBase upgrades http://host[:port] to https://host[:port].
+//
+// **只在已经确知边缘是 HTTPS 时调用**（唯二的调用点都在 forwardedHTTPS 之内）。
+// 端口原样保留，只有隐式/显式的 :80 会被去掉——80 不可能是 TLS 边缘的端口，而
+// https 的默认端口写出来只会让运维困惑。
+//
+// 早先这里是"显式非 80 端口一律不升级"，理由是别把实验室的 http://10.0.0.9:8529
+// 改成 https。但这个判断放错了位置：调用点已经保证边缘是 TLS，此时看到显式端口
+// 恰恰是**最需要升级**的一种部署——面板开在 https://a.bc.com:8443，nginx 按
+// `proxy_set_header Host $http_host`（端口保留）转发、trust_proxy 又没开，于是
+// scheme 停在 http、端口是 8443，两条判断各自都"对"，拼出来的却是
+// http://a.bc.com:8443 —— 一个只收 TLS 的端口上的明文地址。安装命令、install.sh
+// 里的 SERVER=、中继上游、OIDC 回调全部指向它，且**只在非标准端口上出现**：
+// 端口是 443 时 Host 里根本没有端口，隐式 80 分支照常升级，一切正常。
 func preferHTTPSPublicBase(raw string) string {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u == nil || !strings.EqualFold(u.Scheme, "http") {
 		return raw
 	}
-	if p := u.Port(); p != "" && p != "80" {
-		return raw
-	}
+	port := u.Port()
 	u.Scheme = "https"
 	// Hostname() 返回的 IPv6 字面量是不带方括号的，直接写回 Host 会拼出
 	// https://2001:db8::1 —— 再解析就是"端口非法"，整条地址作废。
-	if h := u.Hostname(); strings.Contains(h, ":") {
-		u.Host = "[" + h + "]"
+	host := u.Hostname()
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	if port == "" || port == "80" {
+		u.Host = host
 	} else {
-		u.Host = h
+		u.Host = host + ":" + port
 	}
 	u.RawQuery = ""
 	u.Fragment = ""

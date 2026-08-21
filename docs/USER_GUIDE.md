@@ -443,6 +443,7 @@ subjects:
 对应官网分组 **03 远程访问与审计**。
 
 **远程终端**：主机卡片一键打开浏览器直连终端，Agent 反向连接**免开入站端口**（被控端无需开放 22）。
+**趋势弹窗**（首页或主机页点开某台机器看曲线）右上角也有终端 / 桌面两个图标按钮，看完指标可直接上机器，不必再回列表里找它一遍；主机离线或该能力被关闭时按钮不出现。
 
 - **多标签**：可同时开多台主机/多个终端；**收起悬浮卡片**最小化到右下角，WebSocket 保持连接，点击展开恢复。
 - **完整 VT100 仿真**：`vim`/`top` 等全屏程序可用；窗口自适应；移动端虚拟键盘。
@@ -703,7 +704,7 @@ sni_dns_capture:
 
 ## 六、跨网络部署（Nginx 反代）
 
-用域名 + HTTPS 对外时走 Nginx 反代。普通监控走默认 HTTP 代理即可；**远程终端**用到 WebSocket 升级 + 长连接实时流，Nginx 默认不转发 `Upgrade` 头且会缓冲，会导致「指标正常、终端连不上」。需在配置中放行 WebSocket：
+用域名 + HTTPS 对外时走 Nginx 反代。普通监控走默认 HTTP 代理即可；但**远程终端、远程桌面、端口转发、Agent 自动升级**都跑在 Agent 拨出的长连接/流式通道上，Nginx 的默认值（不转发 `Upgrade`、双向缓冲、`proxy_read_timeout 60s`）恰好会把它们掐断，症状是「指标正常、终端连不上、Agent 自动升级永远失败」。完整示例见仓库里的 `deploy/nginx-aiops.conf`，最小必需配置：
 
 ```nginx
 # http {} 层，全局一次
@@ -723,7 +724,10 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Forwarded-Port  $server_port;   # 面板开在非标准端口（:8443）时必备
         proxy_read_timeout 3600s;      # 长连接：终端会话不被中断
-        proxy_buffering off;           # 关闭缓冲，实时流
+        proxy_send_timeout 3600s;
+        proxy_buffering off;           # 关闭下行缓冲，实时流
+        proxy_request_buffering off;   # 关闭上行缓冲 —— 少了这行 Agent 自动升级会一直失败
+        client_max_body_size 100m;     # 与服务端 bodyLimit 对齐
     }
 }
 ```
@@ -734,6 +738,12 @@ server {
 > `proxy_set_header Host`，nginx 默认发 `proxy_pass` 的目标），或改域名的同时没转发 `X-Forwarded-Host`。
 > 读接口是 GET，不过这一关，所以现象是「面板一切正常，一按保存就失败」。按上面的 `Host $http_host`
 > + `X-Forwarded-Host $http_host` 配置，或在设置里写死 `public_url` 即可。
+
+> **终端连不上 / Agent 自动升级一直失败，但主机在线、指标正常**：几乎一定是上面那两条缓冲开关没关。
+> Agent 的上行通道是一个「请求体持续不结束」的 POST，而 `proxy_request_buffering on`（Nginx 默认）
+> 的语义是**把请求体收全了再转发上游**——于是服务端在命令跑完前根本收不到它，判成「Agent 未接单」。
+> 服务端能认出这种情形：它会在系统日志里写清要加的那几行，并且**这一轮升级/剧本仍会跑完**，
+> 但交互式终端必须把配置改对才能用。
 
 > **非标准端口（如 `https://a.bc.com:8443`）**：`$host` 不带端口，少了 `X-Forwarded-Port` 服务端就只能看到 `a.bc.com`。
 > 面板会用地址栏的端口把安装命令补回来，安装脚本里的 `SERVER=` 也由命令里的 `?port=` 兜底；

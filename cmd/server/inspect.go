@@ -667,6 +667,54 @@ func (s *Server) execCommandOnHostSized(h *Host, command string, timeoutSec, max
 	return s.execCommandOnHostCtx(context.Background(), 0, h, command, timeoutSec, maxBytes)
 }
 
+// waitAgentPickup 等 Agent 把 tx 上行流挂上来（markAgentUp）。
+//
+// 这里原本是一句直白的 `case <-time.After(execPickupTimeout)` → "Agent 未接单"。
+// 它在一种很常见的部署下是错判：反向代理开着 nginx 默认的 proxy_request_buffering，
+// tx 那个"边跑边写"的请求体会被整包缓冲到命令结束才转发给上游，于是接单信号必然迟到，
+// 而 Agent 其实一直在正常执行。判死的代价是自动升级永远失败、且失败原因指向 Agent，
+// 运维照着这句话去查 Agent 只会白查——真正要改的是反代的四行配置。
+//
+// 所以超时不再直接判死，而是先问一句"Agent 到底在不在"：alive 心跳（exec 会话每 1.5s
+// 一次的小 GET）或挂着的 rx 流都不受请求体缓冲影响。心跳还在 → 认定是反代缓冲，记一条
+// 带修复方法的告警，并把等待延长到命令自己的预算上限——缓冲的请求体会在命令结束时整包
+// 到达，输出与退出码一个不少，这一次升级/剧本照常跑完。心跳没了 → 才是真的没接单。
+func (s *Server) waitAgentPickup(ctx context.Context, sess *termSession, h *Host, timeoutSec int) (execKind, error) {
+	start := time.Now()
+	// 确认 Agent 还活着之后，最多再按命令自身的预算等这么久。
+	hardStop := start.Add(execPickupTimeout + time.Duration(timeoutSec)*time.Second)
+	next := execPickupTimeout
+	buffered := false
+	for {
+		timer := time.NewTimer(next)
+		select {
+		case <-sess.agentUp:
+			timer.Stop()
+			return execOK, nil
+		case <-sess.done:
+			timer.Stop()
+			return execAbnormal, fmt.Errorf("%s", Tz("playbook.abnormal"))
+		case <-ctx.Done():
+			timer.Stop()
+			return execCancelled, fmt.Errorf("%s", "剧本已停止")
+		case <-timer.C:
+		}
+		if !sess.agentAttached() {
+			// 没有任何旁证：这才是真正意义上的"没接单"（离线、指纹不符、Agent 挂了）。
+			return execNoPickup, fmt.Errorf("%s", Tz("playbook.no_pickup"))
+		}
+		if !buffered {
+			buffered = true
+			s.noteEdgeUpstreamBuffered(h.ID, h.Hostname)
+		}
+		if time.Now().After(hardStop) {
+			return execNoPickup, edgeProxyBufferedError(h.Hostname, time.Since(start))
+		}
+		// 心跳还在，就按小步长继续复查——Agent 一旦掉线要马上收敛，不能干等到硬上限。
+		next = 5 * time.Second
+	}
+}
+
 // execCommandOnHostCtx runs a one-shot agent exec, honouring ctx cancellation and
 // tagging the session with execID so fleet cancel can abort it without host kill scripts.
 func (s *Server) execCommandOnHostCtx(ctx context.Context, execID int64, h *Host, command string, timeoutSec, maxBytes int) (string, execKind, error) {
@@ -687,14 +735,8 @@ func (s *Server) execCommandOnHostCtx(ctx context.Context, execID int64, h *Host
 	defer sess.close()
 	s.term.notifyAgent(h.ID, sess.id)
 
-	select {
-	case <-sess.agentUp:
-	case <-time.After(execPickupTimeout):
-		return "", execNoPickup, fmt.Errorf("%s", Tz("playbook.no_pickup"))
-	case <-sess.done:
-		return "", execAbnormal, fmt.Errorf("%s", Tz("playbook.abnormal"))
-	case <-ctx.Done():
-		return "", execCancelled, fmt.Errorf("%s", "剧本已停止")
+	if kind, err := s.waitAgentPickup(ctx, sess, h, timeoutSec); err != nil {
+		return "", kind, err
 	}
 
 	var output []byte

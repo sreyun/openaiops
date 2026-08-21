@@ -66,6 +66,7 @@ That is the tip-of-the-spear path: a **reverse-connect ops console**. Everything
 - [Capability map](#capability-map)
 - [Recent highlights](#recent-highlights)
 - [Install](#install)
+  - [Reverse proxy (Nginx) — read this before going public](#reverse-proxy-nginx--read-this-before-going-public)
 - [Recommended path](#recommended-path)
 - [Configuration](#configuration)
 - [Architecture](#architecture)
@@ -185,6 +186,64 @@ cp config.example.yaml config.yaml
 # Go 1.26+
 go build ./cmd/server ./cmd/agent
 ```
+
+### Reverse proxy (Nginx) — read this before going public
+
+The dashboard is ordinary HTTP, but **remote terminal, remote desktop, port forwarding and agent
+auto-update** ride on long-lived streaming channels the agent dials out (agents have no inbound
+port). Several nginx **defaults** break exactly those channels, and the symptom is misleading:
+**hosts online, metrics fine, settings save fine — yet the terminal never connects and agent
+auto-update always fails.**
+
+Use the full example in the repo: [`deploy/nginx-aiops.conf`](../deploy/nginx-aiops.conf). Minimum:
+
+```nginx
+# once, in http {}
+map $http_upgrade $connection_upgrade { default upgrade; '' close; }
+
+server {
+    listen 443 ssl;                      # a non-standard port such as 8443 is the same
+    server_name monitor.example.com;
+    client_max_body_size 100m;           # match the server body limit
+
+    location / {
+        proxy_pass http://127.0.0.1:8529;
+        proxy_http_version 1.1;
+
+        # address passthrough: drives install commands + write-request origin checks
+        proxy_set_header Host              $http_host;   # $http_host keeps the port, $host drops it
+        proxy_set_header X-Forwarded-Host  $http_host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Port  $server_port; # required on non-standard ports
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+
+        # required for terminal / desktop / auto-update — all four
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_buffering         off;
+        proxy_request_buffering off;     # without this, agent auto-update fails forever
+        proxy_read_timeout  3600s;
+        proxy_send_timeout  3600s;
+    }
+}
+```
+
+| Missing | Symptom |
+|---|---|
+| `proxy_request_buffering off` | the agent's upstream is held until the command ends → **auto-update / playbooks fail as "agent did not pick up"**, terminal never connects |
+| `proxy_buffering off` | terminal/desktop output stutters; SSE AI answers arrive only at the end |
+| default `proxy_read_timeout 60s` | terminal sessions and long polls are cut periodically |
+| `Upgrade` / `Connection` | terminal WebSocket cannot connect |
+| `Host $host` (port dropped) or no `X-Forwarded-Host` | writes fail with a 403 origin check; install command points at the wrong port |
+| `X-Forwarded-Port` | on `:8443`-style ports the generated `SERVER=` loses the port and agents cannot register |
+
+> `X-Real-IP` / `X-Forwarded-For` are ignored by default (anti-spoofing). Set
+> `"trust_proxy": true` in `server_config.json` once the panel is only reachable through a trusted
+> proxy. Fallback for any address confusion: pin `public_url` (or `AIOPS_PUBLIC_URL`).
+>
+> Self-check: when the proxy really is buffering the upstream, the server detects it, writes the
+> exact directives to add into the system log, and still finishes that upgrade/playbook run.
 
 Details: [INSTALL_EN.md](INSTALL_EN.md) · [DEPLOY_GUIDE_EN.md](DEPLOY_GUIDE_EN.md)
 

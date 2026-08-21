@@ -255,6 +255,8 @@
   "playbook.timeout": "執行逾時",
   "playbook.abnormal": "命令未正常結束（Agent 中斷或版本過舊）",
   "playbook.no_pickup": "Agent 未接單（未回應工作階段召喚）",
+  "proxy.upstream_buffered": "反向代理把 Agent 的上行流緩衝住了：%s 上的 Agent 已接單並在執行，但它的輸出流要等指令結束才會到達伺服器端。遠端終端因此連不上，Agent 自動升級會被誤判為「未接單」。請在反向代理（nginx）的該站台 location 裡加上：%s（完整範例見 deploy/nginx-aiops.conf）。",
+  "proxy.upstream_buffered_timeout": "%s 上的 Agent 已接單並保持心跳，但等了 %d 秒仍未收到它的上行流——反向代理把請求主體緩衝住了。請在反向代理（nginx）的該站台 location 裡加上：%s（完整範例見 deploy/nginx-aiops.conf）。",
   "playbook.retry_recovered": "（第 %d 次嘗試後成功）",
   "playbook.attempts_failed": "（重試 %d 次後仍失敗）",
   "playbook.scheduler_actor": "定時任務",

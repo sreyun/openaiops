@@ -1809,6 +1809,11 @@ svg.sparkline{width:100%; height:46px; display:block}
 /* ---------- 趋势图交互 ---------- */
 .chart-controls{display:flex; gap:8px; margin-bottom:18px; padding:4px 2px 10px; flex-wrap:wrap; align-items:center;
   position:sticky; top:0; z-index:6; background:var(--panel)}
+/* 趋势工具栏右端的远程动作（终端/桌面）：图标按钮，与主机卡片上的那两个同形。
+   margin-left:auto 把它们推到右端；换行时整组一起走，不会拆散。 */
+.chart-actions{display:inline-flex; align-items:center; gap:6px; margin-left:auto}
+.chip-icon-btn{display:inline-flex; align-items:center; justify-content:center; padding:5px 9px}
+.chip-icon-btn svg{width:15px; height:15px; display:block}
 .chip-select,.fc-model-sel{
   appearance:none; -webkit-appearance:none;
   background:var(--panel2); border:1px solid var(--line2); color:var(--muted);

@@ -42,8 +42,13 @@ func TestServerURLFollowsBrowser(t *testing.T) {
 	// localhost (predictable) — the admin uses a real address or sets public_url.
 	check("localhost stays localhost", "localhost:8529", "", "", "http://localhost:8529")
 	check("loopback stays loopback (no container IP)", "127.0.0.1:8529", "", "", "http://127.0.0.1:8529")
-	// Without trust_proxy, forged X-Forwarded-* must be ignored.
-	check("xf ignored without trust_proxy", "172.18.0.4:8529", "aiops.example.com", "https", "http://172.18.0.4:8529")
+	// Without trust_proxy, a forged X-Forwarded-Host must not move the install
+	// command to another host — 主机名/端口一律来自 r.Host。
+	// 协议位是唯一的例外（见 forwardedHTTPS 的注释）：X-Forwarded-Proto 不挂
+	// trust_proxy 门禁，因为伪造它只能把**伪造者自己那一次**的安装命令改成 https，
+	// 而认它能救回"TLS 在 nginx 上终止、r.TLS 永远是 nil"的正常部署。
+	check("xf host ignored without trust_proxy", "172.18.0.4:8529", "aiops.example.com", "https", "https://172.18.0.4:8529")
+	check("no https hint at all → 原样 http", "172.18.0.4:8529", "aiops.example.com", "", "http://172.18.0.4:8529")
 
 	srv.cfg.mu.Lock()
 	srv.cfg.cfg.TrustProxy = true
@@ -85,8 +90,16 @@ func TestPreferHTTPSPublicBase(t *testing.T) {
 	if got := preferHTTPSPublicBase("http://aiops.example.com"); got != "https://aiops.example.com" {
 		t.Fatalf("got %q", got)
 	}
-	if got := preferHTTPSPublicBase("http://192.168.1.10:8529"); got != "http://192.168.1.10:8529" {
-		t.Fatalf("lab port must stay http: %q", got)
+	// 显式端口必须保留，协议照样升级：调用点已经确知边缘是 TLS
+	// （见 preferHTTPSPublicBase 的注释），此时 http://host:8443 一定是错的。
+	if got := preferHTTPSPublicBase("http://192.168.1.10:8529"); got != "https://192.168.1.10:8529" {
+		t.Fatalf("显式端口要保留、协议要升级: %q", got)
+	}
+	if got := preferHTTPSPublicBase("http://a.bc.com:80"); got != "https://a.bc.com" {
+		t.Fatalf("显式 :80 是 http 默认端口，升级后应去掉: %q", got)
+	}
+	if got := preferHTTPSPublicBase("http://[2001:db8::1]:8443"); got != "https://[2001:db8::1]:8443" {
+		t.Fatalf("ipv6 带端口: %q", got)
 	}
 	if got := preferHTTPSPublicBase("https://aiops.example.com"); got != "https://aiops.example.com" {
 		t.Fatalf("already https: %q", got)
@@ -305,4 +318,49 @@ func TestInstallInfoReportsPublicURLFixed(t *testing.T) {
 		srv, _ := newTestServer(t)
 		check(t, srv, true)
 	})
+}
+
+
+// 面板开在 https://a.bc.com:8443，nginx 用 `proxy_set_header Host $http_host`
+// （端口**保留**）转发、TLS 在 nginx 上终止、trust_proxy 没开。
+//
+// 这一组的每一步单看都"对"：r.TLS 是 nil 所以 scheme 只能是 http；trust_proxy 关着
+// 所以 X-Forwarded-Proto 不参与选 scheme；Host 里有端口所以不需要补端口。拼起来却是
+// http://a.bc.com:8443 —— 一个只收 TLS 的端口上的明文地址：安装命令 curl 不通、
+// install.sh 里的 SERVER= 让 Agent 注册不上、中继上游直接 EOF。
+//
+// 而端口是 443 时 Host 里根本没有端口，走的是隐式 80 那条分支，一切正常——
+// 这就是现场"常规 80/443 没问题，一换成 :8443 就出事"的由来。
+func TestServerURLUpgradesSchemeWithExplicitPortBehindTLSProxy(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	for _, path := range []string{"/api/v1/install/info", "/install.sh"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Host = "a.bc.com:8443" // proxy_set_header Host $http_host
+		req.Header.Set("X-Forwarded-Proto", "https")
+		if got := srv.serverURL(req); got != "https://a.bc.com:8443" {
+			t.Fatalf("%s: serverURL = %q, want https://a.bc.com:8443", path, got)
+		}
+	}
+
+	// public_url 里写成 http 的同一种笔误，也要在边缘是 TLS 时被纠正。
+	srv.cfg.mu.Lock()
+	srv.cfg.cfg.PublicURL = "http://a.bc.com:8443"
+	srv.cfg.mu.Unlock()
+	req := httptest.NewRequest(http.MethodGet, "/install.sh", nil)
+	req.Host = "a.bc.com:8443"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	if got := srv.serverURL(req); got != "https://a.bc.com:8443" {
+		t.Fatalf("public_url 带端口的 http 笔误未纠正：%q", got)
+	}
+
+	// 没有任何 HTTPS 线索时一律不动：实验室里直连的 http://10.0.0.9:8529 还是 http。
+	srv.cfg.mu.Lock()
+	srv.cfg.cfg.PublicURL = ""
+	srv.cfg.mu.Unlock()
+	plain := httptest.NewRequest(http.MethodGet, "/install.sh", nil)
+	plain.Host = "10.0.0.9:8529"
+	if got := srv.serverURL(plain); got != "http://10.0.0.9:8529" {
+		t.Fatalf("没有 TLS 线索就不该升级协议：%q", got)
+	}
 }

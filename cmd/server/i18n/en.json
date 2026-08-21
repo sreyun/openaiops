@@ -257,6 +257,8 @@
   "playbook.timeout": "Execution timed out",
   "playbook.abnormal": "Command did not finish normally (Agent interrupted or version too old)",
   "playbook.no_pickup": "Agent did not pick up the session (no response to the summon)",
+  "proxy.upstream_buffered": "The reverse proxy is buffering the agent's upstream: the agent on %s picked up the session and is running, but its output stream only reaches the server once the command finishes. Remote terminal cannot connect and agent auto-update is misread as \"not picked up\". Add to this site's location block in nginx: %s (full example: deploy/nginx-aiops.conf).",
+  "proxy.upstream_buffered_timeout": "The agent on %s picked up the session and keeps heartbeating, but its upstream never arrived after %d seconds — the reverse proxy is buffering the request body. Add to this site's location block in nginx: %s (full example: deploy/nginx-aiops.conf).",
   "playbook.retry_recovered": "(recovered on attempt %d)",
   "playbook.attempts_failed": "(still failing after %d attempts)",
   "playbook.scheduler_actor": "Scheduler",
