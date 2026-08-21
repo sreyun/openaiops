@@ -52,7 +52,16 @@ func resourceMatchScore(query string, fields ...string) int {
 	return best
 }
 
-func (s *Server) searchResources(query string, limit int) []ResourceSearchResult {
+// 全局搜索必须遵守主机级 RBAC。
+//
+// 这里原来完全没做授权过滤：一个被限定在某个主机组/标签里的账号，在搜索框里敲两个字符，
+// 就能拿到**全量**主机名、IP、虚拟机名、容器名，以及硬件的厂商、型号、序列号、资产标签，
+// 而且每条还附带 view/ref 可以直接跳过去。平台其它读接口（主机列表、告警、容器、Hyper-V）
+// 一律走 filterHostsForUser / requireHostAccess，唯独搜索这条路是敞开的——
+// 等于给受限账号留了一个绕过主机授权的资产清单出口。
+//
+// 与 filterHostsForUser 保持同一套判定：解析不出用户、未设限、管理员，三种情况都不过滤。
+func (s *Server) searchResources(r *http.Request, query string, limit int) []ResourceSearchResult {
 	query = strings.TrimSpace(query)
 	if query == "" {
 		return []ResourceSearchResult{}
@@ -64,10 +73,24 @@ func (s *Server) searchResources(query string, limit int) []ResourceSearchResult
 		limit = 100
 	}
 
+	scopedUser, hasUser := s.currentUser(r)
+	scoped := hasUser && scopedUser.hostScopeRestricted() && roleRank(scopedUser.Role) < roleRank(RoleAdmin)
+	allowHost := func(hostID string) bool {
+		if !scoped {
+			return true
+		}
+		return s.userCanAccessHost(scopedUser, hostID)
+	}
+
 	matches := make([]scoredResourceResult, 0, limit)
 	seen := map[string]bool{}
 	add := func(result ResourceSearchResult, fields ...string) {
 		if seen[result.Ref] {
+			return
+		}
+		// 主机维度的资源（主机 / 虚拟机 / 容器 / 硬件）都带 HostID，越权的直接不进候选集；
+		// 集群、业务服务、数据源是平台级配置，不按主机授权切分。
+		if result.HostID != "" && !allowHost(result.HostID) {
 			return
 		}
 		if score := resourceMatchScore(query, fields...); score > 0 {
@@ -194,7 +217,7 @@ func (s *Server) searchResources(query string, limit int) []ResourceSearchResult
 		for _, svc := range s.cfg.BusinessServices() {
 			add(ResourceSearchResult{
 				Type: "service", Name: svc.Name, Ref: "service:" + svc.ID,
-				View: "sre", Subtitle: firstNonEmpty(svc.Env, svc.Owner),
+				View: "sre", Subtitle: firstNonEmptyOrDash(svc.Env, svc.Owner),
 			}, svc.Name, svc.ID, svc.Owner, svc.Env, strings.Join(svc.HostIDs, " "))
 		}
 		for _, ds := range s.cfg.ListDataSources() {
@@ -231,7 +254,7 @@ func (s *Server) handleResourceSearch(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
-	results := s.searchResources(r.URL.Query().Get("q"), limit)
+	results := s.searchResources(r, r.URL.Query().Get("q"), limit)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"query":   strings.TrimSpace(r.URL.Query().Get("q")),
 		"count":   len(results),

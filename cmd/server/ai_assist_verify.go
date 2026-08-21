@@ -96,7 +96,7 @@ func (s *Server) verifyAssistQuery(task, answer, contextText, datasourceID strin
 		if err != nil {
 			return assistVerifyResult{OK: false, Task: task, Lang: lang, Query: truncateRun(code, 200), Error: err.Error()}
 		}
-		return assistVerifyResult{OK: true, Task: task, Lang: firstNonEmpty(lang, "promql"), Query: truncateRun(code, 200), Summary: truncateRun(out, 240)}
+		return assistVerifyResult{OK: true, Task: task, Lang: firstNonEmptyOrDash(lang, "promql"), Query: truncateRun(code, 200), Summary: truncateRun(out, 240)}
 	case "logql":
 		if ds.Type != "loki" {
 			return assistVerifyResult{OK: false, Task: task, Error: "数据源类型不是 Loki"}
@@ -105,7 +105,7 @@ func (s *Server) verifyAssistQuery(task, answer, contextText, datasourceID strin
 		if err != nil {
 			return assistVerifyResult{OK: false, Task: task, Lang: lang, Query: truncateRun(code, 200), Error: err.Error()}
 		}
-		return assistVerifyResult{OK: true, Task: task, Lang: firstNonEmpty(lang, "logql"), Query: truncateRun(code, 200), Summary: truncateRun(out, 240)}
+		return assistVerifyResult{OK: true, Task: task, Lang: firstNonEmptyOrDash(lang, "logql"), Query: truncateRun(code, 200), Summary: truncateRun(out, 240)}
 	case "pgsql", "sqlql":
 		if !isSQLDataSourceType(ds.Type) {
 			return assistVerifyResult{OK: false, Task: task, Error: "数据源类型不是 SQL"}
@@ -122,10 +122,10 @@ func (s *Server) verifyAssistQuery(task, answer, contextText, datasourceID strin
 			cols, rows, err = mysqlQueryReadOnly(c, code, 5)
 		}
 		if err != nil {
-			return assistVerifyResult{OK: false, Task: task, Lang: firstNonEmpty(lang, "sql"), Query: truncateRun(code, 200), Error: err.Error()}
+			return assistVerifyResult{OK: false, Task: task, Lang: firstNonEmptyOrDash(lang, "sql"), Query: truncateRun(code, 200), Error: err.Error()}
 		}
 		return assistVerifyResult{
-			OK: true, Task: task, Lang: firstNonEmpty(lang, "sql"), Query: truncateRun(code, 200),
+			OK: true, Task: task, Lang: firstNonEmptyOrDash(lang, "sql"), Query: truncateRun(code, 200),
 			Summary: fmt.Sprintf("验证通过：%d 列 · %d 行", len(cols), len(rows)),
 		}
 	default:

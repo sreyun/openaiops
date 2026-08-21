@@ -674,7 +674,7 @@ func (s *Server) handleIncidentEmergencyChange(w http.ResponseWriter, r *http.Re
 		hosts = []string{inc.HostID}
 	}
 	rec, err := s.changes.Upsert(ChangeRecord{
-		Title: title, Summary: firstNonEmpty(in.Summary, inc.Title),
+		Title: title, Summary: firstNonEmptyOrDash(in.Summary, inc.Title),
 		Kind: "emergency", Risk: "high", Status: ChangePendingApproval,
 		HostIDs: hosts, LinkedIncidentIDs: []int64{inc.ID},
 		Links: mergeOpsLinks(inc.Links, incidentOpsLink(inc.ID, "caused_by")),
@@ -1090,7 +1090,7 @@ func (s *Server) handleCreateTicket(w http.ResponseWriter, r *http.Request) {
 			if in.Description == "" {
 				in.Description = item.Description
 			}
-			in.Source = firstNonEmpty(in.Source, "manual")
+			in.Source = firstNonEmptyOrDash(in.Source, "manual")
 		}
 	}
 	tk, err := s.tickets.Create(in, s.actorName(r))
@@ -1280,12 +1280,16 @@ func (s *Server) handleSearchLogs(w http.ResponseWriter, r *http.Request) {
 			pageSize = v
 		}
 	}
-	items, total := s.logs.searchPage(q.Get("host"), q.Get("level"), q.Get("q"), since, page, pageSize)
+	// 日志正文里常常带着路径、账号、报错堆栈甚至业务数据，所以它和主机列表一样受
+	// 主机级授权约束。之前这里没有任何过滤：一个被限定在某个主机组里的账号，
+	// 不传 host 就能拿到全平台的日志，传别人的 host 也照给——绕开主机 RBAC 的一个口子。
+	allow := s.hostLogVisibility(r)
+	items, total := s.logs.searchPage(q.Get("host"), q.Get("level"), q.Get("q"), since, page, pageSize, allow)
 	pages := 1
 	if total > 0 {
 		pages = (total + pageSize - 1) / pageSize
 	}
-	stats := s.logs.searchStats(q.Get("host"), q.Get("level"), q.Get("q"), since)
+	stats := s.logs.searchStats(q.Get("host"), q.Get("level"), q.Get("q"), since, allow)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items":     items,
 		"total":     total,
@@ -2944,7 +2948,7 @@ func (s *Server) handleDiagnoseIncident(w http.ResponseWriter, r *http.Request) 
 			if diagnosisEvidenceOK(cites) || s.shouldRememberUnverifiedAIOutput() {
 				go s.rememberFromIncident(inc, "diagnosis",
 					fmt.Sprintf("【诊断】事件#%d %s\n标签：类型:%s · 级别:%s · 主机:%s\n%s",
-						inc.ID, inc.Title, inc.Type, inc.Severity, firstNonEmpty(inc.Hostname, inc.HostID), full),
+						inc.ID, inc.Title, inc.Type, inc.Severity, firstNonEmptyOrDash(inc.Hostname, inc.HostID), full),
 					diagnosisEvidenceOK(cites))
 			}
 		}
@@ -3764,7 +3768,7 @@ func (s *Server) retrieveMemoryWithCitations(preferKind, userMsg string, topK in
 			scopeTag = " · 已验证"
 		}
 		if h.ServiceID != "" || h.Category != "" {
-			scopeTag += " · 作用域:" + firstNonEmpty(h.ServiceID, h.Category)
+			scopeTag += " · 作用域:" + firstNonEmptyOrDash(h.ServiceID, h.Category)
 		}
 		fmt.Fprintf(&b, "[%d] (%s · %s%s) %s\n", i+1, label, src, scopeTag, content)
 		title := trimLine(content, 60)

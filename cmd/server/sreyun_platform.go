@@ -64,7 +64,7 @@ func (h *SreyunCore) execQueryPlatformFaults(args map[string]any) (string, error
 		}
 		out = append(out, row{
 			Component: f.Component, Kind: f.Kind, Level: f.Level,
-			Host:  firstNonEmpty(f.Hostname, f.HostID),
+			Host:  firstNonEmptyOrDash(f.Hostname, f.HostID),
 			Count: f.Count,
 			// 时间给人读的格式：模型对 unix 秒的推理经常出错，而这里的相对先后是关键信息。
 			FirstAt: time.Unix(f.FirstAt, 0).Format("2006-01-02 15:04:05"),

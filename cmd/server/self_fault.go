@@ -228,7 +228,7 @@ func (s *Server) raisePlatformFaultIncident(f PlatformFault) {
 		time.Unix(f.FirstAt, 0).Format("2006-01-02 15:04:05"),
 		time.Unix(f.LastAt, 0).Format("2006-01-02 15:04:05"))
 	if f.HostID != "" {
-		fmt.Fprintf(&b, "主机：%s（%s）\n", firstNonEmpty(f.Hostname, f.HostID), f.HostID)
+		fmt.Fprintf(&b, "主机：%s（%s）\n", firstNonEmptyOrDash(f.Hostname, f.HostID), f.HostID)
 	}
 	fmt.Fprintf(&b, "\n【原文】\n%s\n", f.Message)
 	if f.Evidence != "" {

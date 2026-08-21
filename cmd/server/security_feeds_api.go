@@ -194,7 +194,8 @@ func (s *Server) handleSecurityFeedTest(w http.ResponseWriter, r *http.Request) 
 // checks often but acts rarely, and never at boot: a restart loop must not turn
 // into a download loop.
 func (s *Server) startSecurityFeedScheduler() {
-	go func() {
+	// 情报源同步同理：一次坏数据不该让漏洞库从此不再更新。
+	go superviseLoop("security-feed-scheduler", func() {
 		t := time.NewTicker(15 * time.Minute)
 		defer t.Stop()
 		for range t.C {
@@ -215,7 +216,7 @@ func (s *Server) startSecurityFeedScheduler() {
 				Message: "按计划更新安全情报源",
 			})
 		}
-	}()
+	})
 }
 
 // feedSourcePath exposes an installed source directory to the consumers

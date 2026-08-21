@@ -252,8 +252,8 @@ func countContainerStates(containers any) (running, exited, other int, samples [
 			other++
 			continue
 		}
-		state := strings.ToLower(firstNonEmpty(fmt.Sprint(m["state"]), fmt.Sprint(m["Status"]), fmt.Sprint(m["status"])))
-		name := strings.TrimSpace(firstNonEmpty(fmt.Sprint(m["name"]), fmt.Sprint(m["Names"]), fmt.Sprint(m["id"]), fmt.Sprint(m["Id"])))
+		state := strings.ToLower(firstNonEmptyOrDash(fmt.Sprint(m["state"]), fmt.Sprint(m["Status"]), fmt.Sprint(m["status"])))
+		name := strings.TrimSpace(firstNonEmptyOrDash(fmt.Sprint(m["name"]), fmt.Sprint(m["Names"]), fmt.Sprint(m["id"]), fmt.Sprint(m["Id"])))
 		if name != "" && name != "<nil>" && len(samples) < 5 {
 			samples = append(samples, name)
 		}
@@ -281,7 +281,7 @@ func filterContainersPage(containers any, status string, limit, offset int) (pag
 		if !ok {
 			continue
 		}
-		st := strings.ToLower(firstNonEmpty(fmt.Sprint(m["state"]), fmt.Sprint(m["Status"]), fmt.Sprint(m["status"])))
+		st := strings.ToLower(firstNonEmptyOrDash(fmt.Sprint(m["state"]), fmt.Sprint(m["Status"]), fmt.Sprint(m["status"])))
 		switch status {
 		case "", "all":
 			filtered = append(filtered, compactContainerRow(m))
@@ -327,11 +327,11 @@ func filterContainersPage(containers any, status string, limit, offset int) (pag
 }
 
 func compactContainerRow(m map[string]any) map[string]any {
-	name := firstNonEmpty(fmt.Sprint(m["name"]), fmt.Sprint(m["Names"]))
-	id := firstNonEmpty(fmt.Sprint(m["id"]), fmt.Sprint(m["Id"]), fmt.Sprint(m["ID"]))
-	state := firstNonEmpty(fmt.Sprint(m["state"]), fmt.Sprint(m["Status"]), fmt.Sprint(m["status"]))
-	image := firstNonEmpty(fmt.Sprint(m["image"]), fmt.Sprint(m["Image"]))
-	created := firstNonEmpty(fmt.Sprint(m["created"]), fmt.Sprint(m["Created"]), fmt.Sprint(m["CreatedAt"]))
+	name := firstNonEmptyOrDash(fmt.Sprint(m["name"]), fmt.Sprint(m["Names"]))
+	id := firstNonEmptyOrDash(fmt.Sprint(m["id"]), fmt.Sprint(m["Id"]), fmt.Sprint(m["ID"]))
+	state := firstNonEmptyOrDash(fmt.Sprint(m["state"]), fmt.Sprint(m["Status"]), fmt.Sprint(m["status"]))
+	image := firstNonEmptyOrDash(fmt.Sprint(m["image"]), fmt.Sprint(m["Image"]))
+	created := firstNonEmptyOrDash(fmt.Sprint(m["created"]), fmt.Sprint(m["Created"]), fmt.Sprint(m["CreatedAt"]))
 	out := map[string]any{}
 	if name != "" && name != "<nil>" {
 		out["name"] = name
@@ -357,10 +357,10 @@ func compactContainerRow(m map[string]any) map[string]any {
 	} else if p := m["Ports"]; p != nil {
 		out["ports"] = p
 	}
-	if proj := firstNonEmpty(fmt.Sprint(m["compose_project"]), fmt.Sprint(m["ComposeProject"])); proj != "" && proj != "<nil>" {
+	if proj := firstNonEmptyOrDash(fmt.Sprint(m["compose_project"]), fmt.Sprint(m["ComposeProject"])); proj != "" && proj != "<nil>" {
 		out["compose_project"] = proj
 	}
-	if svc := firstNonEmpty(fmt.Sprint(m["compose_service"]), fmt.Sprint(m["ComposeService"])); svc != "" && svc != "<nil>" {
+	if svc := firstNonEmptyOrDash(fmt.Sprint(m["compose_service"]), fmt.Sprint(m["ComposeService"])); svc != "" && svc != "<nil>" {
 		out["compose_service"] = svc
 	}
 	return out
@@ -440,7 +440,7 @@ func (h *SreyunCore) execQueryContainers(args map[string]any) (string, error) {
 		"runtime":         inv["runtime"],
 		"container_count": inv["container_count"],
 		"updated_at":      inv["updated_at"],
-		"status_filter":   firstNonEmpty(strings.ToLower(strings.TrimSpace(status)), "all"),
+		"status_filter":   firstNonEmptyOrDash(strings.ToLower(strings.TrimSpace(status)), "all"),
 		"limit":           limit,
 		"offset":          offset,
 		"total_matched":   total,

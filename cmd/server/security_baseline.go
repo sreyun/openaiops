@@ -94,7 +94,7 @@ func diffWebFindings(prev, cur []WebFinding, prevScanID string) *ScanBaselineDif
 		if old, ok := prevMap[k]; !ok {
 			out.Added++
 			if len(out.SamplesAdded) < 5 {
-				out.SamplesAdded = append(out.SamplesAdded, truncateRun(firstNonEmpty(f.Name, f.TemplateID), 80))
+				out.SamplesAdded = append(out.SamplesAdded, truncateRun(firstNonEmptyOrDash(f.Name, f.TemplateID), 80))
 			}
 		} else if webSeverityRank(f.Severity) > webSeverityRank(old.Severity) {
 			out.Worsened++
@@ -106,7 +106,7 @@ func diffWebFindings(prev, cur []WebFinding, prevScanID string) *ScanBaselineDif
 		if _, ok := curMap[k]; !ok {
 			out.Removed++
 			if len(out.SamplesRemoved) < 5 {
-				out.SamplesRemoved = append(out.SamplesRemoved, truncateRun(firstNonEmpty(f.Name, f.TemplateID), 80))
+				out.SamplesRemoved = append(out.SamplesRemoved, truncateRun(firstNonEmptyOrDash(f.Name, f.TemplateID), 80))
 			}
 		}
 	}

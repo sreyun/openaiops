@@ -47,7 +47,7 @@ func (s *Server) maybeHostSecurityAISummary(scan *HostScanResult) {
 	}
 	scanID := scan.ID
 	digest := buildHostScanAIContext(scan)
-	go func() {
+	safeGo("host-security-ai-summary", func() {
 		text, err := s.runAssistTaskSyncAs(context.Background(), "host_security_diagnosis", aiActorAutoScan, "", digest)
 		if err != nil {
 			slog.Info("host security AI summary skipped", "scan_id", scanID, "err", err.Error())
@@ -72,7 +72,7 @@ func (s *Server) maybeHostSecurityAISummary(scan *HostScanResult) {
 				return
 			}
 		}
-	}()
+	})
 }
 
 func (s *Server) maybeWebSecurityAISummary(scan *WebScanResult) {
@@ -88,7 +88,7 @@ func (s *Server) maybeWebSecurityAISummary(scan *WebScanResult) {
 	}
 	scanID := scan.ID
 	digest := buildWebScanAIContext(scan)
-	go func() {
+	safeGo("web-security-ai-summary", func() {
 		text, err := s.runAssistTaskSyncAs(context.Background(), "web_vuln_diagnosis", aiActorAutoScan, "", digest)
 		if err != nil {
 			slog.Info("web security AI summary skipped", "scan_id", scanID, "err", err.Error())
@@ -112,13 +112,13 @@ func (s *Server) maybeWebSecurityAISummary(scan *WebScanResult) {
 				return
 			}
 		}
-	}()
+	})
 }
 
 func buildHostScanAIContext(scan *HostScanResult) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "主机：%s (%s)\n风险：%s 评分：%d\n防火墙：%s CVE：%d 开放端口：%d\n",
-		firstNonEmpty(scan.Hostname, scan.HostID), scan.HostID, scan.Risk, scan.Score,
+		firstNonEmptyOrDash(scan.Hostname, scan.HostID), scan.HostID, scan.Risk, scan.Score,
 		scan.Firewall, scan.CVECount, scan.PortCount)
 	if hint := formatBaselineDiffHint(scan.BaselineDiff); hint != "" {
 		fmt.Fprintf(&b, "基线对比：%s\n", hint)
@@ -129,7 +129,7 @@ func buildHostScanAIContext(scan *HostScanResult) string {
 		if f.Level != "critical" && f.Level != "high" && f.Level != "medium" {
 			continue
 		}
-		fmt.Fprintf(&b, "- [%s/%s] %s %s\n", f.Level, f.Category, f.Title, firstNonEmpty(f.CVE, f.Package))
+		fmt.Fprintf(&b, "- [%s/%s] %s %s\n", f.Level, f.Category, f.Title, firstNonEmptyOrDash(f.CVE, f.Package))
 		n++
 		if n >= 25 {
 			break
@@ -140,7 +140,7 @@ func buildHostScanAIContext(scan *HostScanResult) string {
 
 func buildWebScanAIContext(scan *WebScanResult) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "目标：%s %s\n摘要：%v\n", firstNonEmpty(scan.TargetName, scan.TargetID), scan.BaseURL, scan.Summary)
+	fmt.Fprintf(&b, "目标：%s %s\n摘要：%v\n", firstNonEmptyOrDash(scan.TargetName, scan.TargetID), scan.BaseURL, scan.Summary)
 	if hint := formatBaselineDiffHint(scan.BaselineDiff); hint != "" {
 		fmt.Fprintf(&b, "基线对比：%s\n", hint)
 	}
@@ -150,7 +150,7 @@ func buildWebScanAIContext(scan *WebScanResult) string {
 		if sev != "critical" && sev != "high" && sev != "medium" {
 			continue
 		}
-		fmt.Fprintf(&b, "- [%s] %s (%s) %s\n", f.Severity, firstNonEmpty(f.Name, f.TemplateID), f.TemplateID, firstNonEmpty(f.URL, f.MatchedAt))
+		fmt.Fprintf(&b, "- [%s] %s (%s) %s\n", f.Severity, firstNonEmptyOrDash(f.Name, f.TemplateID), f.TemplateID, firstNonEmptyOrDash(f.URL, f.MatchedAt))
 		n++
 		if n >= 25 {
 			break

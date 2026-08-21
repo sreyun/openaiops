@@ -1074,7 +1074,7 @@ func (m *hostSecurityManager) reapStuckLocked(timeoutSec int) int {
 			// 其实是每次都跑到一半被掐掉。反复超时说明预算或目标规模不对，属于要人
 			// 处理的一类；进归口后连续 3 次同因就会开事件。
 			reportFault("scan", "host_security_timeout", "warning", sc.HostID,
-				fmt.Sprintf("主机安全扫描「%s」超时中断（超过 %ds），本次结果作废", firstNonEmpty(sc.Hostname, sc.HostID), limit), "")
+				fmt.Sprintf("主机安全扫描「%s」超时中断（超过 %ds），本次结果作废", firstNonEmptyOrDash(sc.Hostname, sc.HostID), limit), "")
 		}
 	}
 	if n > 0 {
@@ -1188,12 +1188,14 @@ func (s *Server) finishHostSecurityScans(ids []string) {
 	for _, id := range ids {
 		id := id
 		wg.Add(1)
-		go func() {
+		// safeGo：扫描要解析 Agent 上报的一大堆外部数据，一次 panic 不该带走整个进程。
+		// wg.Done / 信号量都在 fn 里，recover 之后 defer 照常执行，不会卡住 wg.Wait。
+		safeGo("host-security-scan", func() {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			s.completeHostSecurityScan(id)
-		}()
+		})
 	}
 	wg.Wait()
 }
@@ -1375,7 +1377,8 @@ func (s *Server) runHostSecurityScan(hostID, operator, trigger string) *HostScan
 }
 
 func (s *Server) startHostSecurityScheduler() {
-	go func() {
+	// 同 Web 扫描调度：panic 之后必须**把循环重新拉起来**，否则主机安全扫描会静默停摆。
+	go superviseLoop("host-security-scheduler", func() {
 		t := time.NewTicker(30 * time.Second)
 		defer t.Stop()
 		for range t.C {
@@ -1385,7 +1388,7 @@ func (s *Server) startHostSecurityScheduler() {
 			}
 			s.tickHostSecuritySchedule()
 		}
-	}()
+	})
 }
 
 func (s *Server) handleHostSecurityScanCancel(w http.ResponseWriter, r *http.Request) {
@@ -1425,10 +1428,10 @@ func (s *Server) tickHostSecuritySchedule() {
 			continue
 		}
 		sem <- struct{}{}
-		go func() {
+		safeGo("host-security-scan-scheduled", func() {
 			defer func() { <-sem }()
 			s.runHostSecurityScan(hid, "scheduler", "schedule")
-		}()
+		})
 	}
 }
 

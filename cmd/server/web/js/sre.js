@@ -4050,10 +4050,21 @@ async function loadAIStats(){
     }catch(_e){}
     let auditCard="";
     try{
-      const av=await fetch(`${API}/audit/verify-chain?limit=200`).then(r=>r.json()).catch(()=>null);
-      if(av){
+      // 只在真的拿到校验结果时才画这张卡。
+      // 原来是 `fetch(...).then(r=>r.json())` 不看状态码：403（权限不够）、429（已有校验在跑）、
+      // 503（存储不可用）返回的都是合法 JSON，于是 av 有值但没有 ok 字段，卡片直接显示
+      // 「审计链：异常」——把"你没权限看"渲染成"审计链被人动过"，是最不该出现的假警报。
+      const ar=await fetch(`${API}/audit/verify-chain?limit=200`).catch(()=>null);
+      const av=ar&&ar.ok?await ar.json().catch(()=>null):null;
+      if(av&&av.status){
+        // 状态是五档而不是布尔：degraded（能验但有隐患）和 broken（链被破坏）后果完全不同，
+        // 之前一律并进"异常"，运维看不出该不该立刻升级处理。
+        const label={healthy:"完整",degraded:"存在隐患",broken:"校验失败",unverifiable:"暂时无法确认",empty:"暂无记录"}[av.status]||"未知";
+        const color={healthy:"var(--ok,#22c55e)",degraded:"var(--warn,#f59e0b)",broken:"var(--danger,#ef4444)",unverifiable:"var(--warn,#f59e0b)"}[av.status]||"var(--muted)";
         const deg=av.secret_degraded?" · 密钥降级(未设 AIOPS_SECRET_KEY)":"";
-        auditCard=`<div class="hint" style="margin:8px 0">审计链：${av.ok?"完整":"异常"} · 已校验 ${av.checked||0}${deg}${av.detail&&!av.ok?" · "+esc(av.detail):""}</div>`;
+        const range=av.status==="empty"?"":` · 已校验 ${av.checked||0} 条`;
+        const at=av.status==="broken"&&av.broken_at?` · 断点 seq ${av.broken_at}`:"";
+        auditCard=`<div class="hint" style="margin:8px 0">审计链：<b style="color:${color}">${label}</b>${range}${at}${deg}</div>`;
       }
     }catch(_e){}
     const tco=j.tco||{};

@@ -136,7 +136,7 @@ func (s *Server) handleAIFollowup(w http.ResponseWriter, r *http.Request) {
 	switch action {
 	case aiActCreateTicket:
 		if title == "" {
-			title = "AI 结论 · " + trimLine(firstNonEmpty(run.Task, "运维分析"), 40)
+			title = "AI 结论 · " + trimLine(firstNonEmptyOrDash(run.Task, "运维分析"), 40)
 		}
 		tk, err := s.tickets.Create(Ticket{
 			Title:       title,

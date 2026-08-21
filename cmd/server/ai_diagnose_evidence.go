@@ -21,7 +21,7 @@ func (s *Server) gatherLiveDiagnoseEvidence(inc Incident) (extra string, cites [
 			age := time.Now().Unix() - h.LastSeen
 			online := age <= 180
 			line := fmt.Sprintf("- 主机 %s (%s)：心跳 %ds 前 · %s",
-				firstNonEmpty(h.Hostname, hid), hid, age, map[bool]string{true: "在线", false: "离线/超时"}[online])
+				firstNonEmptyOrDash(h.Hostname, hid), hid, age, map[bool]string{true: "在线", false: "离线/超时"}[online])
 			b.WriteString(line + "\n")
 			cites = append(cites, RAGCitation{Kind: "inspect", Source: "host:" + hid, Title: "主机心跳", Summary: line})
 			n++

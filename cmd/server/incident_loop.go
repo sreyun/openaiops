@@ -468,7 +468,7 @@ func (s *Server) loopVerify(w http.ResponseWriter, r *http.Request, inc Incident
 			corpus = inc.Title
 		}
 		card := fmt.Sprintf("【回验通过结案】%s\n主机：%s\n回验：%s\n诊断摘要：%s",
-			inc.Title, firstNonEmpty(inc.Hostname, inc.HostID), strings.Join(notes, "；"), trimLine(corpus, 1200))
+			inc.Title, firstNonEmptyOrDash(inc.Hostname, inc.HostID), strings.Join(notes, "；"), trimLine(corpus, 1200))
 		s.rememberFromIncident(inc, "resolution", card, true)
 	}
 	if s.store != nil {

@@ -205,7 +205,7 @@ func containerRowMatchesCompose(row map[string]any, project, service string) boo
 
 func normalizeNamePrefixedContainerID(row, raw map[string]any) {
 	name := strings.TrimSpace(fmt.Sprint(row["name"]))
-	id := strings.TrimSpace(firstNonEmpty(fmt.Sprint(raw["id"]), fmt.Sprint(raw["Id"]), fmt.Sprint(raw["ID"])))
+	id := strings.TrimSpace(firstNonEmptyOrDash(fmt.Sprint(raw["id"]), fmt.Sprint(raw["Id"]), fmt.Sprint(raw["ID"])))
 	if name != "" && name != "<nil>" && strings.HasPrefix(id, name+"-") {
 		row["id"] = name
 	}
@@ -228,7 +228,7 @@ func containerRowMatchesStatus(row map[string]any, status string) bool {
 }
 
 func containerStateKey(row map[string]any) string {
-	raw := strings.ToLower(strings.TrimSpace(firstNonEmpty(fmt.Sprint(row["state"]), fmt.Sprint(row["status"]))))
+	raw := strings.ToLower(strings.TrimSpace(firstNonEmptyOrDash(fmt.Sprint(row["state"]), fmt.Sprint(row["status"]))))
 	if raw == "" || raw == "-" || raw == "<nil>" {
 		return "other"
 	}

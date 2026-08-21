@@ -170,3 +170,26 @@ func (cs *ConfigStore) FolderDescendantIDs(root string) []string {
 	walk(n.Children)
 	return out
 }
+
+// hostLogVisibility 返回一个"这台主机的日志能不能给这个人看"的谓词，不受限时返回 nil
+// （调用方据此跳过过滤，零开销）。
+//
+// 与 filterHostsForUser 用同一套判定：解析不出用户、未设限、管理员，三种情况都不过滤。
+// 单独抽出来是因为日志检索要在**环形缓冲的扫描循环里**逐条问一次，不能每条都去解析会话。
+func (s *Server) hostLogVisibility(r *http.Request) func(string) bool {
+	u, ok := s.currentUser(r)
+	if !ok || !u.hostScopeRestricted() || roleRank(u.Role) >= roleRank(RoleAdmin) {
+		return nil
+	}
+	// 结果缓存在闭包里：一次检索会对同一批 host_id 反复提问，而 userCanAccessHost
+	// 每次都要查主机、查分组、展开子分组，逐条现算会把日志检索拖慢一个量级。
+	cache := map[string]bool{}
+	return func(hostID string) bool {
+		if v, hit := cache[hostID]; hit {
+			return v
+		}
+		v := s.userCanAccessHost(u, hostID)
+		cache[hostID] = v
+		return v
+	}
+}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"unicode"
 	"unicode/utf8"
 )
@@ -31,23 +32,56 @@ func containsSubstrFold(s, substrLower string) bool {
 	if len(substrLower) > len(s) {
 		return false
 	}
-	// 首字符先做一次廉价筛选，避免对每个位置都进入完整比较。
+	// 定位候选位置用 strings.IndexByte，而不是自己逐字节比。
+	//
+	// IndexByte 在 amd64/arm64 上是汇编实现、一次比较一整个寄存器宽度；自己写的逐字节
+	// 循环每个字节都要做两次比较加一次函数调用。日志检索要对**每一条**正文跑一遍这个
+	// 函数，5 万条环上的一次关键字搜索就是几 MB 的扫描，这个常数因子是实打实的。
+	// 关键字首字母可能以大写形式出现在正文里，所以两种写法各找一次、取更靠前的那个。
 	first := substrLower[0]
+	upperFirst := upperASCII(first)
 	last := len(s) - len(substrLower)
-	nonASCII := false
-	for i := 0; i < len(s); i++ {
-		b := s[i]
-		if b >= utf8.RuneSelf {
-			nonASCII = true
+	for i := 0; i <= last; {
+		window := s[i : last+1]
+		j := strings.IndexByte(window, first)
+		if upperFirst != first {
+			if k := strings.IndexByte(window, upperFirst); k >= 0 && (j < 0 || k < j) {
+				j = k
+			}
 		}
-		if i <= last && lowerASCII(b) == first && equalFoldPrefix(s[i:], substrLower) {
+		if j < 0 {
+			break
+		}
+		i += j
+		if equalFoldPrefix(s[i:], substrLower) {
 			return true
 		}
+		i++
 	}
-	if nonASCII {
+	// 快路径没命中：只有正文含非 ASCII 时才需要走 rune 折叠那条慢路径。
+	// 这个判断放在这里而不是和主循环揉在一起——命中时根本不需要它。
+	if hasNonASCII(s) {
 		return containsFoldUnicode(s, substrLower)
 	}
 	return false
+}
+
+// hasNonASCII 判断字符串里是否含 ≥0x80 的字节。循环体只有一次比较，
+// 编译器能展开得很紧，比在主匹配循环里顺带判断划算。
+func hasNonASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= utf8.RuneSelf {
+			return true
+		}
+	}
+	return false
+}
+
+func upperASCII(b byte) byte {
+	if b >= 'a' && b <= 'z' {
+		return b - ('a' - 'A')
+	}
+	return b
 }
 
 // equalFoldPrefix 判断 s 是否以 prefix（已小写）开头，忽略 ASCII 大小写。

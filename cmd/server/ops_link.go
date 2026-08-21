@@ -81,7 +81,7 @@ func parseOpsLinkInt(id string) int64 {
 }
 
 func hostOpsLink(hostID, hostname string) OpsLink {
-	return OpsLink{Type: "host", ID: hostID, Role: "affects", Name: firstNonEmpty(hostname, hostID)}
+	return OpsLink{Type: "host", ID: hostID, Role: "affects", Name: firstNonEmptyOrDash(hostname, hostID)}
 }
 
 func incidentOpsLink(id int64, role string) OpsLink {

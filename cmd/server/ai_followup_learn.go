@@ -38,7 +38,7 @@ func (s *Server) recordAIFollowupAdoption(run AIRun, actor string) {
 	if s == nil || strings.TrimSpace(run.ID) == "" {
 		return
 	}
-	task := firstNonEmpty(run.Task, run.Kind, "sreyun")
+	task := firstNonEmptyOrDash(run.Task, run.Kind, "sreyun")
 	s.aiStats.recordFeedback(task, "applied")
 	if text := strings.TrimSpace(run.Input + " " + run.Answer); text != "" {
 		s.reinforceMemory("knowledge", text, reinforceApplied)

@@ -291,8 +291,8 @@ func (s *Server) bridgeSQLChangeToRecord(cr SQLChangeRequest, status string) (Ch
 	if s.changes == nil {
 		return ChangeRecord{}, fmt.Errorf("changes unavailable")
 	}
-	title := "SQL " + strings.ToUpper(firstNonEmpty(cr.Kind, "ddl")) + " · " + firstNonEmpty(cr.Connection, cr.ConnectionID)
-	summary := firstNonEmpty(cr.Reason, truncateRunes(cr.SQL, 120))
+	title := "SQL " + strings.ToUpper(firstNonEmptyOrDash(cr.Kind, "ddl")) + " · " + firstNonEmptyOrDash(cr.Connection, cr.ConnectionID)
+	summary := firstNonEmptyOrDash(cr.Reason, truncateRunes(cr.SQL, 120))
 	risk := "medium"
 	if cr.Environment == "prod" || cr.Kind == "kill" {
 		risk = "high"

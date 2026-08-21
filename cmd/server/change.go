@@ -492,7 +492,7 @@ func (m *changeManager) UpsertFromSQLChange(sqlID, title, summary, kind, risk, a
 	m.nextID++
 	rec := ChangeRecord{
 		ID: m.nextID, Title: title, Summary: summary, Kind: kind, Risk: risk,
-		Status: normalizeChangeStatus(firstNonEmpty(status, ChangePendingApproval)),
+		Status: normalizeChangeStatus(firstNonEmptyOrDash(status, ChangePendingApproval)),
 		Author: author, SQLChangeIDs: []string{sqlID},
 		Links:     []OpsLink{sqlChangeOpsLink(sqlID)},
 		StartedAt: now, CreatedAt: now, UpdatedAt: now,

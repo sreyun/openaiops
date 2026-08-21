@@ -47,7 +47,27 @@ func BenchmarkLogSearchPageKeyword(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, total := ls.searchPage("", "", "EXHAUSTED", 0, 1, 50); total == 0 {
+		if _, total := ls.searchPage("", "", "EXHAUSTED", 0, 1, 50, nil); total == 0 {
+			b.Fatal("expected matches")
+		}
+	}
+}
+
+// 关键字只出现在**最旧的那一小段**时，才是分页检索真正的最坏情况：
+// 两趟实现要把整个环走两遍（数一遍、再找一遍），一趟实现只走一遍。
+// 现场对应的场景是"搜一个很久以前才出现过的错误码"或者翻到很深的页码。
+func BenchmarkLogSearchPageRareKeyword(b *testing.B) {
+	ls := seedLogStore(logStoreCap)
+	// 把标记塞进最旧的 50 条（ingest 是追加，所以索引 0 附近最旧）。
+	ls.mu.Lock()
+	for i := 0; i < 50 && i < len(ls.logs); i++ {
+		ls.logs[i].Message += " RARE_NEEDLE_TOKEN"
+	}
+	ls.mu.Unlock()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, total := ls.searchPage("", "", "RARE_NEEDLE_TOKEN", 0, 1, 50, nil); total == 0 {
 			b.Fatal("expected matches")
 		}
 	}

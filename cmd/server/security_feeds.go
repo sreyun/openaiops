@@ -885,7 +885,9 @@ func (m *feedManager) runUpdate(cfg SecurityFeedConfig, sources []FeedSource, ac
 	m.cancel = cancel
 	m.mu.Unlock()
 
-	go func() {
+	// 情报源同步解析的是第三方下载下来的内容：坏包不该把进程带走，
+	// 而 defer cancel() 在 recover 之后仍会执行，任务状态不会悬着。
+	safeGo("security-feed-sync", func() {
 		defer cancel()
 		for i, src := range sources {
 			if ctx.Err() != nil {
@@ -926,7 +928,7 @@ func (m *feedManager) runUpdate(cfg SecurityFeedConfig, sources []FeedSource, ac
 		if cb != nil {
 			cb()
 		}
-	}()
+	})
 
 	return m.currentJob(), nil
 }

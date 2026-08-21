@@ -1402,8 +1402,8 @@ async function runSQLQuery(connId, sqlOverride, opts) {
       })
     });
     if (!r.ok) {
-      const j = await r.json().catch(() => ({}));
-      toast(j.error || sqlT("sql.run_failed", "运行失败"), "err");
+      const j = await sqlReadErrorBody(r);
+      toast(j.error, "err");
       renderSQLQueryError(j);
       return;
     }
@@ -1413,8 +1413,9 @@ async function runSQLQuery(connId, sqlOverride, opts) {
       toast(sqlT("sql.run_cancelled", "已停止查询"), "info");
       renderSQLStreamResult({ cancelled: true, limit, offset });
     } else {
-      toast(String(e && e.message || e), "err");
-      renderSQLQueryError({ error: String(e && e.message || e) });
+      const msg = sqlNetworkFailureMessage(e);
+      toast(msg, "err");
+      renderSQLQueryError({ error: msg });
     }
   } finally {
     sqlSetRunning(false);
@@ -1422,13 +1423,72 @@ async function runSQLQuery(connId, sqlOverride, opts) {
   }
 }
 
+/**
+ * 失败必须说得出原因。
+ *
+ * 原来这里是 `await r.json().catch(()=>({}))` 然后 `j.error || "运行失败"`：只要响应体
+ * 不是 JSON，用户看到的就是孤零零三个字「运行失败」——没有状态码、没有原文、没有下一步。
+ * 而**恰恰是最常见的几种失败根本不返回 JSON**：反向代理超时/上游断开是 nginx 自己的
+ * HTML 502/504 页；网关限流是纯文本；会话过期是 302 到登录页。于是"查询跑不了"这件事
+ * 在用户那里永远是同一句废话，既没法自查也没法报障。
+ *
+ * 这里把三样东西都还给用户：状态码 + 服务端原文（哪怕不是 JSON）+ 针对该状态码的下一步动作。
+ */
+async function sqlReadErrorBody(r) {
+  let raw = "";
+  try { raw = await r.text(); } catch (_e) { raw = ""; }
+  let parsed = null;
+  try { parsed = raw ? JSON.parse(raw) : null; } catch (_e) { parsed = null; }
+  if (parsed && typeof parsed === "object" && parsed.error) return parsed;
+
+  // 不是 JSON：把 HTML 标签剥掉，只留正文，别把整页 nginx 错误页糊到面板上。
+  const plain = String(raw || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 300);
+  const hint = sqlHTTPStatusHint(r.status);
+  const parts = [`HTTP ${r.status}${r.statusText ? " " + r.statusText : ""}`];
+  if (hint) parts.push(hint);
+  if (plain) parts.push(`${sqlT("sql.server_said", "服务端返回")}：${plain}`);
+  return Object.assign({}, parsed || {}, { error: parts.join(" · ") });
+}
+
+/** 常见状态码 → 用户能照着做的下一步。措辞要指向动作，不要复述状态码含义。 */
+function sqlHTTPStatusHint(status) {
+  switch (status) {
+    case 401: return sqlT("sql.err_401", "登录状态已失效，请重新登录后再运行");
+    case 403: return sqlT("sql.err_403", "当前角色无权执行该操作（导出需要操作员及以上）");
+    case 413: return sqlT("sql.err_413", "SQL 文本过大，请拆分后再运行");
+    case 429: return sqlT("sql.err_429", "请求过于频繁，请稍后重试");
+    case 502: case 503:
+      return sqlT("sql.err_502", "反向代理连不上面板服务，请检查服务是否在运行");
+    case 504:
+      return sqlT("sql.err_504", "反向代理等待超时——查询比代理的超时时间还长。请缩小查询范围，或调大 nginx 的 proxy_read_timeout");
+  }
+  if (status >= 500) return sqlT("sql.err_5xx", "服务端处理失败，详情见服务端日志");
+  return "";
+}
+
+/** fetch 直接抛异常（连不上/被中断/证书问题）时的措辞。 */
+function sqlNetworkFailureMessage(e) {
+  const raw = String((e && e.message) || e || "");
+  // 浏览器对这一类只给 "Failed to fetch"/"NetworkError"，原文本身没有任何信息量，
+  // 必须由我们补上"可能是什么、该查哪里"。
+  if (/failed to fetch|networkerror|load failed|connection closed/i.test(raw)) {
+    return sqlT("sql.err_network",
+      "与服务端的连接中断：可能是查询时间超过了反向代理的超时上限，或网络/服务端中途断开。请缩小查询范围（加 WHERE、降低行数上限）后重试。");
+  }
+  return raw || sqlT("sql.run_failed", "运行失败");
+}
+
 /** 逐行读取 NDJSON：表头先出来，行数据边到边画。 */
 async function sqlConsumeStream(resp, ctx) {
   const reader = resp.body && resp.body.getReader ? resp.body.getReader() : null;
   if (!reader) { // 极老内核没有流式读取：退回一次性读取，功能不打折，只是没有"边到边画"
     const text = await resp.text();
-    text.split("\n").forEach(line => line.trim() && sqlHandleStreamLine(JSON.parse(line), ctx));
-    renderSQLStreamResult(ctx);
+    // 单行解析失败不该让整次查询颗粒无收：能画多少画多少，最后由 end 标记是否完整。
+    text.split("\n").forEach(line => {
+      if (!line.trim()) return;
+      try { sqlHandleStreamLine(JSON.parse(line), ctx); } catch (_e) { /* 半行/脏行：跳过 */ }
+    });
+    sqlFinishStream(ctx);
     return;
   }
   const dec = new TextDecoder();
@@ -1452,6 +1512,26 @@ async function sqlConsumeStream(resp, ctx) {
       lastPaint = Date.now();
       renderSQLStreamResult(ctx, true);
     }
+  }
+  // 收尾：最后一行可能没带换行符（服务端被掐断时尤其如此），别把它丢掉。
+  const tail = buf.trim();
+  if (tail) { try { sqlHandleStreamLine(JSON.parse(tail), ctx); } catch (_e) { /* 半行 JSON，丢弃 */ } }
+  sqlFinishStream(ctx);
+}
+
+/**
+ * 流走完了，但**完整的流一定以 type:"end" 收尾**。没收到 end 就意味着连接是被掐断的：
+ * 反向代理超时、服务端重启、中间网络断开都会这样。
+ *
+ * 这里原本直接照常渲染——于是「查到一半被切断的 3000 行」和「真的只有 3000 行」在页面上
+ * 长得一模一样。SQL 工具里这是最不能接受的一类错误：用户会拿着残缺的结果去做判断，
+ * 而且完全不知道它是残缺的。所以宁可显眼地标出来。
+ */
+function sqlFinishStream(ctx) {
+  if (ctx && !ctx.end) {
+    ctx.incomplete = true;
+    toast(sqlT("sql.stream_truncated",
+      "结果不完整：数据还没传完连接就断了（常见于反向代理超时）。请缩小查询范围后重试，不要直接使用这批数据。"), "err");
   }
   renderSQLStreamResult(ctx);
 }
@@ -1521,9 +1601,11 @@ function renderSQLStreamResult(ctx, partial) {
   if (ctx && ctx.offset) bits.push(`<span class="badge">OFFSET ${ctx.offset}</span>`);
   if (end.truncated) bits.push(`<span class="badge warn">${esc(sqlT("sql.query_truncated", "已截断"))} ≤${ctx.limit}</span>`);
   if (ctx && ctx.cancelled) bits.push(`<span class="badge warn">${esc(sqlT("sql.run_cancelled", "已停止查询"))}</span>`);
+  if (ctx && ctx.incomplete) bits.push(`<span class="badge err">${esc(sqlT("sql.stream_incomplete", "结果不完整"))}</span>`);
   if (partial) bits.push(`<span class="badge">${esc(sqlT("sql.streaming", "接收中…"))}</span>`);
 
-  const actions = partial ? "" : `
+  // 结果不完整时不给导出/翻页：把残缺数据导成 CSV 发出去，比查询失败本身危害更大。
+  const actions = (partial || (ctx && ctx.incomplete)) ? "" : `
     <div class="sql-result-actions">
       <button type="button" class="btn sm" data-sql-page="prev"${(ctx.offset || 0) <= 0 ? " disabled" : ""}>${esc(sqlT("sql.page_prev", "上一页"))}</button>
       <button type="button" class="btn sm" data-sql-page="next"${end.truncated ? "" : " disabled"}>${esc(sqlT("sql.page_next", "下一页"))}</button>

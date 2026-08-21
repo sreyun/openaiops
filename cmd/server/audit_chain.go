@@ -239,6 +239,109 @@ func auditChainFailure(result auditChainVerifyResult, status, code string, broke
 	return result
 }
 
+// 链校验有多贵，以及为什么必须限流
+//
+// loadAuditMirrorState 要把 audit_log 与 audit_log_p **两张全表**各扫一遍数去重哈希，
+// 再做两次 EXCEPT、两次 GROUP BY（其中一个还是 COUNT(DISTINCT ROW(..., data, ...))，
+// 等于把整列 JSONB 排一遍）。审计表是只增不减的，跑到千万行是常态——这条查询在那种规模
+// 上是分钟级、几个 GB 的临时排序。
+//
+// 而它是个 **GET**，在 routeAllowed 里原本落进"读接口 viewer+"的兜底：任何只读账号刷新
+// 页面、或者干脆按住 F5，就能让数据库排队跑全表扫描，把正常业务的连接一起拖垮。
+// 这里补三道闸：
+//
+//  1. 角色抬到 operator+（与 content-audit / ai tool-audit 这些同级敏感数据一致，见 auth.go）；
+//  2. 服务端自带硬超时——数据库慢就如实回 verify_timeout，而不是挂着连接等；
+//  3. 同一时刻全局只跑一次：并发的相同请求合并等同一个结果，短期内重复请求直接吃缓存，
+//     参数不同又撞上正在跑的，回 busy 让前端稍后再试。
+//
+// 缓存 TTL 取 30s：审计链的健康状态不会在半分钟内变出花来，而多人同开安全页、或者页面
+// 自动刷新的场景恰恰就落在这个窗口里。
+const (
+	auditVerifyTimeout  = 25 * time.Second
+	auditVerifyCacheTTL = 30 * time.Second
+)
+
+type auditVerifyOutcome struct {
+	result auditChainVerifyResult
+	err    error
+	at     time.Time
+}
+
+var errAuditVerifyBusy = errors.New("audit chain verification already running")
+
+// auditVerifyGate 挂在 *Server 上而不是做成包级变量：包级的话多个 Server 实例（测试里很常见）
+// 会共用同一份缓存，一个用例缓存的结果会漏给下一个用例，把断言变成掷骰子。
+type auditVerifyGate struct {
+	mu      sync.Mutex
+	running bool
+	limit   int
+	done    chan struct{}
+	last    auditVerifyOutcome
+	cache   map[int]auditVerifyOutcome
+}
+
+// verifyAuditChainShared 是 verifyAuditChain 的限流外壳：缓存 + 单飞 + 硬超时。
+func (s *Server) verifyAuditChainShared(ctx context.Context, limit int) (auditChainVerifyResult, error) {
+	return s.auditGate.run(ctx, limit, s.pg.verifyAuditChain)
+}
+
+// run 把限流逻辑与"真正去查数据库"解耦，这样闸门本身可以脱离 PG 测试
+// （见 audit_chain_gate_test.go）——否则这段并发代码只能靠肉眼读。
+func (g *auditVerifyGate) run(ctx context.Context, limit int, exec func(context.Context, int) (auditChainVerifyResult, error)) (auditChainVerifyResult, error) {
+	now := time.Now()
+	g.mu.Lock()
+	if hit, ok := g.cache[limit]; ok && now.Sub(hit.at) < auditVerifyCacheTTL {
+		g.mu.Unlock()
+		return hit.result, hit.err
+	}
+	if g.running {
+		if g.limit != limit {
+			g.mu.Unlock()
+			return auditChainVerifyResult{}, errAuditVerifyBusy
+		}
+		wait := g.done
+		g.mu.Unlock()
+		select {
+		case <-wait:
+			g.mu.Lock()
+			out := g.last
+			g.mu.Unlock()
+			return out.result, out.err
+		case <-ctx.Done():
+			return auditChainVerifyResult{}, ctx.Err()
+		}
+	}
+	done := make(chan struct{})
+	g.running, g.limit, g.done = true, limit, done
+	g.mu.Unlock()
+
+	// 用不随本次请求取消的上下文跑：调用方可能中途关掉页面，但合流等在这里的其他请求
+	// 还要用这个结果；真正的止损靠下面的硬超时，而不是靠某一个浏览器还在不在。
+	runCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditVerifyTimeout)
+	result, err := exec(runCtx, limit)
+	cancel()
+
+	out := auditVerifyOutcome{result: result, err: err, at: time.Now()}
+	g.mu.Lock()
+	g.running, g.done, g.last = false, nil, out
+	// 只缓存成功结果：失败要让下一次重新试，否则数据库刚恢复还得干等 30 秒。
+	if err == nil {
+		for k, v := range g.cache { // 顺手清掉过期项，键最多 5000 个，不能只增不减
+			if out.at.Sub(v.at) >= auditVerifyCacheTTL {
+				delete(g.cache, k)
+			}
+		}
+		if g.cache == nil {
+			g.cache = map[int]auditVerifyOutcome{}
+		}
+		g.cache[limit] = out
+	}
+	g.mu.Unlock()
+	close(done)
+	return result, err
+}
+
 func (s *Server) handleAuditVerifyChain(w http.ResponseWriter, r *http.Request) {
 	limit, err := parseAuditVerifyLimit(r.URL.Query().Get("limit"))
 	if err != nil {
@@ -253,8 +356,23 @@ func (s *Server) handleAuditVerifyChain(w http.ResponseWriter, r *http.Request) 
 		})
 		return
 	}
-	result, err := s.pg.verifyAuditChain(r.Context(), limit)
-	if err != nil {
+	result, err := s.verifyAuditChainShared(r.Context(), limit)
+	switch {
+	case errors.Is(err, errAuditVerifyBusy):
+		writeJSON(w, http.StatusTooManyRequests, auditChainVerifyResult{
+			Status: "unavailable", Code: "verification_busy", VerifiedAt: time.Now().Unix(),
+		})
+		return
+	case errors.Is(err, context.DeadlineExceeded):
+		// 超时不等于链坏了，是"这次没能验完"——措辞必须分得清，否则合规同事会当成事故。
+		slog.Warn("audit chain verification timed out", "limit", limit, "timeout", auditVerifyTimeout)
+		writeJSON(w, http.StatusOK, auditChainVerifyResult{
+			Status: "unverifiable", Code: "verify_timeout", VerifiedAt: time.Now().Unix(),
+		})
+		return
+	case errors.Is(err, context.Canceled):
+		return // 调用方自己走了，没人读这个响应
+	case err != nil:
 		slog.Error("audit chain verification unavailable", "err", err)
 		writeJSON(w, http.StatusServiceUnavailable, auditChainVerifyResult{
 			Status: "unavailable", Code: "storage_unavailable", VerifiedAt: time.Now().Unix(),

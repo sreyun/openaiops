@@ -1098,9 +1098,9 @@ func (h *SreyunCore) execProposeSkill(args map[string]any) (string, error) {
 			OK: true, Summary: msg,
 			Data: map[string]any{
 				"should_propose": propose,
-				"draft_name":     firstNonEmpty(autoName, name),
-				"draft_trigger":  firstNonEmpty(autoTrig, trigger),
-				"draft_steps":    firstNonEmpty(autoSteps, steps),
+				"draft_name":     firstNonEmptyOrDash(autoName, name),
+				"draft_trigger":  firstNonEmptyOrDash(autoTrig, trigger),
+				"draft_steps":    firstNonEmptyOrDash(autoSteps, steps),
 			},
 		}), nil
 	}

@@ -21,7 +21,7 @@ func (s *Server) handleAICopilotContext(w http.ResponseWriter, r *http.Request) 
 		}
 		open = append(open, map[string]any{
 			"id": inc.ID, "title": inc.Title, "severity": inc.Severity,
-			"type": inc.Type, "host": firstNonEmpty(inc.Hostname, inc.HostID),
+			"type": inc.Type, "host": firstNonEmptyOrDash(inc.Hostname, inc.HostID),
 			"status": inc.Status, "created_at": inc.CreatedAt,
 		})
 		if len(open) >= 12 {

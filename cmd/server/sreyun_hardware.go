@@ -92,7 +92,7 @@ func hwBadParts(snap shared.HardwareSnapshot) []string {
 	}
 	for _, f := range snap.Fans {
 		if bad(f.Health) || bad(f.Status) {
-			add("风扇", f.Name, fmt.Sprintf("%d RPM", f.RPM), firstNonEmpty(f.Health, f.Status))
+			add("风扇", f.Name, fmt.Sprintf("%d RPM", f.RPM), firstNonEmptyOrDash(f.Health, f.Status))
 		}
 	}
 	for _, p := range snap.Power.PSUs {
@@ -118,7 +118,7 @@ func hwBadParts(snap shared.HardwareSnapshot) []string {
 	}
 	for _, d := range snap.Memory.DIMMs {
 		if bad(d.Health) {
-			add("内存", firstNonEmpty(d.Slot, d.Name),
+			add("内存", firstNonEmptyOrDash(d.Slot, d.Name),
 				joinNonEmpty(d.PartNumber, d.SerialNumber, fmt.Sprintf("%.0fGB", d.CapacityGB)), d.Health)
 		}
 	}
@@ -144,19 +144,47 @@ func hwBadParts(snap shared.HardwareSnapshot) []string {
 	}
 	for _, e := range snap.Enclosures {
 		if bad(e.Health) {
-			add("磁盘框", firstNonEmpty(e.Location, e.Name), joinNonEmpty(e.Model, e.SerialNumber), e.Health)
+			add("磁盘框", firstNonEmptyOrDash(e.Location, e.Name), joinNonEmpty(e.Model, e.SerialNumber), e.Health)
 		}
 	}
 	return out
 }
 
-func firstNonEmpty(ss ...string) string {
+// firstNonEmptyOrDash 取第一个非空串，**全空时返回 "-"**。
+//
+// 名字里的 OrDash 是后补的，而这正是重点：它原来就叫 firstNonEmpty，是给硬件报表
+// 「字段空着就显示一个短横」用的展示辅助，却被当成通用的"取第一个非空值"在全仓用了 70 多处。
+// 于是任何"全空"的场合都会悄悄拿到一个字符串 "-" 而不是 ""，后续再判 `!= ""` 就永远为真。
+//
+// 这不是假设——SQL 工作台就栽在这上面：库名解析写的是
+//
+//	schema := firstNonEmpty(req.Schema, req.Database)
+//	if schema == "" { schema = 从 SQL 里推断 }
+//	if schema == "" { schema = 连接自带的库名 }
+//	if schema != "" && !reSafeIdent.MatchString(schema) { return 非法库名 }
+//
+// 请求里不带库名时 schema 直接变成 "-"，两个兜底一个都轮不到，最后被库名正则挡下——
+// **只要用户没在界面上显式选库，查询就一定报"非法库名"**，而报错还完全不指向真正的原因。
+//
+// 展示场景请继续用这个函数（表格里空字段显示短横是对的）；凡是结果要当**值**用的
+// （标识符、键、过滤条件、库名），一律用下面的 firstNonEmpty。
+func firstNonEmptyOrDash(ss ...string) string {
 	for _, s := range ss {
 		if strings.TrimSpace(s) != "" {
 			return s
 		}
 	}
 	return "-"
+}
+
+// firstNonEmpty 取第一个非空串，全空时返回空串——即"取值"该有的语义。
+func firstNonEmpty(ss ...string) string {
+	for _, s := range ss {
+		if strings.TrimSpace(s) != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 func (h *SreyunCore) execQueryHardware(args map[string]any) (string, error) {
@@ -172,11 +200,11 @@ func (h *SreyunCore) execQueryHardware(args map[string]any) (string, error) {
 	var b strings.Builder
 	for _, snap := range snaps {
 		sys := snap.System
-		fmt.Fprintf(&b, "设备 %s（主机 %s）\n", firstNonEmpty(snap.TargetName, snap.TargetURL), name)
+		fmt.Fprintf(&b, "设备 %s（主机 %s）\n", firstNonEmptyOrDash(snap.TargetName, snap.TargetURL), name)
 		fmt.Fprintf(&b, "  型号: %s / 序列号: %s / BIOS: %s / BMC: %s %s\n",
-			joinNonEmpty(sys.Manufacturer, sys.Model), firstNonEmpty(sys.SerialNumber, sys.SKU),
-			firstNonEmpty(sys.BIOSVersion), firstNonEmpty(sys.BMCModel), sys.BMCFirmware)
-		fmt.Fprintf(&b, "  整机健康: %s / 电源状态: %s\n", firstNonEmpty(snap.Health), firstNonEmpty(sys.PowerState))
+			joinNonEmpty(sys.Manufacturer, sys.Model), firstNonEmptyOrDash(sys.SerialNumber, sys.SKU),
+			firstNonEmptyOrDash(sys.BIOSVersion), firstNonEmptyOrDash(sys.BMCModel), sys.BMCFirmware)
+		fmt.Fprintf(&b, "  整机健康: %s / 电源状态: %s\n", firstNonEmptyOrDash(snap.Health), firstNonEmptyOrDash(sys.PowerState))
 		if snap.Error != "" {
 			fmt.Fprintf(&b, "  ⚠ 采集错误: %s（以下数据可能是上一次成功采集的缓存）\n", snap.Error)
 		}
@@ -213,8 +241,8 @@ func hwWriteSection(b *strings.Builder, snap shared.HardwareSnapshot, section st
 	if want("memory") {
 		for _, d := range snap.Memory.DIMMs {
 			fmt.Fprintf(b, "  [内存] 槽位 %s %.0fGB %s %dMHz %s SN=%s %s\n",
-				firstNonEmpty(d.Slot, d.Name), d.CapacityGB, d.Type, d.SpeedMHz,
-				d.Manufacturer, firstNonEmpty(d.SerialNumber), d.Health)
+				firstNonEmptyOrDash(d.Slot, d.Name), d.CapacityGB, d.Type, d.SpeedMHz,
+				d.Manufacturer, firstNonEmptyOrDash(d.SerialNumber), d.Health)
 		}
 	}
 	if want("disk") {
@@ -228,14 +256,14 @@ func hwWriteSection(b *strings.Builder, snap shared.HardwareSnapshot, section st
 				smart = "⚠预测故障"
 			}
 			fmt.Fprintf(b, "  [硬盘] 槽位 %s %s %.0fGB %s SN=%s 固件=%s 剩余寿命=%s SMART=%s %s\n",
-				firstNonEmpty(d.Location), d.Model, d.CapacityGB, firstNonEmpty(d.MediaType, d.Protocol),
-				firstNonEmpty(d.SerialNumber), firstNonEmpty(d.Revision), life, smart, d.Health)
+				firstNonEmptyOrDash(d.Location), d.Model, d.CapacityGB, firstNonEmptyOrDash(d.MediaType, d.Protocol),
+				firstNonEmptyOrDash(d.SerialNumber), firstNonEmptyOrDash(d.Revision), life, smart, d.Health)
 		}
 	}
 	if want("raid") {
 		for _, r := range snap.RAID {
 			fmt.Fprintf(b, "  [RAID卡] %s %s 固件=%s 缓存=%.0fMB 挂盘=%d %s\n",
-				r.Name, r.Model, firstNonEmpty(r.FirmwareVersion), r.CacheMB, r.DriveCount, r.Health)
+				r.Name, r.Model, firstNonEmptyOrDash(r.FirmwareVersion), r.CacheMB, r.DriveCount, r.Health)
 			for _, v := range r.Volumes {
 				fmt.Fprintf(b, "    [逻辑卷] %s %s %.0fGB %s\n", v.Name, v.RAIDType, v.CapacityGB, v.Health)
 			}
@@ -247,10 +275,10 @@ func hwWriteSection(b *strings.Builder, snap shared.HardwareSnapshot, section st
 		}
 	}
 	if want("psu") {
-		fmt.Fprintf(b, "  电源冗余: %s\n", firstNonEmpty(snap.Power.Redundancy))
+		fmt.Fprintf(b, "  电源冗余: %s\n", firstNonEmptyOrDash(snap.Power.Redundancy))
 		for _, p := range snap.Power.PSUs {
 			fmt.Fprintf(b, "  [电源] %s %s 输入=%.0fW 额定=%.0fW SN=%s %s\n",
-				p.Name, p.Model, p.InputWatts, p.CapacityWatts, firstNonEmpty(p.SerialNumber), p.Health)
+				p.Name, p.Model, p.InputWatts, p.CapacityWatts, firstNonEmptyOrDash(p.SerialNumber), p.Health)
 		}
 	}
 	if want("fan") {
@@ -267,7 +295,7 @@ func hwWriteSection(b *strings.Builder, snap shared.HardwareSnapshot, section st
 	if want("enclosure") {
 		for _, e := range snap.Enclosures {
 			fmt.Fprintf(b, "  [磁盘框] %s %s SN=%s %.0f°C %s %s\n",
-				firstNonEmpty(e.Location, e.Name), e.Model, firstNonEmpty(e.SerialNumber),
+				firstNonEmptyOrDash(e.Location, e.Name), e.Model, firstNonEmptyOrDash(e.SerialNumber),
 				e.TemperatureC, e.State, e.Health)
 		}
 	}
@@ -294,14 +322,14 @@ func (h *SreyunCore) execQueryHardwareEvents(args map[string]any) (string, error
 		if len(snap.Events) == 0 {
 			continue
 		}
-		fmt.Fprintf(&b, "设备 %s 的 BMC 事件日志:\n", firstNonEmpty(snap.TargetName, snap.TargetURL))
+		fmt.Fprintf(&b, "设备 %s 的 BMC 事件日志:\n", firstNonEmptyOrDash(snap.TargetName, snap.TargetURL))
 		for i, e := range snap.Events {
 			if i >= limit {
 				break
 			}
 			total++
 			fmt.Fprintf(&b, "  %s [%s] 触发部件=%s | %s\n",
-				firstNonEmpty(e.Created), firstNonEmpty(e.Severity), firstNonEmpty(e.Component), e.Message)
+				firstNonEmptyOrDash(e.Created), firstNonEmptyOrDash(e.Severity), firstNonEmptyOrDash(e.Component), e.Message)
 		}
 	}
 	// 平台侧记录的状态变化（BMC 没给事件日志时，这是唯一的时间线）
@@ -365,7 +393,7 @@ func (h *SreyunCore) execQueryHardwareHistory(args map[string]any) (string, erro
 		}
 		series := ""
 		if lbl, ok := pm["metric"].(map[string]any); ok {
-			series = firstNonEmpty(fmt.Sprint(lbl["sensor"]), fmt.Sprint(lbl["fan_name"]), fmt.Sprint(lbl["target"]))
+			series = firstNonEmptyOrDash(fmt.Sprint(lbl["sensor"]), fmt.Sprint(lbl["fan_name"]), fmt.Sprint(lbl["target"]))
 		}
 		vals, _ := pm["values"].([]any)
 		mn, mx, sum, n := 0.0, 0.0, 0.0, 0
@@ -388,7 +416,7 @@ func (h *SreyunCore) execQueryHardwareHistory(args map[string]any) (string, erro
 			continue
 		}
 		fmt.Fprintf(&b, "  %s: 最小 %.1f / 平均 %.1f / 最大 %.1f（%d 个采样点）\n",
-			firstNonEmpty(series, "value"), mn, sum/float64(n), mx, n)
+			firstNonEmptyOrDash(series, "value"), mn, sum/float64(n), mx, n)
 	}
 	return b.String(), nil
 }
@@ -421,7 +449,7 @@ func (h *SreyunCore) execQueryHardwareChanges(args map[string]any) (string, erro
 	for _, r := range rows {
 		fmt.Fprintf(&b, "  %v [%v] %v %v: %v → %v\n",
 			r["created_at"], r["action"], r["kind"], r["component"],
-			firstNonEmpty(fmt.Sprint(r["old_value"])), firstNonEmpty(fmt.Sprint(r["new_value"])))
+			firstNonEmptyOrDash(fmt.Sprint(r["old_value"])), firstNonEmptyOrDash(fmt.Sprint(r["new_value"])))
 	}
 	return b.String(), nil
 }

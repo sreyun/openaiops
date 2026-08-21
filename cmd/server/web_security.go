@@ -823,7 +823,7 @@ func (m *webScanManager) reapStuckLocked(timeoutSec int) int {
 			// 其实是每次都跑到一半被掐掉。反复超时说明预算或目标规模不对，属于要人
 			// 处理的一类；进归口后连续 3 次同因就会开事件。
 			reportFault("scan", "web_security_timeout", "warning", "",
-				fmt.Sprintf("Web 漏洞扫描「%s」超时中断（超过 %ds），本次结果作废", firstNonEmpty(sc.TargetName, sc.TargetID), limit), "")
+				fmt.Sprintf("Web 漏洞扫描「%s」超时中断（超过 %ds），本次结果作废", firstNonEmptyOrDash(sc.TargetName, sc.TargetID), limit), "")
 		}
 	}
 	if n > 0 {
@@ -2020,7 +2020,11 @@ func basicAuthValue(user, pass string) string {
 }
 
 func (s *Server) startWebSecurityScheduler() {
-	go func() {
+	// superviseLoop 而不是裸 goroutine：这条循环处理的是**外部来的扫描结果**，
+	// 一次空指针/越界不该把整个服务端带走；更要紧的是——即便有 recover，
+	// 循环退出也意味着**Web 扫描从此再也不会被调度**，而且没有任何人会发现。
+	// superviseLoop 记堆栈、上报平台自身故障，然后把循环重新拉起来。
+	go superviseLoop("web-security-scheduler", func() {
 		t := time.NewTicker(30 * time.Second)
 		defer t.Stop()
 		for range t.C {
@@ -2030,7 +2034,7 @@ func (s *Server) startWebSecurityScheduler() {
 			}
 			s.tickWebSecuritySchedule()
 		}
-	}()
+	})
 	go s.maybeUpdateNucleiTemplates()
 }
 
