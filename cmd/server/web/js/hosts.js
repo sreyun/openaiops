@@ -52,10 +52,16 @@ function hostSelectClick(hostEl, ev) {
 function toggleHostSelected(id) {
   if (HOST_SELECTED.has(id)) HOST_SELECTED.delete(id);
   else HOST_SELECTED.add(id);
-  const box = document.querySelector(`[data-host-pick="${CSS.escape(id)}"]`);
-  if (box) box.checked = HOST_SELECTED.has(id);
-  const el = document.querySelector(`.host[data-id="${CSS.escape(id)}"]`);
-  if (el) el.classList.toggle("picked", HOST_SELECTED.has(id));
+  // 高亮/勾选框只是外观，批量条才是"下一步能不能点"。外观这一段无论怎么翻车，
+  // 都不能挡住批量条重画——否则就是"复选框勾上了，按钮永远是灰的"这种查不出来的失灵。
+  try {
+    const box = document.querySelector(`[data-host-pick="${cssEsc(id)}"]`);
+    if (box) box.checked = HOST_SELECTED.has(id);
+    const el = document.querySelector(`.host[data-id="${cssEsc(id)}"]`);
+    if (el) el.classList.toggle("picked", HOST_SELECTED.has(id));
+  } catch (e) {
+    console.error("[aiops] toggleHostSelected paint failed", e);
+  }
   renderHostBatchBar();
 }
 
@@ -287,7 +293,7 @@ function bindHostBatchOnce() {
       if (HOST_SELECTED.has(id) !== pick.checked) toggleHostSelected(id);
       else { // 勾选框自身状态已由浏览器切换，同步集合
         if (pick.checked) HOST_SELECTED.add(id); else HOST_SELECTED.delete(id);
-        const el = document.querySelector(`.host[data-id="${CSS.escape(id)}"]`);
+        const el = document.querySelector(`.host[data-id="${cssEsc(id)}"]`);
         if (el) el.classList.toggle("picked", pick.checked);
         renderHostBatchBar();
       }

@@ -5521,7 +5521,7 @@ async function bindAIChatWidgets(root,actions){
   for(const a of actions){
     if(!a||a.type!=="show_chart"||!a.chart) continue;
     const cid="aiChart_"+(a.id||aiChatActionKey(a).replace(/\|/g,"_"));
-    const canvas=$(cid) || root.querySelector("#"+CSS.escape(cid));
+    const canvas=$(cid) || root.querySelector("#"+cssEsc(cid));
     if(!canvas) continue;
     const samples=Array.isArray(a.chart.samples)?a.chart.samples:[];
     const series=normalizeAIChatSeries(a.chart.series);

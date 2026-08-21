@@ -3379,7 +3379,7 @@ async function captureDashVisualPanels() {
     const out = [];
     for (const p of panels) {
       const g = dashGridBox(p);
-      const el = document.querySelector(`[data-panel="${CSS.escape ? CSS.escape(p.id) : p.id}"]`)
+      const el = document.querySelector(`[data-panel="${cssEsc(p.id)}"]`)
         || document.querySelector(`[data-panel="${p.id}"]`);
       let dataUrl = "";
       if (el && typeof expCaptureElement === "function") {

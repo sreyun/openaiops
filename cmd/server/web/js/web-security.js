@@ -1368,8 +1368,8 @@ function wsSoftRefresh(opts) {
 }
 
 function wsCssEsc(id) {
-  if (typeof CSS !== "undefined" && CSS.escape) return CSS.escape(String(id));
-  return String(id).replace(/([^a-zA-Z0-9_-])/g, "\\$1");
+  // 统一走 core.js 的 cssEsc（老内核里没有 CSS.escape，它自带退化实现）
+  return cssEsc(String(id));
 }
 
 function wsNeedsFullHistoryPaint() {

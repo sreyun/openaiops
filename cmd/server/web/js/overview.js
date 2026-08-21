@@ -365,7 +365,7 @@ function renderTop(hosts) {
       const panelEl = el.querySelector(`.top-panel[data-top-key="${panel.key}"]`);
       if (!panelEl) return;
       sorted.forEach((h, idx) => {
-        const item = panelEl.querySelector(`.top-item[data-id="${CSS.escape(h.id)}"]`);
+        const item = panelEl.querySelector(`.top-item[data-id="${cssEsc(h.id)}"]`);
         if (!item) return;
         const v = panel.fn(h.latest);
         const pct = panel.isPct ? v : Math.min(100, v / maxVal * 100);

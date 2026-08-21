@@ -153,7 +153,7 @@ function openTerminal(id, name, opts) {
     const dockedIdx = TERM_TABS.findIndex(t => t.id === id && !t.containerId && TERM_DOCK_IDS.has(t.id));
     if (dockedIdx >= 0) {
       TERM_DOCK_IDS.delete(id);
-      const dockItem = $("termDock") && $("termDock").querySelector(`[data-tab-id="${CSS.escape(id)}"]`);
+      const dockItem = $("termDock") && $("termDock").querySelector(`[data-tab-id="${cssEsc(id)}"]`);
       if (dockItem) dockItem.remove();
       updateTermDock();
       switchTermTab(dockedIdx);
@@ -797,7 +797,7 @@ function connectTermWS(tab) {
   };
   ws.onopen = () => { tab.retry = 0; tab._manualReconnect = false; setTermStatus(I18N.t("ui.connected"), "on");
     // 更新 dock 卡片状态
-    const dockItem = $("termDock") && $("termDock").querySelector(`[data-tab-id="${CSS.escape(tab.id)}"]`);
+    const dockItem = $("termDock") && $("termDock").querySelector(`[data-tab-id="${cssEsc(tab.id)}"]`);
     if (dockItem) { const dot = dockItem.querySelector(".dock-dot"); if (dot) { dot.className = "dock-dot on"; } }
     if (tab.inputEl) tab.inputEl.focus({ preventScroll: true }); else screen.focus();
     // Reconnect resize: 重连成功后自动发送 resize 帧，恢复终端窗口尺寸
@@ -821,7 +821,7 @@ function connectTermWS(tab) {
     setTermStatus(I18N.t("ui.disconnected"), "off");
     if (tab.ws === ws) tab.ws = null;
     // 更新 dock 卡片状态
-    const dockItem = $("termDock") && $("termDock").querySelector(`[data-tab-id="${CSS.escape(tab.id)}"]`);
+    const dockItem = $("termDock") && $("termDock").querySelector(`[data-tab-id="${cssEsc(tab.id)}"]`);
     if (dockItem) { const dot = dockItem.querySelector(".dock-dot"); if (dot) { dot.className = "dock-dot off"; } }
 
     // v5.4.0: 自动重连 — 指数退避（1s, 2s, 4s, 8s, 最大 30s），最多重试 50 次
@@ -934,7 +934,7 @@ function closeTermTab(idx) {
   tab.screenEl.remove(); tab.tabEl.remove();
   // 清理对应的 dock 卡片
   TERM_DOCK_IDS.delete(tab.id);
-  const dockItem = $("termDock") && $("termDock").querySelector(`[data-tab-id="${CSS.escape(tab.id)}"]`);
+  const dockItem = $("termDock") && $("termDock").querySelector(`[data-tab-id="${cssEsc(tab.id)}"]`);
   if (dockItem) dockItem.remove();
   TERM_TABS.splice(idx, 1);
   if (TERM_ACTIVE >= TERM_TABS.length) TERM_ACTIVE = TERM_TABS.length - 1;
@@ -1098,7 +1098,7 @@ function updateTermDock() {
   const docked = TERM_TABS.filter(t => TERM_DOCK_IDS.has(t.id));
   dock.style.display = docked.length > 0 ? "flex" : "none";
   docked.forEach(tab => {
-    let item = dock.querySelector(`[data-tab-id="${CSS.escape(tab.id)}"]`);
+    let item = dock.querySelector(`[data-tab-id="${cssEsc(tab.id)}"]`);
     if (!item) {
       item = document.createElement("div");
       item.className = "term-dock-item";
@@ -1187,7 +1187,7 @@ function closeTermFromDock(tabId) {
   tab.tabEl.remove();
   TERM_DOCK_IDS.delete(tabId);
   // Animate dock card removal
-  const item = $("termDock") && $("termDock").querySelector(`[data-tab-id="${CSS.escape(tabId)}"]`);
+  const item = $("termDock") && $("termDock").querySelector(`[data-tab-id="${cssEsc(tabId)}"]`);
   if (item) {
     item.classList.add("removing");
     setTimeout(() => { item.remove(); updateTermDock(); }, 200);
@@ -1618,7 +1618,7 @@ function setTermStatus(txt, cls) {
   // 同步更新当前活动 tab 的 dock 卡片状态
   if (TERM_ACTIVE >= 0 && TERM_TABS[TERM_ACTIVE]) {
     const tab = TERM_TABS[TERM_ACTIVE];
-    const item = $("termDock") && $("termDock").querySelector(`[data-tab-id="${CSS.escape(tab.id)}"]`);
+    const item = $("termDock") && $("termDock").querySelector(`[data-tab-id="${cssEsc(tab.id)}"]`);
     if (item) {
       const dot = item.querySelector(".dock-dot");
       if (dot) {

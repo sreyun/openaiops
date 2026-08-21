@@ -116,6 +116,23 @@ if (typeof window.I18N === "undefined" || typeof window.I18N.t !== "function") {
 
 const API = "/api/v1";
 
+/**
+ * CSS.escape 的安全版本：用于把 id 拼进选择器。
+ *
+ * 为什么要包一层：`CSS.escape` 在老版 Edge(EdgeHTML)、IE 模式、部分国产浏览器的兼容内核
+ * 与嵌入式 WebView 里**不存在**。而它的调用点全在事件处理器中间（勾选主机、切终端标签…），
+ * 一旦 TypeError 抛出去，处理器剩下的一半就不执行了——现场表现不是报错，而是
+ * 「复选框看着勾上了，可"变更分组"按钮永远是灰的」这种说不清的失灵。
+ *
+ * 退化实现按 CSS 规范给非 [A-Za-z0-9_-] 的字符加反斜杠转义，首字符是数字时用码点转义；
+ * 我们只把它用在选择器里，这个子集足够。
+ */
+function cssEsc(v) {
+  const s = String(v == null ? "" : v);
+  if (typeof CSS !== "undefined" && CSS && typeof CSS.escape === "function") return CSS.escape(s);
+  return s.replace(/[^\w-]/g, (c) => "\\" + c).replace(/^(\d)/, (d) => "\\3" + d + " ");
+}
+
 /* ===== 写请求失败的统一自查 =====
  *
  * 经典控制台有近 300 处写请求，其中 125 处失败时只弹一句"操作失败/修改失败"——不带状态码，
@@ -134,7 +151,7 @@ const API = "/api/v1";
  * 新版控制台（/v2）的同一份逻辑在 frontend/src/api/client.ts —— 只改一边等于没改。
  */
 var _apiFail = null;      // { status, code, reason, at, consumed }
-var _lastErrToastAt = 0;
+var _lastToastAt = 0;     // 任何提示（不只是错误）都算"页面已经说过话了"
 
 /** 自带行内错误提示的接口：兜底不插嘴。 */
 const API_FAIL_SKIP_RE = /^\/api\/v1\/(login|logout|password|profile|account\/|mfa\/)/;
@@ -203,7 +220,10 @@ function _aiopsNoteApiFailure(input, init, res) {
   _apiFail = rec;
   const announce = function () {
     setTimeout(function () {
-      if (_lastErrToastAt >= rec.at) return;   // 页面自己已经提示过了，别说第二遍
+      // 页面自己已经提示过了就别说第二遍——**任何**提示都算数：逐台兜底成功后弹的是
+      // 一条 info，若这里只认错误提示，就会紧接着再弹一句"接口不存在"，把刚说完的
+      // "已逐台变更"盖掉，用户看到的是自相矛盾的两句话。
+      if (_lastToastAt >= rec.at) return;
       if (typeof toast !== "function") return;
       rec.consumed = true;
       toast(apiFailureExplain(rec), "err");
@@ -1179,10 +1199,8 @@ function buildHostCache() {
 }
 
 function toast(msg, kind) {
-  if (kind === "err") {
-    _lastErrToastAt = Date.now();
-    msg = withApiFailureReason(msg);
-  }
+  _lastToastAt = Date.now();
+  if (kind === "err") msg = withApiFailureReason(msg);
   const t = $("toast");
   t.textContent = msg;
   t.className = "toast show " + (kind || "");

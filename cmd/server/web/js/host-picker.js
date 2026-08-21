@@ -416,7 +416,7 @@
   function applyFolderCheck(root, folderId, checked) {
     if (!root) return;
     // Prefer hosts listed under this folder node in the rendered tree.
-    const lab = root.querySelector(`.hs-pick-folder-cb[data-hp-folder="${CSS.escape(folderId)}"]`);
+    const lab = root.querySelector(`.hs-pick-folder-cb[data-hp-folder="${cssEsc(folderId)}"]`);
     if (!lab) return;
     const folderEl = lab.closest(".hs-pick-folder");
     if (!folderEl) return;
