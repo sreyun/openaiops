@@ -233,6 +233,10 @@ func TestVerifyAuditChainPropagatesRowsError(t *testing.T) {
 }
 
 func TestHandleAuditVerifyChainRejectsInvalidLimit(t *testing.T) {
+	// 限流闸门是包级共享的（见 audit_chain.go 里 auditChainGate 的说明），
+	// 上一个用例缓存下来的成功结果会漏给这里，把断言变成掷骰子——先清干净。
+	auditChainGate.reset()
+
 	s := &Server{}
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/audit/verify-chain?limit=0", nil)
 	rec := httptest.NewRecorder()
@@ -251,6 +255,10 @@ func TestHandleAuditVerifyChainRejectsInvalidLimit(t *testing.T) {
 }
 
 func TestHandleAuditVerifyChainSanitizesStorageFailure(t *testing.T) {
+	// 限流闸门是包级共享的（见 audit_chain.go 里 auditChainGate 的说明），
+	// 上一个用例缓存下来的成功结果会漏给这里，把断言变成掷骰子——先清干净。
+	auditChainGate.reset()
+
 	p, mock := mockPgStore(t)
 	mock.ExpectQuery(`(?s)FROM \(.*FROM audit_log_p`).WithArgs(201).WillReturnError(errors.New("database exploded with private detail"))
 	s := &Server{pg: p}
@@ -274,6 +282,10 @@ func TestHandleAuditVerifyChainSanitizesStorageFailure(t *testing.T) {
 }
 
 func TestHandleAuditVerifyChainReturnsHTTP200ForBrokenChain(t *testing.T) {
+	// 限流闸门是包级共享的（见 audit_chain.go 里 auditChainGate 的说明），
+	// 上一个用例缓存下来的成功结果会漏给这里，把断言变成掷骰子——先清干净。
+	auditChainGate.reset()
+
 	configuredAuditKey(t)
 	p, mock := mockPgStore(t)
 	entry := auditChainEntry{

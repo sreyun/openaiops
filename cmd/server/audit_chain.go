@@ -270,8 +270,7 @@ type auditVerifyOutcome struct {
 
 var errAuditVerifyBusy = errors.New("audit chain verification already running")
 
-// auditVerifyGate 挂在 *Server 上而不是做成包级变量：包级的话多个 Server 实例（测试里很常见）
-// 会共用同一份缓存，一个用例缓存的结果会漏给下一个用例，把断言变成掷骰子。
+// auditVerifyGate 是链校验的限流闸门。
 type auditVerifyGate struct {
 	mu      sync.Mutex
 	running bool
@@ -281,9 +280,28 @@ type auditVerifyGate struct {
 	cache   map[int]auditVerifyOutcome
 }
 
+// auditChainGate 是这道闸门在**运行期**的唯一存放处。
+//
+// 刻意做成包级变量而不是 *Server 上的字段——和 edge_proxy_diag.go 的 edgeProxyDiagState、
+// self_fault.go 的 platformFaultSink 是同一个取舍，理由也一样：handlers.go 里那个
+// struct 定义是全仓最容易分叉/漏同步的一处（415 个文件共用一个 package main），
+// 往它上面加字段，就等于让一个自治的小功能去依赖那个文件的同步状态。
+// 这条已经真真切切炸过两次构建（先是 s.edgeDiag，再是 s.auditGate），不必再试第三次。
+//
+// 包级共享带来的唯一代价是测试之间会串缓存，所以下面提供 reset()，
+// 而闸门逻辑本身写成 auditVerifyGate 的方法——单元测试各自 new 一个实例即可完全隔离。
+var auditChainGate = &auditVerifyGate{}
+
 // verifyAuditChainShared 是 verifyAuditChain 的限流外壳：缓存 + 单飞 + 硬超时。
 func (s *Server) verifyAuditChainShared(ctx context.Context, limit int) (auditChainVerifyResult, error) {
-	return s.auditGate.run(ctx, limit, s.pg.verifyAuditChain)
+	return auditChainGate.run(ctx, limit, s.pg.verifyAuditChain)
+}
+
+// reset 把闸门清回初始状态，供测试使用（包级状态在用例之间会串，见上）。
+func (g *auditVerifyGate) reset() {
+	g.mu.Lock()
+	g.running, g.limit, g.done, g.last, g.cache = false, 0, nil, auditVerifyOutcome{}, nil
+	g.mu.Unlock()
 }
 
 // run 把限流逻辑与"真正去查数据库"解耦，这样闸门本身可以脱离 PG 测试
