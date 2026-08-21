@@ -71,9 +71,14 @@
     _bar.className = "loadbar";
     _bar.setAttribute("aria-hidden", "true");
     document.addEventListener("DOMContentLoaded", function(){ document.body.appendChild(_bar); });
-    window.fetch = function() {
+    window.fetch = function(input, init) {
       _pending++; _bar.classList.add("active");
-      return _origFetch.apply(window, arguments).finally(function(){
+      return _origFetch.apply(window, arguments).then(function(res){
+        // 顺带把失败的写请求登记下来，供统一自查（见 _aiopsNoteApiFailure）。
+        // 这里绝不能把异常抛出去：诊断代码坏掉不该连累业务请求。
+        try { _aiopsNoteApiFailure(input, init, res); } catch (e) { /* noop */ }
+        return res;
+      }).finally(function(){
         _pending--; if (_pending <= 0) { _pending = 0; _bar.classList.remove("active"); }
       });
     };
@@ -110,6 +115,112 @@ if (typeof window.I18N === "undefined" || typeof window.I18N.t !== "function") {
 }
 
 const API = "/api/v1";
+
+/* ===== 写请求失败的统一自查 =====
+ *
+ * 经典控制台有近 300 处写请求，其中 125 处失败时只弹一句"操作失败/修改失败"——不带状态码，
+ * 也不带服务端原文。用户看到的永远是同一句话，可背后的原因天差地别：401 会话过期 /
+ * 403 权限不足或反代把来源校验弄拧了 / 404·405 面板版本过旧 / 413 反代 body 上限太小 /
+ * 429 限流 / 502·504 反代连不上后端。逐个去改那 125 处既大又必然漏，所以兜底放在一处：
+ *
+ *   1) 任何 /api 写请求失败都记下来（状态码 + 服务端 error 原文）；
+ *   2) toast() 发"错误"提示时，若 3 秒内刚失败过、且原文没出现在文案里，就把原文补上；
+ *   3) 350ms 内页面自己一句都没说（不少地方 catch 完什么都不提示），兜底自己说一句，
+ *      并按状态码给出可自查的解释。
+ *
+ * 只管写请求：读请求的 401/404 在界面上常常是正常分支（未登录首屏、可选数据），
+ * 兜底一句反而是噪音。登录/改密/找回这类自带行内错误提示的接口也跳过，避免两处都说。
+ *
+ * 新版控制台（/v2）的同一份逻辑在 frontend/src/api/client.ts —— 只改一边等于没改。
+ */
+var _apiFail = null;      // { status, code, reason, at, consumed }
+var _lastErrToastAt = 0;
+
+/** 自带行内错误提示的接口：兜底不插嘴。 */
+const API_FAIL_SKIP_RE = /^\/api\/v1\/(login|logout|password|profile|account\/|mfa\/)/;
+
+function _apiFailT(key, fallback) {
+  return (typeof I18N !== "undefined" && I18N.t) ? (I18N.t(key, fallback) || fallback) : fallback;
+}
+
+/** 按状态码给一句能照着查的解释；给不出就用服务端原文。 */
+function apiFailureExplain(rec) {
+  const code = String(rec.status);
+  switch (rec.status) {
+    case 401:
+      return _apiFailT("toast.api_unauthorized", "会话已过期或未登录，请重新登录后重试。");
+    case 403:
+      return rec.reason || _apiFailT("toast.api_forbidden", "没有权限执行该操作（HTTP 403）。");
+    case 404:
+    case 405:
+      return _apiFailT("toast.endpoint_unavailable",
+        "服务端没有这个接口（HTTP {code}）。多半是面板版本过旧，或前面的反向代理/WAF 拦掉了 POST。请升级面板后重试。")
+        .replace("{code}", code);
+    case 413:
+      return _apiFailT("toast.api_too_large",
+        "内容过大被拒绝（HTTP 413）：反向代理的 client_max_body_size 可能小于面板需要的 100MB。");
+    case 429:
+      return rec.reason || _apiFailT("toast.api_rate_limited", "请求过于频繁，请稍后重试。");
+    case 502:
+    case 503:
+    case 504:
+      return _apiFailT("toast.api_gateway",
+        "面板没有响应（HTTP {code}）：多半是反向代理连不上后端，或后端正在重启。")
+        .replace("{code}", code);
+  }
+  return rec.reason || _apiFailT("toast.request_failed", "操作失败（HTTP {code}）。").replace("{code}", code);
+}
+
+/** 把最近一次失败的服务端原文补进"错误"提示里（每次失败只补一次）。 */
+function withApiFailureReason(msg) {
+  const f = _apiFail;
+  if (!f || f.consumed || !f.reason) return msg;
+  if (Date.now() - f.at > 3000) return msg;
+  f.consumed = true;
+  const s = String(msg == null ? "" : msg);
+  if (s.indexOf(f.reason) >= 0) return s;
+  const r = f.reason.length > 200 ? (f.reason.slice(0, 200) + "…") : f.reason;
+  return s ? (s + "（" + r + "）") : r;
+}
+
+function _aiopsNoteApiFailure(input, init, res) {
+  if (!res || res.ok) return;
+  let url = "", method = "GET";
+  if (typeof input === "string") url = input;
+  else if (input && input.url) { url = input.url; method = input.method || "GET"; }
+  if (init && init.method) method = init.method;
+  method = String(method).toUpperCase();
+  if (method === "GET" || method === "HEAD") return;
+  let path = String(url || "");
+  if (path.indexOf("://") >= 0) {
+    try { path = new URL(path, location.href).pathname; } catch (e) { return; }
+  }
+  const qi = path.indexOf("?");
+  if (qi >= 0) path = path.slice(0, qi);
+  if (path.indexOf("/api/") !== 0 || API_FAIL_SKIP_RE.test(path)) return;
+
+  const rec = { status: res.status, at: Date.now(), reason: "", code: "", consumed: false };
+  _apiFail = rec;
+  const announce = function () {
+    setTimeout(function () {
+      if (_lastErrToastAt >= rec.at) return;   // 页面自己已经提示过了，别说第二遍
+      if (typeof toast !== "function") return;
+      rec.consumed = true;
+      toast(apiFailureExplain(rec), "err");
+    }, 350);
+  };
+  let ct = "";
+  try { ct = (res.headers.get("content-type") || "").toLowerCase(); } catch (e) { /* noop */ }
+  if (ct.indexOf("json") >= 0 && typeof res.clone === "function") {
+    // 失败响应都很小，clone 一份读原文不影响调用方自己再读一次。
+    res.clone().json().then(function (b) {
+      if (b && typeof b.error === "string") rec.reason = b.error;
+      if (b && typeof b.code === "string") rec.code = b.code;
+    }).catch(function () { /* 不是 JSON 就算了 */ }).then(announce, announce);
+  } else {
+    announce();
+  }
+}
 
 /**
  * beginRangeLoad — cancel prior in-flight range fetch and bump a generation token.
@@ -1068,6 +1179,10 @@ function buildHostCache() {
 }
 
 function toast(msg, kind) {
+  if (kind === "err") {
+    _lastErrToastAt = Date.now();
+    msg = withApiFailureReason(msg);
+  }
   const t = $("toast");
   t.textContent = msg;
   t.className = "toast show " + (kind || "");

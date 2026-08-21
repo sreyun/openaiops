@@ -1,13 +1,70 @@
 package main
 
 import (
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode"
 )
+
+// ---- 反向代理没被信任时的自查 ----
+//
+// trust_proxy 关着时，clientIP 只认 TCP 对端地址——面板在 nginx 后面，那就是 127.0.0.1。
+// 后果不是"日志少个字段"这么轻：登录失败限流按 IP 计（5 分钟 8 次），**全公司共用同一个
+// 127.0.0.1**，任何一个人连输错几次密码，其他人一起被挡在门外五分钟；审计日志里的来源
+// IP 也全是 127.0.0.1，出了事查不到人。
+//
+// 又不能自作主张去信 X-Forwarded-For：面板若直接暴露在公网，伪造这个头就能绕过限流、
+// 伪造审计来源。所以这里只做**识别 + 说清楚**：确认上游是本机/内网的一跳、且带着代理头，
+// 就在日志里喊一次，并在真正被限流时把这条线索一并回给用户。
+func proxyHeadersPresent(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	for _, h := range []string{"X-Forwarded-For", "X-Real-IP", "X-Forwarded-Host", "Forwarded", "CF-Connecting-IP"} {
+		if strings.TrimSpace(r.Header.Get(h)) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// untrustedProxyDetected 报告"前面确实有一层反代，但 trust_proxy 没开"。
+//
+// 只在 TCP 对端是回环/内网地址时才算数：公网直连过来的伪造头不该把日志刷成告警。
+func (s *Server) untrustedProxyDetected(r *http.Request) bool {
+	if s == nil || s.cfg == nil || s.cfg.TrustProxy() || !proxyHeadersPresent(r) {
+		return false
+	}
+	host := r.RemoteAddr
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
+}
+
+var untrustedProxyWarnOnce sync.Once
+
+// warnUntrustedProxyOnce 在整个进程生命周期里只喊一次，免得刷屏。
+func (s *Server) warnUntrustedProxyOnce(r *http.Request) {
+	if !s.untrustedProxyDetected(r) {
+		return
+	}
+	untrustedProxyWarnOnce.Do(func() {
+		slog.Warn("检测到反向代理，但 trust_proxy 没有开启",
+			"影响", "登录限流与审计日志里的客户端 IP 全部是代理地址：一个人连续输错密码会把所有人一起挡在门外，审计也追不到真实来源",
+			"修复", `在 server_config.json 里设置 "trust_proxy": true（确认面板只经反代对外，且反代已转发 X-Real-IP / X-Forwarded-For）`,
+			"peer", r.RemoteAddr, "x_forwarded_for", r.Header.Get("X-Forwarded-For"), "x_real_ip", r.Header.Get("X-Real-IP"))
+	})
+}
 
 // parsePageLimitOffset reads ?limit=/?offset= for list endpoints that must keep
 // answering older callers in the legacy shape: paged is false when neither

@@ -882,6 +882,19 @@ func (s *Server) handlePatchHostFolder(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 }
 
+// sampleIDs 取前几个 id 拼成一行，用于"整批失败"的报错。整串几百个 id 甩进弹窗没人看，
+// 但一个都不给就没法往下查——三个足够对着主机列表核对了。
+func sampleIDs(ids []string) string {
+	const max = 3
+	if len(ids) == 0 {
+		return ""
+	}
+	if len(ids) <= max {
+		return strings.Join(ids, ", ")
+	}
+	return strings.Join(ids[:max], ", ") + " …"
+}
+
 // handleSetHostFolderBatch 把一批主机一次挪到同一个分组。
 //
 // 逐台点是十几次弹窗、十几次刷新；这里一次请求、一次落盘、一条审计。权限按单台的同一
@@ -913,8 +926,9 @@ func (s *Server) handleSetHostFolderBatch(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if len(ids) > maxBatchFolderHosts {
+		// 这条以前是英文原文，界面上直接甩给用户；分批提示也没有——用户只知道"失败了"。
 		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": fmt.Sprintf("too many hosts in one batch (max %d)", maxBatchFolderHosts)})
+			"error": Tr(r, "hosts.batch_too_many", maxBatchFolderHosts, len(ids))})
 		return
 	}
 	// 目标分组先校验一次：分组可能在别的标签页里被删了，这时要说得出"分组没了"，
@@ -955,14 +969,16 @@ func (s *Server) handleSetHostFolderBatch(w http.ResponseWriter, r *http.Request
 	}
 	if len(applied) == 0 {
 		// 一台都改不动才算失败，并且要说清楚是"没了"还是"没权限"。
+		// 报错里带上几个具体 host_id：整批失败时，"是哪几台"是唯一能往下查的线索，
+		// 否则用户与我们都只能对着一句"都已不存在"猜（真实反馈里就卡在这一步）。
 		if len(skippedDenied) > 0 && len(skippedMissing) == 0 {
 			writeJSON(w, http.StatusForbidden, map[string]string{
-				"error": fmt.Sprintf("无权访问所选主机（主机组/标签授权），共 %d 台", len(skippedDenied))})
+				"error": Tr(r, "hosts.batch_all_denied", len(skippedDenied), sampleIDs(skippedDenied))})
 			return
 		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": fmt.Sprintf("所选主机都已不存在（可能已被删除，请刷新后重试），共 %d 台",
-				len(skippedMissing)+len(skippedDenied))})
+			"error": Tr(r, "hosts.batch_all_missing", len(skippedMissing)+len(skippedDenied),
+				sampleIDs(append(append([]string{}, skippedMissing...), skippedDenied...)))})
 		return
 	}
 	if err := s.cfg.assignHostFoldersBatch(applied, targetID); err != nil {

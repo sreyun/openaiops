@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -296,4 +297,46 @@ func TestFolderWritesThroughRelayGateway(t *testing.T) {
 		"X-AIOps-Client-Host": "192.168.30.114:8529",
 	})
 	assertFolderFlowsWork(t, p)
+}
+
+// 整批失败时的报错要**能往下查**：说清是"没权限"还是"已不存在"，并且带上几个具体
+// host_id。原来只有一句"所选主机都已不存在，共 N 台"，用户与我们都只能对着它猜。
+// 台数超上限的那条以前还是英文原文直接甩到界面上。
+func TestBatchFolderFailureMessagesAreDiagnosable(t *testing.T) {
+	srv, _ := newTestServer(t)
+	f, err := srv.cfg.addHostFolder("", "数据库")
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := srv.auth.issueSession("admin")
+
+	rr := postBatchFolder(t, srv, token, []string{"ghost-1", "ghost-2"}, f.ID)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("主机都不存在应回 400，实际 %d", rr.Code)
+	}
+	var resp struct {
+		Error string `json:"error"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+	for _, want := range []string{"ghost-1", "ghost-2"} {
+		if !strings.Contains(resp.Error, want) {
+			t.Errorf("报错里应点名具体主机 %q，实际：%s", want, resp.Error)
+		}
+	}
+
+	many := make([]string, maxBatchFolderHosts+5)
+	for i := range many {
+		many[i] = fmt.Sprintf("h%d", i)
+	}
+	rr = postBatchFolder(t, srv, token, many, f.ID)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("超过上限应回 400，实际 %d", rr.Code)
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+	if strings.Contains(resp.Error, "MISSING") || strings.Contains(resp.Error, "%!") {
+		t.Fatalf("文案参数没对上：%s", resp.Error)
+	}
+	if !strings.Contains(resp.Error, "500") || !strings.Contains(resp.Error, "505") {
+		t.Errorf("超限报错要同时说出上限与本次台数，实际：%s", resp.Error)
+	}
 }

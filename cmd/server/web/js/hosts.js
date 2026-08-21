@@ -126,7 +126,11 @@ function endpointUnavailableMsg(code, resp) {
  */
 async function hostBatchMoveFolder() {
   const ids = Array.from(HOST_SELECTED);
-  if (!ids.length) return;
+  // 一台都没勾就直接 return 等于"点了没反应"——说一句，别让人对着按钮猜。
+  if (!ids.length) {
+    toast(I18N.t("section.batch_need_pick", "请先勾选要变更分组的主机"), "warn");
+    return;
+  }
   const folderId = await promptBatchFolderTarget(ids.length);
   if (folderId === null) return;
 
@@ -147,14 +151,19 @@ async function hostBatchMoveFolder() {
       // 权限、是参数还是版本；这三条的排查方向完全不同。
       console.error("[aiops] batch folder failed", r.status, body, { url: `${API}/hosts/folder/batch`, ids, folderId });
       if (r.status === 404 || r.status === 405) {
-        toast(endpointUnavailableMsg(r.status, r), "err");
+        // 这条路由不在（老二进制、或前置 WAF 单独拦了这个路径）时退回逐台改：
+        // 单台接口老得多，现场"一个个改能成、批量就是不行"正是这种组合。
+        // 批量在这里只是优化，不该决定功能可用与否。
+        data = await hostBatchMoveFolderOneByOne(ids, folderId, r);
+        if (!data) return;
+      } else {
+        const why = body.error || `HTTP ${r.status}`;
+        toast(I18N.t("toast.update_failed2") + "：" + why, "err");
         return;
       }
-      const why = body.error || `HTTP ${r.status}`;
-      toast(I18N.t("toast.update_failed2") + "：" + why, "err");
-      return;
+    } else {
+      data = body;
     }
-    data = body;
   } catch (e) {
     console.error("[aiops] batch folder request error", e);
     toast(I18N.t("toast.update_failed") + e, "err");
@@ -177,6 +186,47 @@ async function hostBatchMoveFolder() {
     console.error("[aiops] batch folder refresh failed", e);
     toast(I18N.t("toast.saved_need_refresh", "已更新，界面刷新失败，请手动刷新页面"), "info");
   }
+}
+
+/* 批量接口不在时的兜底：逐台调用单台接口。
+ *
+ * 并发压到 4：几百台机器一次性打出去既没必要，也容易被前面的限流/WAF 判成异常流量。
+ * 返回值刻意与批量接口同形（count/skipped），调用方后面的逻辑一行都不用改。
+ * 全都失败就返回 null，由调用方按"接口不存在"照常报错——那才是真实原因。
+ */
+async function hostBatchMoveFolderOneByOne(ids, folderId, resp) {
+  const skipped = [];
+  let done = 0;
+  const queue = ids.slice();
+  let aborted = false;
+  const worker = async () => {
+    for (;;) {
+      const id = queue.shift();
+      if (id === undefined) return;
+      // 前几台就全军覆没说明不是"批量路由缺失"而是整条链路不通——别把剩下几百台
+      // 也挨个撞一遍。
+      if (aborted || (!done && skipped.length >= 3)) { aborted = true; return; }
+      try {
+        const r = await fetch(`${API}/hosts/${encodeURIComponent(id)}/folder`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify({ folder_id: folderId })
+        });
+        if (r.ok) done++; else skipped.push(id);
+      } catch (e) {
+        skipped.push(id);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(4, ids.length) }, worker));
+  if (!done) {
+    toast(endpointUnavailableMsg(resp.status, resp), "err");
+    return null;
+  }
+  // 成了，但面板确实老——顺带提醒一句，否则这条兜底会把"该升级了"永远藏起来。
+  console.warn("[aiops] batch folder endpoint missing, fell back to per-host calls", { done, skipped: skipped.length });
+  toast(I18N.t("section.batch_fallback_used", "批量接口不可用，已逐台变更（建议升级面板）"), "info");
+  return { count: done, skipped: skipped };
 }
 
 /* 批量目标分组选择：在现有分组之外多给一个"新建分组…"。
