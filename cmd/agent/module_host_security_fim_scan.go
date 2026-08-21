@@ -31,9 +31,9 @@ const (
 	fimDefaultMaxChanges = 500
 	fimDefaultBudget     = 90 * time.Second
 	fimBaselineFile      = "fim_baseline.gz"
-	// v2 stores mtime in nanoseconds; a v1 file is discarded and re-baselined
-	// rather than producing a wave of bogus "mtime changed" deltas.
-	fimBaselineHeader = "#aiops-fim v2"
+	// v3 起基线里也记录**目录**（v2 只有普通文件，于是"新建了一个目录"这件事在比对里
+	// 根本不存在）。旧版本的基线一律丢弃重建，否则升级后第一次扫描会把满盘目录报成新增。
+	fimBaselineHeader = "#aiops-fim v3"
 )
 
 // fimEntry is one baseline record. Mtime is UnixNano so same-second rewrites of
@@ -43,6 +43,9 @@ type fimEntry struct {
 	Mtime int64
 	Mode  string
 	SHA   string
+	// Dir 标记这条是目录。目录只看"在不在"（新增/删除），不看 mtime——
+	// 目录的 mtime 每加一个子文件就变一次，报出来全是噪音，而那个子文件本身已经报了。
+	Dir bool
 }
 
 func (e fimEntry) mtimeSec() int64 { return e.Mtime / int64(time.Second) }
@@ -67,23 +70,27 @@ type hostSecFileChange struct {
 
 // hostSecFIMStats describes the walk so the UI can explain coverage honestly.
 type hostSecFIMStats struct {
-	Mode         string   `json:"mode"` // full|sensitive
-	Baseline     bool     `json:"baseline,omitempty"`
-	Roots        []string `json:"roots,omitempty"`
-	Files        int      `json:"files"`
-	Dirs         int      `json:"dirs"`
-	Added        int      `json:"added"`
-	Removed      int      `json:"removed"`
-	Modified     int      `json:"modified"`
-	Reported     int      `json:"reported"`
-	Hashed       int      `json:"hashed,omitempty"`
-	Skipped      int      `json:"skipped,omitempty"`
-	LimitHit     bool     `json:"limit_hit,omitempty"`
-	BudgetHit    bool     `json:"budget_hit,omitempty"`
-	Truncated    bool     `json:"truncated,omitempty"`
-	DurationMS   int64    `json:"duration_ms"`
-	ContentPaths int      `json:"content_paths,omitempty"`
-	Error        string   `json:"error,omitempty"`
+	Mode      string   `json:"mode"` // full|sensitive
+	Baseline  bool     `json:"baseline,omitempty"`
+	Roots     []string `json:"roots,omitempty"`
+	Files     int      `json:"files"`
+	Dirs      int      `json:"dirs"`
+	Added     int      `json:"added"`
+	Removed   int      `json:"removed"`
+	Modified  int      `json:"modified"`
+	Reported  int      `json:"reported"`
+	Hashed    int      `json:"hashed,omitempty"`
+	Skipped   int      `json:"skipped,omitempty"`
+	LimitHit  bool     `json:"limit_hit,omitempty"`
+	BudgetHit bool     `json:"budget_hit,omitempty"`
+	// ResumeFrom 是本轮被截断的位置：下一轮从这里接着扫（增量覆盖，见 fim_cursor.go）。
+	// 空表示这一轮把所有根都走完了。UI 据此如实说明覆盖进度，而不是假装"全盘已扫"。
+	ResumeFrom   string `json:"resume_from,omitempty"`
+	KnownDirs    int    `json:"known_dirs,omitempty"`
+	Truncated    bool   `json:"truncated,omitempty"`
+	DurationMS   int64  `json:"duration_ms"`
+	ContentPaths int    `json:"content_paths,omitempty"`
+	Error        string `json:"error,omitempty"`
 }
 
 type fimOptions struct {
@@ -533,6 +540,10 @@ func fimLoadBaseline(path string) (map[string]fimEntry, bool) {
 		size, _ := strconv.ParseInt(f[1], 10, 64)
 		mtime, _ := strconv.ParseInt(f[2], 10, 64)
 		e := fimEntry{Size: size, Mtime: mtime, Mode: f[3]}
+		if strings.HasPrefix(e.Mode, "d") {
+			e.Dir = true
+			e.Mode = strings.TrimPrefix(e.Mode, "d")
+		}
 		if len(f) >= 5 {
 			e.SHA = f[4]
 		}
@@ -560,7 +571,11 @@ func fimSaveBaseline(path string, cur map[string]fimEntry) error {
 			return err
 		}
 		for p, e := range cur {
-			if _, err := fmt.Fprintf(bw, "%s\t%d\t%d\t%s\t%s\n", p, e.Size, e.Mtime, e.Mode, e.SHA); err != nil {
+			mode := e.Mode
+			if e.Dir {
+				mode = "d" + mode
+			}
+			if _, err := fmt.Fprintf(bw, "%s\t%d\t%d\t%s\t%s\n", p, e.Size, e.Mtime, mode, e.SHA); err != nil {
 				return err
 			}
 		}
@@ -594,7 +609,7 @@ func collectFIMChanges(opts fimOptions) ([]hostSecFileChange, hostSecFIMStats) {
 	start := time.Now()
 	stats := hostSecFIMStats{Mode: "full"}
 
-	roots := opts.Roots
+	roots := fimScanRoots(opts.Roots)
 	if len(roots) == 0 {
 		roots = fimDefaultRoots()
 	}
@@ -611,40 +626,78 @@ func collectFIMChanges(opts fimOptions) ([]hostSecFileChange, hostSecFIMStats) {
 	// Exclude our own state dir so the baseline file never reports itself.
 	excl.prefixes = append(excl.prefixes, fimMatchKey(fimNormPath(fimDataDir())))
 
+	// 续扫游标：上一轮在哪儿被截断，这一轮就从哪儿接着走（见 fim_cursor.go）。
+	state := fimLoadScanState()
+	if state.Roots == nil {
+		state.Roots = map[string]fimRootState{}
+	}
+
 	cur := make(map[string]fimEntry, len(prev)+1024)
+	// visitedDirs 是**本轮完整枚举过**的目录。删除判定只在这些目录里做：
+	// 没走到的地方当然"看不见"文件，那不等于文件被删了。
+	visitedDirs := make(map[string]bool, 1024)
+	// blockedDirs 是本轮读不进去的目录（权限不足、设备忙）：它们下面的东西这一轮
+	// "看不见"，绝不能因此报成删除。
+	blockedDirs := make(map[string]bool, 8)
 	deadline := start.Add(opts.Budget)
 	maxFiles := opts.MaxFiles
 	if maxFiles <= 0 {
 		maxFiles = fimDefaultMaxFiles
 	}
+	stopAt := "" // 截断发生的位置（归一化路径）
 
 	for _, root := range roots {
 		if stats.LimitHit || stats.BudgetHit {
 			break
 		}
 		norm := fimNormPath(root)
+		rootKey := fimMatchKey(norm)
 		stats.Roots = append(stats.Roots, norm)
+		resume := state.Roots[rootKey].Next
+		rootDone := true
 		_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+			np := fimNormPath(p)
 			if err != nil {
 				stats.Skipped++
 				if d != nil && d.IsDir() {
+					// 读不进去的目录不算"完整枚举过"，否则里面的文件会被误判成已删除。
+					delete(visitedDirs, fimMatchKey(np))
+					blockedDirs[fimMatchKey(np)] = true
 					return fs.SkipDir
 				}
 				return nil
 			}
 			if stats.Files >= maxFiles {
 				stats.LimitHit = true
+				stopAt = np
+				rootDone = false
 				return filepath.SkipAll
 			}
 			if stats.Files&1023 == 0 && time.Now().After(deadline) {
 				stats.BudgetHit = true
+				stopAt = np
+				rootDone = false
 				return filepath.SkipAll
 			}
-			np := fimNormPath(p)
 			if d.IsDir() {
 				if excl.skipName(d.Name()) || excl.skipPath(np) {
 					return fs.SkipDir
 				}
+				// 已经被前面的"要害目录"根走过了：整棵子树跳过，别扫两遍。
+				if visitedDirs[fimMatchKey(np)] {
+					return fs.SkipDir
+				}
+				// 续扫：这棵子树整体排在游标之前就跳过（不是逐文件空转）。
+				if resume != "" && fimSubtreeBefore(np, resume) {
+					return fs.SkipDir
+				}
+				fi, err := d.Info()
+				if err != nil {
+					stats.Skipped++
+					return nil
+				}
+				cur[np] = fimEntry{Mtime: fi.ModTime().UnixNano(), Mode: fimModeString(fi.Mode()), Dir: true}
+				visitedDirs[fimMatchKey(np)] = true
 				stats.Dirs++
 				return nil
 			}
@@ -654,6 +707,9 @@ func collectFIMChanges(opts fimOptions) ([]hostSecFileChange, hostSecFIMStats) {
 				return nil
 			}
 			if excl.skipName(d.Name()) || excl.skipPath(np) {
+				return nil
+			}
+			if resume != "" && fimPathBefore(np, resume) {
 				return nil
 			}
 			// Tabs/newlines would corrupt the baseline line format; skip (vanishingly rare).
@@ -679,7 +735,31 @@ func collectFIMChanges(opts fimOptions) ([]hostSecFileChange, hostSecFIMStats) {
 			stats.Files++
 			return nil
 		})
+		st := state.Roots[rootKey]
+		if rootDone {
+			// 这个根走完一圈：游标归零，下一轮从头开始（这样删除才有机会被发现）。
+			if st.Next != "" {
+				st.Cycles++
+			}
+			st.Next = ""
+		} else {
+			st.Next = stopAt
+		}
+		state.Roots[rootKey] = st
 	}
+	stats.ResumeFrom = stopAt
+
+	// 被截断时，停点的各级祖先目录都**没有枚举完**，不能算"已知目录"——
+	// 否则下一轮走到它们剩下的部分时，那些文件会被当成新增。
+	if stopAt != "" {
+		for d := fimParentDir(stopAt); d != ""; d = fimParentDir(d) {
+			delete(visitedDirs, fimMatchKey(d))
+			delete(cur, d)
+		}
+		delete(visitedDirs, fimMatchKey(stopAt))
+		delete(cur, stopAt)
+	}
+	fimSaveScanState(state)
 
 	if !hadBaseline {
 		stats.Baseline = true
@@ -689,25 +769,32 @@ func collectFIMChanges(opts fimOptions) ([]hostSecFileChange, hostSecFIMStats) {
 		}
 		return nil, stats
 	}
-	// A walk that got cut short must not delete the baseline's knowledge of the
-	// unvisited tail, otherwise the next scan reports thousands of fake deletes.
-	partial := stats.LimitHit || stats.BudgetHit
 
 	maxChanges := opts.MaxChanges
 	if maxChanges <= 0 {
 		maxChanges = fimDefaultMaxChanges
 	}
-	changes := fimDiffBaseline(prev, cur, partial, patterns, opts.ContentDiff, maxChanges, &stats)
+	prevDirs := fimKnownDirs(prev)
+	stats.KnownDirs = len(prevDirs)
+	changes := fimDiffBaseline(prev, cur, visitedDirs, blockedDirs, prevDirs, patterns, opts.ContentDiff, maxChanges, &stats)
 	stats.DurationMS = time.Since(start).Milliseconds()
 
-	merged := cur
-	if partial {
-		merged = make(map[string]fimEntry, len(prev)+len(cur))
-		for p, e := range prev {
-			merged[p] = e
+	// 没走到的区域必须保留上一份基线的记忆，否则下一轮会把它们全报成删除。
+	merged := make(map[string]fimEntry, len(prev)+len(cur))
+	for p, e := range prev {
+		merged[p] = e
+	}
+	for p, e := range cur {
+		merged[p] = e
+	}
+	// 本轮完整枚举过的目录里，基线中已经不存在的条目要真的删掉——留着它们，
+	// 下一轮还会重复报同一条删除。
+	for p := range prev {
+		if _, ok := cur[p]; ok {
+			continue
 		}
-		for p, e := range cur {
-			merged[p] = e
+		if fimRegionVisited(p, visitedDirs, blockedDirs) {
+			delete(merged, p)
 		}
 	}
 	if err := fimSaveBaseline(basePath, merged); err != nil {
@@ -716,11 +803,50 @@ func collectFIMChanges(opts fimOptions) ([]hostSecFileChange, hostSecFIMStats) {
 	return changes, stats
 }
 
-func fimDiffBaseline(prev, cur map[string]fimEntry, partial bool, patterns []string, contentDiff bool, maxChanges int, stats *hostSecFIMStats) []hostSecFileChange {
+// fimKnownDirs 取基线里记录过的目录集合（键已归一化，便于大小写不敏感比较）。
+func fimKnownDirs(base map[string]fimEntry) map[string]bool {
+	out := make(map[string]bool, 512)
+	for p, e := range base {
+		if e.Dir {
+			out[fimMatchKey(p)] = true
+		}
+	}
+	return out
+}
+
+// fimPathBefore 判断路径是否排在续扫游标之前（已经扫过，本轮跳过）。
+func fimPathBefore(p, cursor string) bool {
+	return fimMatchKey(p) < fimMatchKey(cursor)
+}
+
+// fimSubtreeBefore 判断**整棵子树**都排在游标之前。
+// 目录 dir 是游标的祖先时不能跳——游标就在它里面，还得走进去。
+func fimSubtreeBefore(dir, cursor string) bool {
+	dk, ck := fimMatchKey(dir), fimMatchKey(cursor)
+	if dk >= ck {
+		return false
+	}
+	if strings.HasPrefix(ck, dk+"/") {
+		return false // 游标在这棵子树里
+	}
+	return true
+}
+
+// fimDiffBaseline 比对基线与本轮结果。
+//
+// 两条判定都以"覆盖面"为前提，这正是增量扫描下唯一诚实的做法：
+//   - **新增**只在"以前完整枚举过的目录"里成立（fimRegionKnown）。第一次走到某片区域时，
+//     那里的每个条目对基线来说都是"没见过"，但它们不是新增，只是我们以前没走到。
+//   - **删除**只在"本轮完整枚举过的目录"里成立（visitedDirs）。没走到的地方看不见文件，
+//     那不等于文件没了——早先那版一截断就整轮不报删除，代价是大机器上删除永远看不见。
+func fimDiffBaseline(prev, cur map[string]fimEntry, visitedDirs, blockedDirs, prevDirs map[string]bool, patterns []string, contentDiff bool, maxChanges int, stats *hostSecFIMStats) []hostSecFileChange {
 	var changes []hostSecFileChange
 	for p, c := range cur {
 		o, ok := prev[p]
 		if !ok {
+			if !fimRegionKnown(p, prevDirs) {
+				continue // 第一次走到这片区域：先建基线，不报"新增"
+			}
 			stats.Added++
 			changes = append(changes, hostSecFileChange{
 				Path: p, Change: "added", Reason: "added", Kind: fimPathKind(p),
@@ -741,17 +867,18 @@ func fimDiffBaseline(prev, cur map[string]fimEntry, partial bool, patterns []str
 			OldMode: o.Mode, NewMode: c.Mode,
 		})
 	}
-	if !partial {
-		for p, o := range prev {
-			if _, ok := cur[p]; ok {
-				continue
-			}
-			stats.Removed++
-			changes = append(changes, hostSecFileChange{
-				Path: p, Change: "removed", Reason: "removed", Kind: fimPathKind(p),
-				OldSHA: o.SHA, OldSize: o.Size, OldMtime: o.mtimeSec(), OldMode: o.Mode,
-			})
+	for p, o := range prev {
+		if _, ok := cur[p]; ok {
+			continue
 		}
+		if !fimRegionVisited(p, visitedDirs, blockedDirs) {
+			continue // 本轮没走到它所在的位置，无从判断它是不是被删了
+		}
+		stats.Removed++
+		changes = append(changes, hostSecFileChange{
+			Path: p, Change: "removed", Reason: "removed", Kind: fimPathKind(p),
+			OldSHA: o.SHA, OldSize: o.Size, OldMtime: o.mtimeSec(), OldMode: o.Mode,
+		})
 	}
 
 	fimSortChanges(changes)
@@ -785,6 +912,14 @@ func fimDiffBaseline(prev, cur map[string]fimEntry, partial bool, patterns []str
 
 // fimChangeReason names what differs, preferring content truth when hashed.
 func fimChangeReason(o, c fimEntry) string {
+	if o.Dir || c.Dir {
+		// 目录只看"在不在"。它的 mtime 每加一个子文件就变一次，而那个子文件本身
+		// 已经单独报过了——再报一条"目录被修改"纯属噪音。
+		if o.Dir != c.Dir {
+			return "kind"
+		}
+		return ""
+	}
 	if o.SHA != "" && c.SHA != "" {
 		if !strings.EqualFold(o.SHA, c.SHA) {
 			return "content"

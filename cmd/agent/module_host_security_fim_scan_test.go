@@ -266,3 +266,193 @@ func TestFimExplicitRootOverridesAutoExcludes(t *testing.T) {
 		t.Error("整盘扫时默认排除项必须仍然生效")
 	}
 }
+
+// —— 增量覆盖：这一组守的是"Windows 里新增的文件和目录识别不到"那类问题 ——
+//
+// 根因不在比对逻辑，而在覆盖面：一次扫描有文件数/时间上限，而 WalkDir 按字典序走，
+// 于是每一轮都在同一个位置被截断，靠后的目录（`C:\Users\...\Desktop` 就在其中）
+// 永远轮不到。下面分别钉住：目录本身要能报、断点要能续、没走到的地方不能瞎报。
+
+func TestCollectFIMDetectsNewDirectory(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "seed.txt"), "x\n")
+	opts := fimTestOpts(t, root)
+	if _, stats := collectFIMChanges(opts); !stats.Baseline {
+		t.Fatal("首轮应当建立基线")
+	}
+
+	// 用户在桌面上"新建文件夹"，里面还放了个文件。
+	if err := os.MkdirAll(filepath.Join(root, "新建文件夹"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(root, "新建文件夹", "note.txt"), "hi\n")
+
+	changes, _ := collectFIMChanges(opts)
+	byPath := changeByPath(changes)
+	dir := fimNormPath(filepath.Join(root, "新建文件夹"))
+	file := fimNormPath(filepath.Join(root, "新建文件夹", "note.txt"))
+	if c, ok := byPath[dir]; !ok || c.Change != "added" {
+		t.Fatalf("新建的目录没有被报出来：%+v", changes)
+	}
+	if c, ok := byPath[file]; !ok || c.Change != "added" {
+		t.Fatalf("新目录里的文件没有被报出来：%+v", changes)
+	}
+}
+
+func TestCollectFIMDetectsRemovedDirectory(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "sub", "a.txt"), "x\n")
+	opts := fimTestOpts(t, root)
+	collectFIMChanges(opts)
+
+	if err := os.RemoveAll(filepath.Join(root, "sub")); err != nil {
+		t.Fatal(err)
+	}
+	changes, _ := collectFIMChanges(opts)
+	byPath := changeByPath(changes)
+	if c, ok := byPath[fimNormPath(filepath.Join(root, "sub"))]; !ok || c.Change != "removed" {
+		t.Fatalf("被删除的目录没有被报出来：%+v", changes)
+	}
+	if c, ok := byPath[fimNormPath(filepath.Join(root, "sub", "a.txt"))]; !ok || c.Change != "removed" {
+		t.Fatalf("被删除目录里的文件没有被报出来：%+v", changes)
+	}
+}
+
+// 截断之后必须从断点继续，而不是每一轮都重扫同一段前缀——那正是靠后的目录
+// "永远扫不到"的原因。
+func TestCollectFIMResumesAfterTruncation(t *testing.T) {
+	root := t.TempDir()
+	// 三个按字典序排开的目录，每个若干文件。
+	for _, d := range []string{"a_dir", "b_dir", "c_dir"} {
+		for i := 0; i < 4; i++ {
+			writeFile(t, filepath.Join(root, d, string(rune('a'+i))+".txt"), "x\n")
+		}
+	}
+	opts := fimTestOpts(t, root)
+	opts.MaxFiles = 5 // 强制截断
+
+	first, stats1 := collectFIMChanges(opts)
+	if !stats1.Baseline {
+		t.Fatal("首轮应当建立基线")
+	}
+	if len(first) != 0 {
+		t.Fatalf("基线轮不该报变更：%+v", first)
+	}
+	if !stats1.LimitHit || stats1.ResumeFrom == "" {
+		t.Fatalf("应当因为文件数上限被截断并留下续扫点：%+v", stats1)
+	}
+
+	seen := map[string]bool{}
+	resume := stats1.ResumeFrom
+	// 再扫几轮，覆盖面应当推进到最后一个目录。
+	for i := 0; i < 6; i++ {
+		_, st := collectFIMChanges(opts)
+		for _, r := range st.Roots {
+			_ = r
+		}
+		if st.ResumeFrom != "" {
+			if st.ResumeFrom == resume {
+				t.Fatalf("续扫点没有推进，还停在 %q", resume)
+			}
+			resume = st.ResumeFrom
+		}
+		seen[st.ResumeFrom] = true
+		if st.ResumeFrom == "" {
+			break // 走完一圈
+		}
+	}
+	// 最终基线里必须出现最后一个目录的文件，否则"靠后的目录永远扫不到"依旧成立。
+	base, ok := fimLoadBaseline(fimBaselinePath())
+	if !ok {
+		t.Fatal("基线读不出来")
+	}
+	want := fimNormPath(filepath.Join(root, "c_dir", "d.txt"))
+	if _, ok := base[want]; !ok {
+		t.Fatalf("续扫没有覆盖到最后一个目录：基线里没有 %s", want)
+	}
+}
+
+// 第一次走到某片区域时，那里的文件对基线来说都是"没见过"——但它们不是新增。
+// 报出来会把真正的变更淹掉，所以必须先默默建基线。
+func TestCollectFIMDoesNotReportFirstVisitAsAdded(t *testing.T) {
+	root := t.TempDir()
+	for _, d := range []string{"a_dir", "z_dir"} {
+		for i := 0; i < 4; i++ {
+			writeFile(t, filepath.Join(root, d, string(rune('a'+i))+".txt"), "x\n")
+		}
+	}
+	opts := fimTestOpts(t, root)
+	opts.MaxFiles = 5
+
+	collectFIMChanges(opts) // 基线轮：只覆盖前半段
+	changes, stats := collectFIMChanges(opts)
+	for _, c := range changes {
+		if c.Change == "added" && strings.Contains(c.Path, "z_dir") {
+			t.Fatalf("第一次走到 z_dir 就报新增，是噪音：%+v（stats=%+v）", c, stats)
+		}
+	}
+}
+
+// 没走到的目录里，基线中的文件不能被报成删除——那是"看不见"，不是"没了"。
+func TestCollectFIMDoesNotReportUnvisitedAsRemoved(t *testing.T) {
+	root := t.TempDir()
+	for _, d := range []string{"a_dir", "z_dir"} {
+		for i := 0; i < 4; i++ {
+			writeFile(t, filepath.Join(root, d, string(rune('a'+i))+".txt"), "x\n")
+		}
+	}
+	opts := fimTestOpts(t, root)
+	// 先完整建一次基线
+	collectFIMChanges(opts)
+	// 再把上限压到只够扫前半段
+	opts.MaxFiles = 5
+	changes, _ := collectFIMChanges(opts)
+	for _, c := range changes {
+		if c.Change == "removed" && strings.Contains(c.Path, "z_dir") {
+			t.Fatalf("没走到的目录被误报成删除：%+v", c)
+		}
+	}
+}
+
+func TestFimSubtreeBeforeSkipsOnlyFinishedTrees(t *testing.T) {
+	cursor := "/data/b_dir/c.txt"
+	if !fimSubtreeBefore("/data/a_dir", cursor) {
+		t.Error("排在游标之前的整棵子树应当跳过")
+	}
+	if fimSubtreeBefore("/data/b_dir", cursor) {
+		t.Error("游标就在这棵子树里，不能跳")
+	}
+	if fimSubtreeBefore("/data/z_dir", cursor) {
+		t.Error("排在游标之后的子树还没扫，不能跳")
+	}
+	if fimSubtreeBefore("/data", cursor) {
+		t.Error("祖先目录不能跳")
+	}
+}
+
+func TestFimRegionKnownWalksAncestors(t *testing.T) {
+	known := map[string]bool{fimMatchKey("/home/u/Desktop"): true}
+	if !fimRegionKnown("/home/u/Desktop/new.txt", known) {
+		t.Error("已知目录里的新文件应当算新增")
+	}
+	if !fimRegionKnown("/home/u/Desktop/新建文件夹/a.txt", known) {
+		t.Error("已知目录下新建子目录里的文件也应当算新增")
+	}
+	if fimRegionKnown("/var/log/never/walked.txt", known) {
+		t.Error("从没走到过的区域不该算新增")
+	}
+}
+
+func TestFimPriorityRootsAreRealDirectories(t *testing.T) {
+	// 只要求"存在的才留下"这条成立；具体路径随平台不同。
+	roots := fimExistingRoots(append(fimPriorityRoots(), t.TempDir(), "/definitely/not/here"))
+	for _, r := range roots {
+		fi, err := os.Stat(r)
+		if err != nil || !fi.IsDir() {
+			t.Fatalf("扫描根不存在或不是目录：%s", r)
+		}
+	}
+	if len(roots) == 0 {
+		t.Fatal("至少应当保留刚建出来的临时目录")
+	}
+}

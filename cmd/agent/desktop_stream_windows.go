@@ -283,9 +283,11 @@ type bitmapInfoHeader struct {
 }
 
 type winCapture struct {
-	w, h        int
-	monX, monY  int
-	monID       int
+	w, h       int
+	monX, monY int
+	monID      int
+	// origMode 是会话开始时的显示模式；只有真的改过分辨率才非空（见 desktop_resolution_windows.go）。
+	origMode    *devModeW
 	curDesk     uintptr // currently attached input desktop (worker mode)
 	curDeskName string
 	locked      bool // this goroutine's OS thread is locked for SetThreadDesktop

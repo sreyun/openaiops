@@ -120,6 +120,9 @@ function renderDesktopShell(id, name) {
             <label class="desk-q-label"><span>${esc(I18N.t("desktop.monitor"))}</span>
               <select id="deskMonitor" class="desk-select"><option value="0">—</option></select>
             </label>
+            <label class="desk-q-label" id="deskResLabel" hidden><span>${esc(I18N.t("desktop.resolution", "分辨率"))}</span>
+              <select id="deskResolution" class="desk-select"></select>
+            </label>
             <label class="desk-q-label"><span>${esc(I18N.t("desktop.quality"))}</span>
               <select id="deskQuality" class="desk-select">
                 <option value="fast">${esc(I18N.t("desktop.q_fast"))}</option>
@@ -215,7 +218,7 @@ function renderDesktopShell(id, name) {
   }
   // Bind selects every render — innerHTML recreates nodes; do not rely on
   // bubbling alone (fullscreen / some WebKit paths drop delegated change).
-  ["deskQuality", "deskCodec", "deskMonitor", "deskClipAutoSync", "deskFileInput"].forEach((id) => {
+  ["deskQuality", "deskCodec", "deskMonitor", "deskResolution", "deskClipAutoSync", "deskFileInput"].forEach((id) => {
     const el = $(id);
     if (!el) return;
     el.onchange = onDesktopUIChange;
@@ -497,6 +500,25 @@ function drawDeskTiles(canvas, payload, onPainted) {
   });
 }
 
+/**
+ * fillDeskResolutions 用 Agent 报上来的可用显示模式填充下拉。
+ *
+ * 只有平台真的支持改分辨率时 Agent 才会带 modes，所以这个入口默认是隐藏的——
+ * 给一个点了必然失败的开关比没有更糟。
+ */
+function fillDeskResolutions(modes) {
+  const sel = $("deskResolution");
+  const label = $("deskResLabel");
+  if (!sel || !label) return;
+  DESK_META.modes = modes;
+  const cur = (DESK_META.w && DESK_META.h) ? `${DESK_META.w}x${DESK_META.h}` : "";
+  sel.innerHTML =
+    `<option value="">${esc(I18N.t("desktop.res_keep", "保持远端不变"))}</option>` +
+    `<option value="fit">${esc(I18N.t("desktop.res_fit", "匹配我的窗口"))}</option>` +
+    modes.map(m => `<option value="${m.w}x${m.h}"${cur === `${m.w}x${m.h}` ? " selected" : ""}>${m.w}×${m.h}</option>`).join("");
+  label.hidden = false;
+}
+
 function fillMonitorSelect(mons) {
   const sel = $("deskMonitor");
   if (!sel) return;
@@ -730,6 +752,10 @@ function connectDesktopWS(id, name) {
           ].filter(Boolean).join(" · ");
           toast(I18N.t("desktop.quality_applied") + (qLabel ? ": " + qLabel : "") + (detail ? ` (${detail})` : ""), "ok");
           setDesktopStatus(I18N.t("desktop.connected") + (detail ? " · " + detail : ""), false);
+        }
+        if (Array.isArray(meta.modes) && meta.modes.length) fillDeskResolutions(meta.modes);
+        if (meta.resolution && meta.resolution.w) {
+          toast(I18N.t("desktop.resolution_applied", "已切换远端分辨率") + `：${meta.resolution.w}×${meta.resolution.h}`, "ok");
         }
         if (meta.view_only != null) DESK_META.viewOnly = !!meta.view_only;
         applyDeskInputMeta(meta);
@@ -1551,6 +1577,18 @@ function onDesktopUIChange(e) {
     sendDeskQuality();
     if (DESK_WS && DESK_WS.readyState === 1) {
       toast(I18N.t("desktop.codec") + ": " + DESK_QUALITY.codec.toUpperCase(), "ok");
+    }
+    return;
+  }
+  if (e.target && e.target.id === "deskResolution") {
+    const v = String(e.target.value || "");
+    if (!v) return; // "保持远端不变"
+    const client = readDeskClientSize();
+    if (v === "fit") {
+      deskSendJSON("A", { action: "set_resolution", client_w: client.client_w, client_h: client.client_h });
+    } else {
+      const [w, h] = v.split("x").map(n => parseInt(n, 10) || 0);
+      deskSendJSON("A", { action: "set_resolution", w, h });
     }
     return;
   }

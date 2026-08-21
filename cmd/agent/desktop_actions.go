@@ -34,6 +34,11 @@ type deskActionRequest struct {
 	Enter   bool   `json:"enter,omitempty"` // append Enter after type_text / unlock
 	ScreenW int    `json:"screen_w,omitempty"`
 	ScreenH int    `json:"screen_h,omitempty"`
+	// set_resolution：显式给定目标分辨率；给 0 则按 client_w/h 自动挑一个最贴近的模式。
+	W       int `json:"w,omitempty"`
+	H       int `json:"h,omitempty"`
+	ClientW int `json:"client_w,omitempty"`
+	ClientH int `json:"client_h,omitempty"`
 }
 
 func deskFeaturesFromInput(inp deskInput, viewOnly bool) map[string]bool {
@@ -133,7 +138,7 @@ func deskMetaExtras(inp deskInput, viewOnly bool) map[string]any {
 	return out
 }
 
-func handleDeskAction(inp deskInput, payload []byte, screenW, screenH int, fileTxChan chan<- []byte) {
+func handleDeskAction(cap deskCapture, inp deskInput, payload []byte, screenW, screenH int, fileTxChan chan<- []byte) {
 	var req deskActionRequest
 	if json.Unmarshal(payload, &req) != nil || req.Action == "" {
 		return
@@ -145,6 +150,7 @@ func handleDeskAction(inp deskInput, payload []byte, screenW, screenH int, fileT
 		req.ScreenH = screenH
 	}
 	var err error
+	extra := map[string]any{}
 	switch strings.ToLower(strings.TrimSpace(req.Action)) {
 	case "cad":
 		err = deskDoCAD(inp)
@@ -158,6 +164,16 @@ func handleDeskAction(inp deskInput, payload []byte, screenW, screenH int, fileT
 		err = deskDoUnlock(inp, req.User, req.Text, req.Enter || req.Text != "", req.ScreenW, req.ScreenH)
 	case "paste":
 		err = deskDoPaste(inp, req.Text)
+	case "set_resolution":
+		// 远端分辨率迁就客户端窗口（mstsc 的做法）：画面缩放压不出不存在的像素，
+		// 远端 1024×768 而本地窗口 2560×1400 时，只有真的改远端分辨率才谈得上"清晰"。
+		var mode deskDisplayMode
+		mode, err = deskApplyResolution(cap, req.W, req.H, req.ClientW, req.ClientH)
+		if err == nil {
+			extra["resolution"] = mode
+		}
+	case "reset_resolution":
+		err = deskRestoreResolution(cap)
 	default:
 		err = fmt.Errorf("unknown action %q", req.Action)
 	}
@@ -168,6 +184,9 @@ func handleDeskAction(inp deskInput, payload []byte, screenW, screenH int, fileT
 	}
 	if err != nil {
 		ack["error"] = err.Error()
+	}
+	for k, v := range extra {
+		ack[k] = v
 	}
 	for k, v := range deskMetaExtras(inp, false) {
 		ack[k] = v

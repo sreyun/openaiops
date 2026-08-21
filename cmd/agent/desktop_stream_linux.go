@@ -27,6 +27,9 @@ type linuxCapture struct {
 	monID        int
 	outputName   string // xrandr / grim output name for multi-monitor crop
 	wayland      bool
+	// origMode 是会话开始时的 xrandr 模式（"1920x1080"）；改过分辨率才非空，
+	// 会话收尾时据此还原（见 desktop_resolution_linux.go）。
+	origMode string
 }
 
 func openDeskCapture() (deskCapture, error) {

@@ -548,35 +548,60 @@ func (s *Server) handleDesktopWS(w http.ResponseWriter, r *http.Request) {
 	<-sess.done
 }
 
+// deskAuditedActions 是允许通过的远程桌面动作。
+//
+// **这张表就是白名单本身**：不在表里的动作会被服务端静默丢掉。曾经因此出过事——
+// 界面上的「解锁」按钮发的是 unlock，而这里只认 cad/chord/type_text/wake，于是点了
+// 毫无反应、日志里也没有任何痕迹。加动作时两边必须一起改，
+// TestDeskActionsFromUIAreAudited 会盯着 UI 里出现的每一个动作名。
+var deskAuditedActions = map[string]bool{
+	"cad": true, "chord": true, "type_text": true, "wake": true,
+	"unlock": true, "paste": true,
+	"set_resolution": true, "reset_resolution": true,
+}
+
 // auditDeskAction logs lock-screen control actions. Returns false if the frame
-// should be dropped (invalid JSON / unknown action). Never logs type_text body.
+// should be dropped (invalid JSON / unknown action). Never logs credential text.
 func auditDeskAction(s *Server, operator, clientIP, hostname string, payload []byte) bool {
 	var req struct {
 		Action string `json:"action"`
 		Chord  string `json:"chord"`
 		Text   string `json:"text"`
+		User   string `json:"user"`
 		Enter  bool   `json:"enter"`
+		W      int    `json:"w"`
+		H      int    `json:"h"`
 	}
 	if json.Unmarshal(payload, &req) != nil {
 		return false
 	}
 	act := strings.ToLower(strings.TrimSpace(req.Action))
-	switch act {
-	case "cad", "chord", "type_text", "wake":
-	default:
+	if !deskAuditedActions[act] {
 		return false
 	}
 	msg := "远程桌面动作 " + act
 	switch act {
 	case "chord":
 		msg += " (" + req.Chord + ")"
-	case "type_text":
+	case "type_text", "paste":
 		n := len([]rune(req.Text))
 		msg += "（凭据文本已发送，长度=" + itoa(n)
 		if req.Enter {
 			msg += "+Enter"
 		}
 		msg += "，内容未记录）"
+	case "unlock":
+		msg += "（解锁凭据已发送"
+		if u := strings.TrimSpace(req.User); u != "" {
+			msg += "，用户名=" + u
+		}
+		msg += "，口令未记录）"
+	case "set_resolution":
+		if req.W > 0 && req.H > 0 {
+			msg += fmt.Sprintf("（切换到 %d×%d）", req.W, req.H)
+		} else {
+			msg += "（匹配操作员窗口）"
+		}
 	}
 	s.store.AddLog(LogEntry{
 		Kind: KindOperation, Level: "warning", Actor: operator, IP: clientIP, Host: hostname,

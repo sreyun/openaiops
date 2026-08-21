@@ -471,7 +471,12 @@ function hsFimScopeLine(scan) {
     .replace("{dirs}", String(st.dirs || 0))
     .replace("{ms}", String(st.duration_ms || 0));
   if (st.limit_hit || st.budget_hit) {
-    line += " " + hsT("hs.fim_scope_partial", "本次遍历因文件数/时间上限提前结束，未覆盖全部目录（不会误报删除）。");
+    // 说清楚"这一轮到哪儿"和"下一轮从哪儿接着走"——断点续扫之后，覆盖面是逐轮推进的，
+    // 只说一句"没扫全"会让人以为剩下的永远扫不到。
+    line += " " + hsT("hs.fim_scope_partial", "本次遍历因文件数/时间上限提前结束，下一轮从断点继续（不会误报新增或删除）。");
+    if (st.resume_from) {
+      line += " " + hsT("hs.fim_resume_from", "续扫点：{path}").replace("{path}", st.resume_from);
+    }
   }
   if (st.error) line += " " + st.error;
   return line;

@@ -1,0 +1,201 @@
+package main
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+)
+
+// 增量覆盖：让"整盘扫描"在有预算上限的前提下**最终覆盖到每一个角落**。
+//
+// 修的是现场那句"Windows 里用户新增的文件、目录没被识别到"。原因不在比对逻辑，而在
+// 覆盖面：一次扫描有 15 万文件 / 90 秒的硬上限，而 Windows 的 C:\ 动辄上百万文件。
+// filepath.WalkDir 按字典序遍历，于是每一轮都在**同一个位置**被截断——
+// `C:\Program Files` 之后就没了，`C:\Users\...\Desktop` 永远轮不到。
+// 用户在桌面上新建的文件和目录，扫描器从来没有走到过，自然"识别不到"。
+//
+// 三件事一起解决：
+//
+//  1. **断点续扫**：截断时把停在哪儿记下来，下一轮从那里接着走，走完一圈再从头开始。
+//     跳过已扫区域是整棵子树跳过（目录名字典序比较），不是逐个文件空转。
+//  2. **要害目录优先**：先扫用户数据与配置（Windows 的 Users/ProgramData/Program Files、
+//     Linux 的 /etc /root /home /opt /usr/local、macOS 的 /Users /Applications /Library
+//     的两个 LaunchAgents/Daemons），再扫整盘。第一轮就能覆盖到人真正会改动的地方。
+//  3. **目录本身也进基线**：原来只记录普通文件，所以"新建了一个目录"这件事在比对里
+//     根本不存在。现在目录也记，新增/删除目录都能报出来。
+//
+// 与之配套的判定规则见 fimRegionKnown：只有**之前完整枚举过**的目录里出现的新条目才算
+// "新增"，否则那只是"第一次走到这片区域"，报出来全是噪音。
+
+// fimScanStateFile 与基线同目录，记录每个根的续扫游标。
+const fimScanStateFile = "fim_cursor.json"
+
+// fimRootState 是一个扫描根的进度。
+type fimRootState struct {
+	// Next 是下一轮从哪个路径继续（归一化路径，空 = 从头开始）。
+	Next string `json:"next,omitempty"`
+	// Cycles 是这个根被完整走完的次数，仅用于排障与 UI 上的覆盖度说明。
+	Cycles int `json:"cycles,omitempty"`
+}
+
+type fimScanState struct {
+	Roots map[string]fimRootState `json:"roots,omitempty"`
+}
+
+func fimScanStatePath() string { return filepath.Join(fimDataDir(), fimScanStateFile) }
+
+func fimLoadScanState() fimScanState {
+	var st fimScanState
+	raw, err := os.ReadFile(fimScanStatePath())
+	if err != nil {
+		return fimScanState{Roots: map[string]fimRootState{}}
+	}
+	if json.Unmarshal(raw, &st) != nil || st.Roots == nil {
+		return fimScanState{Roots: map[string]fimRootState{}}
+	}
+	return st
+}
+
+func fimSaveScanState(st fimScanState) {
+	if err := os.MkdirAll(fimDataDir(), 0o750); err != nil {
+		return
+	}
+	raw, err := json.Marshal(st)
+	if err != nil {
+		return
+	}
+	tmp := fimScanStatePath() + ".tmp"
+	if os.WriteFile(tmp, raw, 0o600) != nil {
+		return
+	}
+	_ = os.Rename(tmp, fimScanStatePath())
+}
+
+// fimPriorityRoots 是"人会动、且安全上最该看"的目录，排在整盘之前先扫。
+//
+// 整盘扫描在大机器上一轮走不完，谁先谁后就决定了用户能不能及时看到变更。
+// 桌面上新建一个文件属于最高频的场景，所以用户目录必须排在最前面。
+func fimPriorityRoots() []string {
+	switch runtime.GOOS {
+	case "windows":
+		sd := os.Getenv("SystemDrive")
+		if sd == "" {
+			sd = "C:"
+		}
+		out := []string{sd + `\Users`}
+		if pd := os.Getenv("ProgramData"); pd != "" {
+			out = append(out, pd)
+		}
+		if pf := os.Getenv("ProgramFiles"); pf != "" {
+			out = append(out, pf)
+		}
+		if pf86 := os.Getenv("ProgramFiles(x86)"); pf86 != "" {
+			out = append(out, pf86)
+		}
+		if win := os.Getenv("WINDIR"); win != "" {
+			// System32 是落后门最常见的位置之一，但整个 Windows 目录太大，
+			// 只把最要害的两个子目录提前。
+			out = append(out, filepath.Join(win, "System32", "drivers", "etc"),
+				filepath.Join(win, "System32", "Tasks"))
+		}
+		return out
+	case "darwin":
+		return []string{
+			"/etc", "/Users", "/Applications",
+			"/Library/LaunchAgents", "/Library/LaunchDaemons",
+			"/usr/local/bin", "/opt",
+		}
+	default:
+		return []string{
+			"/etc", "/root", "/home", "/opt", "/srv",
+			"/usr/local", "/usr/bin", "/usr/sbin", "/bin", "/sbin",
+			"/var/www", "/var/spool/cron",
+		}
+	}
+}
+
+// fimExistingRoots 过滤掉不存在的路径，并去掉重复项（保持顺序）。
+func fimExistingRoots(list []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, p := range list {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		key := fimMatchKey(fimNormPath(p))
+		if seen[key] {
+			continue
+		}
+		if fi, err := os.Stat(p); err != nil || !fi.IsDir() {
+			continue
+		}
+		seen[key] = true
+		out = append(out, p)
+	}
+	return out
+}
+
+// fimScanRoots 组装本次要走的根：要害目录在前，整盘在后。
+// 显式配置了 fim_roots 时完全听配置的，不再自作主张加东西。
+func fimScanRoots(configured []string) []string {
+	if len(configured) > 0 {
+		return fimExistingRoots(configured)
+	}
+	return fimExistingRoots(append(fimPriorityRoots(), fimDefaultRoots()...))
+}
+
+// fimParentDir 取归一化路径的父目录（"/" 或 "C:" 到顶）。
+func fimParentDir(p string) string {
+	i := strings.LastIndex(p, "/")
+	if i < 0 {
+		return ""
+	}
+	if i == 0 {
+		if p == "/" {
+			return ""
+		}
+		return "/"
+	}
+	return p[:i]
+}
+
+// fimRegionKnown 回答"这个新条目所在的区域，我们以前完整枚举过吗"。
+//
+// 这是增量覆盖下判定"新增"的关键：第一次走到某片区域时，那里的每一个文件对基线来说
+// 都是"没见过"，但它们并不是新增的——只是我们以前没走到。只有当它的某一级祖先目录
+// **在上一份基线里存在**（意味着那次扫描完整枚举过它）时，才谈得上"新增"。
+//
+// 反过来，用户在已知目录里新建的目录/文件会一路向上撞到那个已知祖先，照常报出来。
+func fimRegionKnown(p string, prevDirs map[string]bool) bool {
+	for d := fimParentDir(p); d != ""; d = fimParentDir(d) {
+		if prevDirs[fimMatchKey(d)] {
+			return true
+		}
+	}
+	return false
+}
+
+// fimRegionVisited 回答"这一条基线记录所在的位置，本轮真的走到了吗"。
+//
+// 删除判定必须以此为前提。直接看"父目录在不在 visitedDirs"是不够的：目录被整个删掉时，
+// 父目录本身也不在了，里面的文件就永远报不出删除。所以沿祖先向上找，
+// 找到任何一个**本轮完整枚举过**的目录就算走到了（那次枚举没列出这一支，说明确实没了）。
+//
+// blocked 是本轮读不进去的目录（权限不足等）：它们下面的东西"看不见"，不是"没了"，
+// 沿途撞上就停。被截断的停点祖先同样不在 visited 里（调用方在扫描收尾时剔除），
+// 所以"还没轮到扫"的区域不会被误判成删除。
+func fimRegionVisited(p string, visited, blocked map[string]bool) bool {
+	for d := fimParentDir(p); d != ""; d = fimParentDir(d) {
+		k := fimMatchKey(d)
+		if blocked[k] {
+			return false
+		}
+		if visited[k] {
+			return true
+		}
+	}
+	return false
+}

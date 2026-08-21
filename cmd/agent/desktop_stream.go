@@ -408,6 +408,11 @@ func (a *Agent) runDesktopSession(server, sid, lang string) {
 		"clipboard": clipOK, "monitors": mons,
 		"view_only": viewOnly,
 	}
+	// 可切换的显示模式：UI 据此提供"匹配我的窗口 / 指定分辨率"。
+	// 平台不支持就不带这个键，界面上那个入口直接不出现（给一个点了必然失败的开关更糟）。
+	if modes := deskModesOf(cap); len(modes) > 0 {
+		metaMap["modes"] = modes
+	}
 	for k, v := range deskMetaExtras(inp, viewOnly) {
 		metaMap[k] = v
 	}
@@ -917,11 +922,16 @@ func (a *Agent) runDesktopSession(server, sid, lang string) {
 		}
 		defer resp.Body.Close()
 		dr := newDeadlineReader(resp.Body, 90*time.Second)
-		readDeskFrames(dr, inp, lang, &q, &qMu, touch, fileTxChan, &sw, &sh, applyMonitor)
+		readDeskFrames(dr, cap, inp, lang, &q, &qMu, touch, fileTxChan, &sw, &sh, applyMonitor)
 	}()
 
 	<-reqDone
 	closeAll()
+	// 会话里改过远端分辨率就一定要还回去：远程把人家机器的分辨率改了不恢复，
+	// 是这类工具最招人烦的行为之一。没改过是空操作。
+	if err := deskRestoreResolution(cap); err != nil {
+		slog.Warn("恢复远端分辨率失败", "err", err)
+	}
 	slog.Info("远程桌面会话结束", "session", sid)
 }
 
@@ -1193,7 +1203,7 @@ func derefInt(p *int, fallback int) int {
 	return *p
 }
 
-func readDeskFrames(r io.Reader, inp deskInput, lang string, q *deskQuality, qMu *sync.Mutex, touch func(), fileTxChan chan<- []byte, screenW, screenH *int, applyMonitor func(int)) {
+func readDeskFrames(r io.Reader, cap deskCapture, inp deskInput, lang string, q *deskQuality, qMu *sync.Mutex, touch func(), fileTxChan chan<- []byte, screenW, screenH *int, applyMonitor func(int)) {
 	var hdr [3]byte
 	type fileUploadState struct {
 		file     *os.File
@@ -1443,7 +1453,7 @@ func readDeskFrames(r io.Reader, inp deskInput, lang string, q *deskQuality, qMu
 			if screenH != nil {
 				sh0 = *screenH
 			}
-			handleDeskAction(inp, payload, sw0, sh0, fileTxChan)
+			handleDeskAction(cap, inp, payload, sw0, sh0, fileTxChan)
 		case 'f':
 			var meta struct {
 				Filename   string `json:"filename"`
