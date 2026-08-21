@@ -219,6 +219,7 @@ http {
 // 修好之后这条链路必须做到两件事：升级/剧本照常跑完（拿到完整输出与退出码），
 // 并留下一条指向 nginx 配置的判定——而不是一句把矛头指向 Agent 的"未接单"。
 func TestNginxE2EBufferedUpstreamStillCompletes(t *testing.T) {
+	edgeProxyDiagState.reset() // 包级状态：上一条用例留下的判定会让下面的计数假红
 	oldPickup := execPickupTimeout
 	execPickupTimeout = 500 * time.Millisecond
 	defer func() { execPickupTimeout = oldPickup }()
@@ -268,7 +269,7 @@ http {
 	if !strings.Contains(out, "linux update ok") {
 		t.Fatalf("输出没拿全：%q", out)
 	}
-	v := srv.edgeDiag.snapshot()
+	v := edgeProxyDiagState.snapshot()
 	if len(v) != 1 || v[0].Kind != "upstream_buffered" {
 		t.Fatalf("必须留下「反代缓冲了上行流」的判定：%+v", v)
 	}

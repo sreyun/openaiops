@@ -1575,6 +1575,10 @@ svg.sparkline{width:100%; height:46px; display:block}
 .htx-dlg-input::placeholder{color:var(--muted2)}
 .htx-dlg-select{appearance:auto;cursor:pointer}
 .htx-dlg-hint{font-size:11px;color:var(--muted2);line-height:1.4;margin-top:1px}
+/* 手动复制兜底框：等宽、可滚动、高度固定——里面装的是终端输出，不能撑破弹窗。 */
+.manual-copy-text{height:auto;min-height:150px;max-height:46vh;padding:8px 10px;line-height:1.45;
+  font-family:ui-monospace,"SF Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace;font-size:12.5px;
+  white-space:pre;overflow:auto;resize:vertical;margin-top:8px}
 .htx-dlg-err{font-size:11.5px;color:var(--crit);min-height:16px;margin-top:2px}
 .htx-dlg-foot{display:flex;justify-content:flex-end;gap:8px;padding:10px 14px 14px}
 

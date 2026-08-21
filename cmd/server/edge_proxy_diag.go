@@ -40,6 +40,15 @@ type edgeProxyDiag struct {
 	lastLog map[string]time.Time
 }
 
+// edgeProxyDiagState 是这套判定的唯一存放处。
+//
+// 刻意做成包级变量而不是 *Server 上的字段：这份状态是纯粹的观测数据（谁被反代拖住了），
+// 没有任何依赖 Server 的东西，而挂到 Server 上就意味着**改一个诊断功能要同时动
+// handlers.go 里的结构体定义**——那个文件是全仓最容易产生分叉/漏同步的一处（415 个
+// 文件共用一个 package main，struct 定义与 NewServer 都在里面）。同样的取舍在
+// self_fault.go 的 platformFaultSink 上已经做过一次，理由相同。
+var edgeProxyDiagState = newEdgeProxyDiag()
+
 // edgeProxyVerdict 是一台主机上最近一次"反代把上行流缓冲住了"的判定。
 type edgeProxyVerdict struct {
 	HostID   string `json:"host_id"`
@@ -85,6 +94,18 @@ func (d *edgeProxyDiag) note(hostID, hostname, kind, detail string) bool {
 	return true
 }
 
+// reset 清空判定表。只有测试会用到：包级状态在同一个进程里跨用例存活，
+// 上一条用例留下的判定会让下一条"不该有判定"的断言假红。
+func (d *edgeProxyDiag) reset() {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	d.hosts = map[string]edgeProxyVerdict{}
+	d.lastLog = map[string]time.Time{}
+	d.mu.Unlock()
+}
+
 // snapshot 按时间倒序返回最近的判定，供诊断接口/排障使用。
 func (d *edgeProxyDiag) snapshot() []edgeProxyVerdict {
 	if d == nil {
@@ -115,10 +136,10 @@ func edgeProxyBufferedDetail(hostname string) string {
 // 返回给调用方拼进错误信息的说明文本。
 func (s *Server) noteEdgeUpstreamBuffered(hostID, hostname string) string {
 	detail := edgeProxyBufferedDetail(hostname)
-	if s == nil || s.edgeDiag == nil {
+	if s == nil {
 		return detail
 	}
-	if s.edgeDiag.note(hostID, hostname, "upstream_buffered", detail) {
+	if edgeProxyDiagState.note(hostID, hostname, "upstream_buffered", detail) {
 		slog.Warn("反向代理缓冲了 Agent 上行流，远程通道被拖垮",
 			"host", hostID, "hostname", hostname, "修复", edgeProxyFixHint,
 			"示例配置", "deploy/nginx-aiops.conf")

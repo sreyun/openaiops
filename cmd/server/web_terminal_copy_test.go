@@ -23,9 +23,57 @@ func TestTerminalSelectionIsNotStolenByFocus(t *testing.T) {
 		t.Errorf("mousedown 处理里不能 focus 隐藏 textarea：\n  %s", strings.TrimSpace(mousedown))
 	}
 	// <pre> 自己被鼠标聚焦时也不能立刻转交焦点（同一个坑的第二条路径）。
+	//
+	// 判断必须是 termFocusGuardBusy()，不能只看 _termDragging：松手之后拖拽标志已经落下，
+	// 而选区还在——那一刻 <pre> 刚拿到焦点，转交过去高亮当场就没了。
 	focusBody := jsHandlerBody(t, src, `screen.addEventListener("focus"`)
-	if !strings.Contains(focusBody, "_termDragging") {
-		t.Errorf("focus 转交没有躲开鼠标拖拽期：\n  %s", strings.TrimSpace(focusBody))
+	if !strings.Contains(focusBody, "termFocusGuardBusy()") {
+		t.Errorf("focus 转交没有给「正在拖选 / 已有选区」让路：\n  %s", strings.TrimSpace(focusBody))
+	}
+}
+
+// 选区快照：复制这条链上任何一环都可能让"现场选区"读成空串（焦点被交给隐藏 textarea、
+// 右键点在选区外、输出刷新换掉行 DOM）。所以选区还活着的时候就要存一份，复制动作用快照兜底。
+//
+// 两处抓取缺一不可：selectionchange 最及时但不是所有环境都发；document 上 **捕获阶段**
+// 的 mouseup 排在所有会动焦点的处理器之前，拖选收尾那一刻选区必然还在。
+func TestTerminalKeepsSelectionSnapshot(t *testing.T) {
+	src := readWebFile(t, "web/js/terminal.js")
+
+	for _, want := range []string{
+		"function termCaptureSelection()",
+		`document.addEventListener("selectionchange", termCaptureSelection)`,
+		`document.addEventListener("mouseup", termCaptureSelection, true)`,
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("选区快照缺了 %q —— 焦点一动选区就没，Ctrl+C 会当成「没选中」把 ^C 打进 shell", want)
+		}
+	}
+	// 复制动作走带快照的 termSelectionText；判断"用户此刻是不是正选着"的地方走 live 版本。
+	// 混用会出事：用户在页面别处复制时，终端会把上一次的选区塞进人家的剪贴板。
+	if !strings.Contains(src, "function termLiveSelectionText(tab)") {
+		t.Error("缺少 termLiveSelectionText：抢焦点判断与全局 copy 拦截必须只看现场选区")
+	}
+	copyHandler := jsHandlerBody(t, src, `document.addEventListener("copy"`)
+	if !strings.Contains(copyHandler, "termLiveSelectionText(") {
+		t.Errorf("全局 copy 拦截用了带快照的读法，会抢走页面别处的复制：\n  %s", strings.TrimSpace(copyHandler))
+	}
+}
+
+// 右键：点在高亮上就直接复制（PuTTY / Windows Terminal 的老习惯，也是用户嘴里的"右击复制"）；
+// 点在别处只弹菜单，不能把用户攒着准备粘贴的剪贴板冲掉。
+func TestTerminalRightClickCopiesSelection(t *testing.T) {
+	src := readWebFile(t, "web/js/terminal.js")
+
+	if !strings.Contains(src, "function termPointInSelection(x, y)") {
+		t.Fatal("缺少 termPointInSelection：无法区分「右键点在高亮上」和「点在别处」")
+	}
+	if !strings.Contains(src, "getClientRects") {
+		t.Error("命中判断应基于选区自身的可视矩形（caretRangeFromPoint / caretPositionFromPoint 各内核不一致）")
+	}
+	menu := jsFunctionBody(t, src, "function showTermContextMenu(tab, e) {")
+	if !strings.Contains(menu, "termPointInSelection(e.clientX, e.clientY)") || !strings.Contains(menu, "termCopyText(selText)") {
+		t.Errorf("右键弹菜单时没有实现「点在高亮上即复制」：\n  %s", strings.TrimSpace(menu))
 	}
 }
 
@@ -53,8 +101,13 @@ func TestTerminalCopyFallsBackOnPlainHTTP(t *testing.T) {
 		t.Error("terminal.js 直接调 navigator.clipboard.writeText：明文 HTTP 下它不存在，复制会静默失败，" +
 			"应统一走 copyToClipboard（内含 execCommand 兜底）")
 	}
-	if !strings.Contains(term, "function termCopyText") || !strings.Contains(term, "copyToClipboard(out)") {
-		t.Error("终端复制应收敛到 termCopyText → copyToClipboard 一条路径")
+	if !strings.Contains(term, "function termCopyText") || !strings.Contains(term, "copyToClipboardOrPrompt(out)") {
+		t.Error("终端复制应收敛到 termCopyText → copyToClipboardOrPrompt 一条路径")
+	}
+	// 工具栏那个看得见的复制按钮是"确定路径"：快捷键会被浏览器/输入法吃掉，
+	// 右键菜单也不是所有环境都弹得出来，总得有一个点了必有结果的入口。
+	if !strings.Contains(term, "function termCopyBtnClick()") {
+		t.Error("终端标题栏缺少复制按钮的处理器 termCopyBtnClick")
 	}
 	entry := jsFunctionBody(t, core, "function copyToClipboard(text) {")
 	if !strings.Contains(entry, "window.isSecureContext") {
@@ -71,6 +124,16 @@ func TestTerminalCopyFallsBackOnPlainHTTP(t *testing.T) {
 	fallback := jsFunctionBody(t, core, "function execCommandCopy(text) {")
 	if !strings.Contains(fallback, `execCommand("copy")`) {
 		t.Error("execCommandCopy 里没有 execCommand 兜底")
+	}
+	// 两条自动路都被挡住时不能只丢一句"复制失败"——用户要的那段输出就在屏幕上却拿不走。
+	// 兜到底：弹一个内容已选中的只读框，按 Ctrl+C 就走。
+	prompt := jsFunctionBody(t, core, "function copyToClipboardOrPrompt(text) {")
+	if !strings.Contains(prompt, "showManualCopyDialog(out)") {
+		t.Error("copyToClipboardOrPrompt 没有在两条自动路都失败时弹手动复制框")
+	}
+	manual := jsFunctionBody(t, core, "function showManualCopyDialog(text) {")
+	if !strings.Contains(manual, "ta.select()") {
+		t.Error("手动复制框必须把内容预先选中，否则用户还得自己拖一遍")
 	}
 }
 

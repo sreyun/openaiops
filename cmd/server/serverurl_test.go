@@ -320,7 +320,6 @@ func TestInstallInfoReportsPublicURLFixed(t *testing.T) {
 	})
 }
 
-
 // 面板开在 https://a.bc.com:8443，nginx 用 `proxy_set_header Host $http_host`
 // （端口**保留**）转发、TLS 在 nginx 上终止、trust_proxy 没开。
 //

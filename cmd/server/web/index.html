@@ -2182,6 +2182,9 @@
       <h3 id="termTitle">远程终端</h3>
       <span class="term-status" id="termStatus">连接中…</span>
       <div class="term-ctls">
+        <button class="term-ctl" id="termCopyBtn" data-i18n-title="term.ctl_copy" title="复制选中内容（没有选区则复制整屏）" aria-label="复制终端内容">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        </button>
         <button class="term-ctl" id="termUploadBtn" title="上传文件" aria-label="上传文件到远程主机">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
         </button>
@@ -2202,7 +2205,7 @@
     <div class="modal-body term-body">
       <div class="term-tabbar" id="termTabbar"></div>
       <div class="term-screens" id="termScreens"></div>
-      <div class="term-hint">经 Agent 反向通道连接 · 点击窗口后即可输入 · 鼠标拖选后 Ctrl+C 复制、右键菜单可全选/复制整屏 · 多标签可同时连接多台主机 · 关闭窗口结束所有会话</div>
+      <div class="term-hint" data-i18n="term.hint">经 Agent 反向通道连接 · 点击窗口后即可输入 · 拖选后按 Ctrl+C 或在高亮上右击即复制，标题栏还有复制按钮（右键菜单可全选 / 复制整屏）· 多标签可同时连接多台主机 · 关闭窗口结束所有会话</div>
     </div>
   </div>
 </div>

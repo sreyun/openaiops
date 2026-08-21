@@ -271,7 +271,7 @@ func (s *Server) handlePlatformFaults(w http.ResponseWriter, r *http.Request) {
 		"with_incident": open,
 		"threshold":     platformFaultIncidentThreshold,
 	}
-	if v := s.edgeDiag.snapshot(); len(v) > 0 {
+	if v := edgeProxyDiagState.snapshot(); len(v) > 0 {
 		if len(v) > limit {
 			v = v[:limit]
 		}

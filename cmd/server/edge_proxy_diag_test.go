@@ -102,6 +102,7 @@ func (a *bufferedAgent) serveSession(cl *http.Client, sid string) {
 // 修好之后：服务端拿 alive 心跳当旁证，认出这是反代在缓冲，记一条带修复方法的告警，
 // 并把等待延到命令自己的预算上限 —— 这一次执行照常拿到完整输出与退出码。
 func TestExecSurvivesProxyBufferedUpstream(t *testing.T) {
+	edgeProxyDiagState.reset()
 	old := execPickupTimeout
 	execPickupTimeout = 300 * time.Millisecond
 	defer func() { execPickupTimeout = old }()
@@ -134,7 +135,7 @@ func TestExecSurvivesProxyBufferedUpstream(t *testing.T) {
 	}
 
 	// 而且必须留下"是反代的问题"的判定，否则运维还是不知道该改哪里。
-	verdicts := srv.edgeDiag.snapshot()
+	verdicts := edgeProxyDiagState.snapshot()
 	if len(verdicts) != 1 || verdicts[0].Kind != "upstream_buffered" || verdicts[0].HostID != hostID {
 		t.Fatalf("没有记下反代缓冲的判定：%+v", verdicts)
 	}
@@ -172,6 +173,7 @@ func TestExecSurvivesProxyBufferedUpstream(t *testing.T) {
 // 反过来同样重要：真的没有 Agent 接单时，不能被上面的宽容路径拖成长时间挂起，
 // 也不能误报成反代问题——那会把"主机离线/指纹不符"这类真故障指到 nginx 上。
 func TestExecNoPickupStillFailsFast(t *testing.T) {
+	edgeProxyDiagState.reset()
 	oldPickup := execPickupTimeout
 	execPickupTimeout = 200 * time.Millisecond
 	defer func() { execPickupTimeout = oldPickup }()
@@ -191,7 +193,7 @@ func TestExecNoPickupStillFailsFast(t *testing.T) {
 	if el := time.Since(start); el > 3*time.Second {
 		t.Fatalf("等了 %v，没有及时收敛", el)
 	}
-	if v := srv.edgeDiag.snapshot(); len(v) != 0 {
+	if v := edgeProxyDiagState.snapshot(); len(v) != 0 {
 		t.Fatalf("不该误判成反代问题：%+v", v)
 	}
 }

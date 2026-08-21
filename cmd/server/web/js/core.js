@@ -644,6 +644,62 @@ function execCommandCopy(text) {
     }
   });
 }
+/**
+ * copyToClipboardOrPrompt —— 复制的最后一道保障：自动写不进去就把内容摆到用户面前。
+ *
+ * 自动复制在真实部署里有太多种失败法：明文 HTTP（非安全上下文，navigator.clipboard
+ * 压根不存在）、权限被拒、文档没有焦点、企业策略禁用 execCommand、老内核。以前这些
+ * 情况一律收敛成一句"复制失败"——用户看到的就是"这个面板复制不了"，没有任何出路。
+ *
+ * 现在兜到底：两条自动路都不通时，弹一个只读文本框、内容**已经选中**，用户按一下
+ * Ctrl+C 就走。复制这件事从此不会再有死胡同。
+ *
+ * 返回 Promise<boolean>：true = 已进剪贴板；false = 已交给用户手动复制。
+ */
+function copyToClipboardOrPrompt(text) {
+  const out = String(text == null ? "" : text);
+  if (!out) return Promise.resolve(false);
+  return copyToClipboard(out).then(() => true, () => { showManualCopyDialog(out); return false; });
+}
+
+/** showManualCopyDialog 手动复制兜底弹窗：内容预选中，Ctrl+C 即可。 */
+function showManualCopyDialog(text) {
+  const existing = document.getElementById("manualCopyMask");
+  if (existing) existing.remove();
+  const mask = document.createElement("div");
+  mask.id = "manualCopyMask";
+  mask.className = "mask htx-dlg-mask show";
+  mask.innerHTML = `
+    <div class="htx-dlg" role="dialog" aria-modal="true" aria-labelledby="manualCopyTitle">
+      <div class="htx-dlg-head">
+        <h3 id="manualCopyTitle">${esc(I18N.t("copy.manual_title", "手动复制"))}</h3>
+        <button type="button" class="htx-dlg-x" data-manual-copy="close" aria-label="${esc(I18N.t("ui.close", "关闭"))}">✕</button>
+      </div>
+      <div class="htx-dlg-body">
+        <div class="htx-dlg-hint">${esc(I18N.t("copy.manual_hint", "浏览器拦下了自动复制（明文 HTTP 或权限被拒时常见）。内容已选中，按 Ctrl+C 即可复制。"))}</div>
+        <textarea id="manualCopyText" class="htx-dlg-input manual-copy-text" rows="8" readonly spellcheck="false"></textarea>
+      </div>
+      <div class="htx-dlg-foot">
+        <button type="button" class="btn primary" data-manual-copy="close">${esc(I18N.t("ui.close", "关闭"))}</button>
+      </div>
+    </div>`;
+  document.body.appendChild(mask);
+  const ta = mask.querySelector("#manualCopyText");
+  // textContent 而不是 innerHTML：内容可能是终端输出，里面什么字符都有。
+  if (ta) {
+    ta.value = text;
+    ta.focus({ preventScroll: true });
+    ta.select();
+    try { ta.setSelectionRange(0, ta.value.length); } catch (e) {}
+  }
+  const close = () => { document.removeEventListener("keydown", onKey, true); mask.remove(); };
+  const onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); close(); } };
+  document.addEventListener("keydown", onKey, true);
+  mask.addEventListener("click", (e) => {
+    if (e.target === mask || (e.target.closest && e.target.closest("[data-manual-copy]"))) close();
+  });
+}
+
 function copyWithFeedback(btn, text, okMsg) {
   copyToClipboard(text).then(
     () => { const old = btn.textContent; btn.textContent = "✓"; toast(okMsg, "ok"); setTimeout(() => btn.textContent = old, 1200); },

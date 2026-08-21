@@ -1970,6 +1970,9 @@
   "form.hint_path_users": "如 /api/users",
   "ui.create": "创建",
   "ui.cancel": "取消",
+  "ui.close": "关闭",
+  "copy.manual_title": "手动复制",
+  "copy.manual_hint": "浏览器拦下了自动复制（明文 HTTP 或权限被拒时常见）。内容已选中，按 Ctrl+C 即可复制。",
   "ui.open_link": "打开链接",
   "ui.new_tcp_forward": "+ 新建端口转发",
   "section.http_reverse_proxy": "HTTP 反向代理",
@@ -2373,7 +2376,7 @@
   /* --- 终端弹窗 --- */
   "term.title": "远程终端",
   "term.connecting": "连接中\u2026",
-  "term.hint": "经 Agent 反向通道连接 · 点击窗口后即可输入 · 鼠标拖选后 Ctrl+C 复制、右键菜单可全选/复制整屏 · 多标签可同时连接多台主机 · 关闭窗口结束所有会话",
+  "term.hint": "经 Agent 反向通道连接 · 点击窗口后即可输入 · 拖选后按 Ctrl+C 或在高亮上右击即复制，标题栏还有复制按钮（右键菜单可全选 / 复制整屏）· 多标签可同时连接多台主机 · 关闭窗口结束所有会话",
   "term.cmenu_copy": "复制",
   "term.cmenu_paste": "粘贴",
   "term.cmenu_select_all": "全选",
@@ -2381,6 +2384,8 @@
   "term.cmenu_reconnect": "重新连接",
   "term.cmenu_clear": "清屏",
   "term.nothing_selected": "没有选中内容",
+  "term.ctl_copy": "复制选中内容（没有选区则复制整屏）",
+  "term.copied_screen": "没有选中内容，已复制整屏",
   "term.paste_manual": "浏览器不允许读取剪贴板，请按 Ctrl+V 粘贴",
   /* --- 终端会话管理弹窗 --- */
   "term.sessions_title": "终端会话",

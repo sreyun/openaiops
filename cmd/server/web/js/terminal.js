@@ -78,6 +78,59 @@ document.addEventListener("visibilitychange", () => {
   _refocusActiveTermInput();
 });
 
+/* ---------- 选区快照 —— "复制不了"这一类问题的总解法 ----------
+ *
+ * 终端里的复制要跨过一条很脆的链路：用户拖出的是**文档选区**，而键盘输入必须落在隐藏
+ * textarea 上，二者天生打架——focus() 会清掉文档选区，输出刷新会换掉选区所在的行 DOM，
+ * 右键点在选区外浏览器自己就把选区收了。任何一环踩空，"选中→复制"就整条哑火，而用户
+ * 看到的只是"这破终端复制不了"。
+ *
+ * 与其在每条路径上各自小心翼翼地抢救选区（此前就是这么做的，仍然有漏），不如在选区
+ * **还活着的时候**就把它记下来：选区一成形就存一份文本快照，之后不管是 Ctrl+C、
+ * 右键菜单还是工具栏按钮，都能拿到"用户最后一次选中的东西"。
+ *
+ * 抓取时机有两处，缺一不可：
+ *   - selectionchange：最及时，但不是所有环境都发（尤其老内核）；
+ *   - document 的 mouseup **捕获阶段**：拖选收尾的那一刻选区必然还在，而且这一跳排在
+ *     所有会动焦点的处理器之前——"松手之后选区就没了"正是从那些处理器里来的。
+ *
+ * 失效时机只有一个：用户在终端里按下左键（开始新的点击/拖选）——那一刻旧选区在用户
+ * 心里也已经作废。右键不清（右键正是要用它），输出刷新不清（内容没变），焦点变化不清。
+ */
+let TERM_SEL_SNAP = { tabId: "", text: "" };
+
+function termSnapshotTabOf(node) {
+  if (!node) return null;
+  for (const tab of TERM_TABS) {
+    if (tab && tab.screenEl && tab.screenEl.contains(node)) return tab;
+  }
+  return null;
+}
+
+/** termCaptureSelection 把"落在某个终端屏幕里的非空选区"存成快照；其余一律不动。 */
+function termCaptureSelection() {
+  if (!TERM_TABS.length) return;
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return;
+  const text = sel.toString();
+  if (!text) return;
+  const tab = termSnapshotTabOf(sel.getRangeAt(0).commonAncestorContainer);
+  if (!tab) return;
+  TERM_SEL_SNAP = { tabId: tab.id, text: normalizeTermCopyText(text).replace(/\n+$/, "") };
+}
+document.addEventListener("selectionchange", termCaptureSelection);
+// 捕获阶段：必须早于 ensureTermDragRelease 那个会把焦点交回隐藏 textarea 的处理器。
+document.addEventListener("mouseup", termCaptureSelection, true);
+
+/** termSnapshotFor 取该标签页的选区快照（没有则空串）。 */
+function termSnapshotFor(tab) {
+  if (!tab || !TERM_SEL_SNAP.text) return "";
+  return TERM_SEL_SNAP.tabId === tab.id ? TERM_SEL_SNAP.text : "";
+}
+
+/** termClearSnapshot 用户开始新一轮选择时作废旧快照。 */
+function termClearSnapshot() { TERM_SEL_SNAP = { tabId: "", text: "" }; }
+
 /* ---------- 全局焦点守卫 — 防止终端输入焦点在各种操作中丢失 ---------- */
 // 当终端面板可见且焦点漂移到非终端元素时，自动恢复焦点。
 // 覆盖场景：窗口 resize 后、最大化/还原后、从 dock 展开后、WS 重连后、
@@ -303,6 +356,26 @@ function initTermContextMenu() {
     }
   });
 }
+/**
+ * termPointInSelection 判断这一次右键是不是点在高亮上。
+ *
+ * 用选区自己的可视矩形（Range.getClientRects）做命中判断：不依赖
+ * caretRangeFromPoint / caretPositionFromPoint 那对分裂的非标准接口，所有内核一致。
+ */
+function termPointInSelection(x, y) {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0 || !sel.toString()) return false;
+  for (let i = 0; i < sel.rangeCount; i++) {
+    const rects = sel.getRangeAt(i).getClientRects ? sel.getRangeAt(i).getClientRects() : null;
+    if (!rects) continue;
+    for (let j = 0; j < rects.length; j++) {
+      const r = rects[j];
+      if (x >= r.left - 1 && x <= r.right + 1 && y >= r.top - 1 && y <= r.bottom + 1) return true;
+    }
+  }
+  return false;
+}
+
 function showTermContextMenu(tab, e) {
   initTermContextMenu();
   if (!TERM_CMENU_EL) return;
@@ -314,6 +387,11 @@ function showTermContextMenu(tab, e) {
   const reconnectItem = TERM_CMENU_EL.querySelector('[data-action="reconnect"]');
   const selText = termSelectionText(tab);
   TERM_CMENU_EL._termSel = selText;
+  // 右键点在高亮上 = 直接复制（PuTTY / Windows Terminal 的老习惯，也是用户嘴里的
+  // "右击复制"）。点在别处只开菜单——否则会把用户攒着准备粘贴的剪贴板内容冲掉。
+  if (selText && termPointInSelection(e.clientX, e.clientY)) {
+    termCopyText(selText);
+  }
   if (copyItem) copyItem.classList.toggle("disabled", !selText);
   const disconnected = !tab.ws || tab.ws.readyState !== 1;
   if (reconnectItem) reconnectItem.classList.toggle("disabled", !disconnected);
@@ -716,7 +794,9 @@ function createTermTab(id, name, tabName, opts) {
    * 焦点；右键也不抢焦点，否则右键菜单弹出前选区就已经没了。
    */
   screen.addEventListener("mousedown", function(ev) {
-    if (ev.button === 0) screen._termDragging = true;
+    if (ev.button !== 0) return;   // 右键要用快照来复制，绝不能在这里清掉
+    screen._termDragging = true;
+    termClearSnapshot();           // 新的一次点击/拖选开始，旧选区作废
   });
   // 松手统一由 document 上那一个监听收尾（见 ensureTermDragRelease）：松手可能落在终端外
   // （拖到窗口边缘），而且每开一个标签就往 document 上挂一个监听是只增不减的泄漏。
@@ -746,7 +826,9 @@ function createTermTab(id, name, tabName, opts) {
   // <pre> 被直接聚焦时（Tab 键导航），重定向到 textarea。
   // 鼠标按下期间不转交：那正是浏览器在建立选区的时刻，转交焦点会把选区清掉。
   screen.addEventListener("focus", function() {
-    if (screen._termDragging) return;
+    // 有选区就一步都不能动焦点：focus() 会把文档选区清掉，用户眼看着高亮消失。
+    // 只判 _termDragging 是不够的——松手之后选区还在，而此时 <pre> 才刚拿到焦点。
+    if (termFocusGuardBusy()) return;
     if (input && document.activeElement !== input) input.focus({ preventScroll: true });
   });
   // 右键菜单：复制 / 粘贴 / 全选 / 复制全部内容 / 重连 / 清屏
@@ -1548,6 +1630,8 @@ safeAddEventListener("termMaxBtn", "click", () => {
 safeAddEventListener("termMinBtn", "click", () => {
   minimizeTerminal();
 });
+// 复制（有选区复制选区，没有就复制整屏）
+safeAddEventListener("termCopyBtn", "click", () => termCopyBtnClick());
 // 文件上传
 safeAddEventListener("termUploadBtn", "click", () => startTermFileUpload());
 // 文件下载
@@ -1822,9 +1906,23 @@ function getSelectedTermText(tab) {
   return text;
 }
 
-// termSelectionText 选区文本（已规整）——判空也走它，保证"有没有选区"与"复制什么"同一套判断。
-function termSelectionText(tab) {
+// termLiveSelectionText 只看**此刻真实存在**的选区，不碰快照。
+//
+// 凡是要回答"用户现在是不是正选着终端里的东西"的地方都必须用它：抢焦点的判断、
+// 全局 copy 事件的拦截。用带快照的版本会答错——用户明明在页面别处复制，终端却把
+// 上一次的选区塞进剪贴板。
+function termLiveSelectionText(tab) {
   return normalizeTermCopyText(getSelectedTermText(tab)).replace(/\n+$/, "");
+}
+
+// termSelectionText 要复制的文本（已规整）：现场选区读不到时回退到快照
+// （见文件开头 TERM_SEL_SNAP）。焦点被交给隐藏 textarea、右键点在选区外、输出刷新换掉
+// 了行 DOM——这些都会让"明明还高亮着"的选区读出空串，而用户要的就是那段文字。
+//
+// **只给复制动作用**（Ctrl+C / 右键 / 工具栏按钮）：它们的语义是"把用户最后选中的东西
+// 给我"，快照正是这个语义。
+function termSelectionText(tab) {
+  return termLiveSelectionText(tab) || termSnapshotFor(tab);
 }
 
 // termScreenText 整个终端窗口的文本：回滚缓冲 + 当前屏，按 DOM 顺序逐行取。
@@ -1862,10 +1960,28 @@ function termSelectAllScreen(tab) {
 function termCopyText(text) {
   const out = normalizeTermCopyText(text);
   if (!out) { toast(I18N.t("term.nothing_selected", "没有选中内容"), "info"); return; }
-  copyToClipboard(out).then(
-    () => toast(I18N.t("toast.copied"), "ok"),
-    () => toast(I18N.t("toast.copy_failed"), "err")
-  );
+  // copyToClipboardOrPrompt：两条自动路（clipboard API / execCommand）都不通时弹出
+  // 手动复制框，内容已选中。终端里"复制失败"是死胡同——运维就是来拷这段输出的。
+  copyToClipboardOrPrompt(out).then(ok => { if (ok) toast(I18N.t("toast.copied"), "ok"); });
+}
+
+/**
+ * termCopyBtnClick 工具栏「复制」按钮：有选区复制选区，没有就复制整屏。
+ *
+ * 这是复制这件事的**确定路径**：不依赖快捷键有没有被浏览器/输入法吃掉，也不依赖右键
+ * 菜单能不能弹出来。一个看得见的按钮，点了必有结果。
+ */
+function termCopyBtnClick() {
+  const tab = TERM_ACTIVE >= 0 ? TERM_TABS[TERM_ACTIVE] : null;
+  if (!tab) return;
+  const sel = termSelectionText(tab);
+  if (sel) { termCopyText(sel); return; }
+  const all = termScreenText(tab);
+  if (!all) { toast(I18N.t("term.nothing_selected", "没有选中内容"), "info"); return; }
+  copyToClipboardOrPrompt(all).then(ok => {
+    // 说清楚复制的是"整屏"而不是选区，否则用户会以为自己的选区被复制了。
+    if (ok) toast(I18N.t("term.copied_screen", "没有选中内容，已复制整屏"), "ok");
+  });
 }
 
 // ---- 拖拽选区收尾（全局仅一份）----
@@ -1882,7 +1998,7 @@ function ensureTermDragRelease() {
       screen._termDragging = false;
       if (ev && ev.button !== 0) return;
       if (!screen.isConnected) return;
-      if (termSelectionText(tab)) return;               // 有选区 → 保住它
+      if (termLiveSelectionText(tab)) return;           // 真的还选着 → 保住它
       if (tab.inputEl && document.activeElement !== tab.inputEl) {
         tab.inputEl.focus({ preventScroll: true });
       }
@@ -1899,7 +2015,9 @@ function ensureTermDragRelease() {
     if (!activeTab || !activeTab.screenEl) return;
     const mask = document.getElementById("termMask");
     if (!mask || !mask.classList.contains("show")) return;
-    const sel = termSelectionText(activeTab);
+    // 这里必须是**现场**选区：用户可能正在页面别处（另一个弹窗、日志区）复制，
+    // 那时终端不该插手，更不该把上一次的终端选区写进人家的剪贴板。
+    const sel = termLiveSelectionText(activeTab);
     if (!sel) return;
     ev.preventDefault();
     ev.clipboardData.setData("text/plain", sel);
