@@ -68,3 +68,41 @@ func TestWrongMethodOnRealPathStillReturns405WithAllow(t *testing.T) {
 		t.Errorf("405 必须带 Allow 指出可用方法，实际 Allow=%q", allow)
 	}
 }
+
+// 兜底还得盖住 /api/ **之外**的路径。
+//
+// 上面那条只挡住了 /api/ 开头的。写方法打到任何其它未注册路径时，Go 会拿根子树模式
+// `GET /` 去匹配，判成"路径匹配、方法不符"，回一个**纯文本 405 Method Not Allowed**——
+// 既不是 JSON，也没说清是"接口不存在"，正是最误导人的那种回答。
+// 这个坑真实发生过：新版页面（SW 缓存的）打到旧二进制上，用户看到的就是这句纯文本 405。
+func TestUnknownNonAPIWritePathIs404JSON(t *testing.T) {
+	mux := (&Server{}).Routes()
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, httptest.NewRequest(method, "/totally/bogus", nil))
+		if rr.Code != http.StatusNotFound {
+			t.Errorf("%s /totally/bogus 回了 %d，期望 404（纯文本 405 会把'接口不存在'说成'方法不允许'）", method, rr.Code)
+		}
+		if ct := rr.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+			t.Errorf("%s /totally/bogus 的 Content-Type = %q，期望 JSON", method, ct)
+		}
+		// 报错里要带上正在跑的版本号，用户才有得核对。
+		if !strings.Contains(rr.Body.String(), appVersion) {
+			t.Errorf("%s /totally/bogus 的响应没带服务端版本号：%s", method, rr.Body.String())
+		}
+	}
+	// GET 不受影响：根路径仍旧交给面板首页（这条兜底只注册写方法）。
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rr.Code == http.StatusNotFound {
+		t.Error("GET / 被兜底抢走了，面板首页打不开")
+	}
+	// 真实存在的非 /api 写接口是更具体的模式，不能被根兜底误伤。
+	// 这里只问"路由到哪条模式"，不真的调处理器——端口转发在空 Server 上跑不起来，
+	// 而要断言的本来就是匹配结果本身。
+	if sm, ok := mux.(*http.ServeMux); ok {
+		if _, pattern := sm.Handler(httptest.NewRequest(http.MethodPost, "/proxy/h1/8080/x", nil)); pattern == "POST /" {
+			t.Error("已注册的 POST /proxy/... 被根兜底抢走了")
+		}
+	}
+}

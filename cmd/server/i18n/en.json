@@ -415,6 +415,7 @@
   "log.kind.plugin": "Plugin",
   "common.invalid_json": "Invalid JSON",
   "common.api_not_found": "Endpoint %s %s does not exist on this panel build. The binary is most likely too old (the container did not actually get the new image). Upgrade the panel and retry.",
+  "common.api_not_found_versioned": "Endpoint %s %s does not exist on this panel build (server version %s). The binary is most likely too old \u2014 the container did not actually get the new image, or the browser cached a newer page. Check the server version and hard-refresh (Ctrl+F5), then retry.",
   "common.api_method_not_allowed": "Wrong method for %s %s. This path supports: %s.",
   "common.host_not_found": "Host not found",
   "common.invalid_id": "Invalid ID",

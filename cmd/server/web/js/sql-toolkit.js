@@ -1447,12 +1447,37 @@ async function sqlReadErrorBody(r) {
   const parts = [`HTTP ${r.status}${r.statusText ? " " + r.statusText : ""}`];
   if (hint) parts.push(hint);
   if (plain) parts.push(`${sqlT("sql.server_said", "服务端返回")}：${plain}`);
+  // 版本不匹配的猜测要能被证实：顺手问一次服务端自己报的版本号，让用户拿去和镜像 tag 对。
+  if (r.status === 404 || r.status === 405) {
+    const ver = await sqlServerVersion();
+    if (ver) parts.push(`${sqlT("sql.server_version", "服务端版本")}：${ver}`);
+  }
   return Object.assign({}, parsed || {}, { error: parts.join(" · ") });
+}
+
+/** 取服务端自报的版本号，失败就返回空串——它只是用来佐证提示，不该让报错流程再抛一次。 */
+async function sqlServerVersion() {
+  try {
+    const r = await fetch(`${API}/summary`, { headers: { Accept: "application/json" } });
+    if (!r.ok) return "";
+    const j = await r.json();
+    return String((j && j.version) || "");
+  } catch (_e) { return ""; }
 }
 
 /** 常见状态码 → 用户能照着做的下一步。措辞要指向动作，不要复述状态码含义。 */
 function sqlHTTPStatusHint(status) {
   switch (status) {
+    // 404/405 打在一个 POST 接口上，在本产品里几乎只有一个原因：**页面比服务端新**。
+    // 经典版的 JS 是 go:embed 进二进制的，正常情况下页面和路由一定同版本；能对不上
+    // 只有一种途径——Service Worker 缓存了新版页面，而容器里还是旧二进制
+    // （compose 没真的换镜像、或 .env 钉了旧 tag）。
+    // 旧到没有 JSON 兜底的二进制还会回一个纯文本 405（根路由 `GET /` 吞掉了 POST），
+    // 那正是最让人摸不着头脑的一种：明明是"接口不存在"，却说成"方法不允许"。
+    case 404:
+    case 405:
+      return sqlT("sql.err_stale_backend",
+        "这个接口在正在运行的面板服务里不存在——页面比服务端新。多半是升级后容器没真正换镜像，或浏览器缓存了新版页面。请先强制刷新（Ctrl+F5）；仍然如此就说明服务端没升级上去。");
     case 401: return sqlT("sql.err_401", "登录状态已失效，请重新登录后再运行");
     case 403: return sqlT("sql.err_403", "当前角色无权执行该操作（导出需要操作员及以上）");
     case 413: return sqlT("sql.err_413", "SQL 文本过大，请拆分后再运行");
