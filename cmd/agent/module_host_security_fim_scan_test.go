@@ -456,3 +456,68 @@ func TestFimPriorityRootsAreRealDirectories(t *testing.T) {
 		t.Fatal("至少应当保留刚建出来的临时目录")
 	}
 }
+
+func TestFimBeforeResumeSkipsOnlyPrefix(t *testing.T) {
+	root := "/data"
+	cursor := "/data/b_dir/c.txt"
+	if !fimBeforeResume("/data/a_dir/a.txt", root, cursor) {
+		t.Error("游标之前的路径应当视为未重走")
+	}
+	if !fimBeforeResume("/data/b_dir/a.txt", root, cursor) {
+		t.Error("同一目录里排在游标前的文件也应当视为未重走")
+	}
+	if fimBeforeResume("/data/b_dir/c.txt", root, cursor) {
+		t.Error("游标自身本轮会处理，不能算未重走")
+	}
+	if fimBeforeResume("/data/c_dir/a.txt", root, cursor) {
+		t.Error("游标之后的路径本轮会走到")
+	}
+	if fimBeforeResume("/other/a.txt", root, cursor) {
+		t.Error("别的扫描根不受此游标影响")
+	}
+	if fimBeforeResume("/data/a_dir/a.txt", root, "") {
+		t.Error("没有游标时不该跳过")
+	}
+}
+
+// Resume skips earlier subtrees but still marks ancestors visited — those skipped
+// entries must NOT be treated as deletes / wiped from the baseline.
+func TestCollectFIMResumeMustNotDropEarlierBaseline(t *testing.T) {
+	root := t.TempDir()
+	for _, d := range []string{"a_dir", "b_dir", "c_dir"} {
+		for i := 0; i < 4; i++ {
+			writeFile(t, filepath.Join(root, d, string(rune('a'+i))+".txt"), "x\n")
+		}
+	}
+	opts := fimTestOpts(t, root)
+	opts.MaxFiles = 5
+
+	collectFIMChanges(opts) // baseline, truncated
+	// Keep scanning until one round finishes the root (ResumeFrom=="").
+	finished := false
+	var lastChanges []hostSecFileChange
+	for i := 0; i < 8; i++ {
+		ch, st := collectFIMChanges(opts)
+		lastChanges = ch
+		if st.ResumeFrom == "" {
+			finished = true
+			break
+		}
+	}
+	if !finished {
+		t.Fatal("never finished a full root cycle")
+	}
+	base, ok := fimLoadBaseline(fimBaselinePath())
+	if !ok {
+		t.Fatal("baseline missing")
+	}
+	want := fimNormPath(filepath.Join(root, "a_dir", "a.txt"))
+	if _, ok := base[want]; !ok {
+		t.Fatalf("resume wiped earlier baseline entry %s; changes=%+v", want, lastChanges)
+	}
+	for _, c := range lastChanges {
+		if c.Change == "removed" && strings.Contains(c.Path, "a_dir") {
+			t.Fatalf("false remove of earlier subtree: %+v", c)
+		}
+	}
+}
