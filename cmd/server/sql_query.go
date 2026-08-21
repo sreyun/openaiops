@@ -55,6 +55,7 @@ func (s *Server) handleSQLWorkbenchQuery(w http.ResponseWriter, r *http.Request)
 		Schema     string `json:"schema"`
 		Database   string `json:"database"`
 		Limit      int    `json:"limit"`
+		Offset     int    `json:"offset"`
 		TimeoutSec int    `json:"timeout_sec"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -82,38 +83,47 @@ func (s *Server) handleSQLWorkbenchQuery(w http.ResponseWriter, r *http.Request)
 	limit := clampSQLReadLimit(req.Limit)
 	timeout := clampSQLQueryTimeout(req.TimeoutSec)
 
-	var (
-		res *sqlWorkbenchQueryResult
-		err error
-	)
-	if driverOf(c) == "postgres" {
-		res, err = pgWorkbenchQuery(c, schema, sqlText, limit, timeout)
-	} else {
-		if schema == "" {
-			if dbs, e := mysqlListBusinessDatabases(c); e == nil && len(dbs) == 1 {
-				schema = dbs[0]
-			}
-		}
-		res, err = mysqlWorkbenchQuery(c, schema, sqlText, limit, timeout)
-	}
-	if err != nil {
-		body := map[string]any{"error": err.Error(), "ok": false}
-		if res != nil {
-			if res.ExecMs > 0 {
-				body["exec_ms"] = res.ExecMs
-			}
-			if res.FetchMs > 0 {
-				body["fetch_ms"] = res.FetchMs
-			}
-			if res.TotalMs > 0 {
-				body["total_ms"] = res.TotalMs
-			}
-			if res.Schema != "" {
-				body["schema"] = res.Schema
-			}
-		}
-		writeJSON(w, http.StatusBadGateway, body)
+	// 与流式路径共用一套准备逻辑（只读校验、库名校验、追加 LIMIT、独占连接、会话参数），
+	// 并把查询的生命周期绑到这次 HTTP 请求上：用户关掉页面，数据库那边也会停下来。
+	// 老代码这里用的是 context.Background()——没人看了查询还在烧 CPU。
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+	totalStart := time.Now()
+	sess, prepErr := prepareSQLRead(ctx, c, sqlReadRequest{
+		SQL: sqlText, Schema: schema, Limit: limit, Offset: req.Offset, TimeoutSec: req.TimeoutSec,
+	}, limit, timeout)
+	if prepErr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": prepErr.Error()})
 		return
+	}
+	defer sess.close()
+
+	execStart := time.Now()
+	rs, qErr := sess.conn.QueryContext(ctx, sess.execSQL)
+	execMs := time.Since(execStart).Milliseconds()
+	if qErr != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"ok": false, "error": sqlFriendlyError(qErr, ctx),
+			"exec_ms": execMs, "total_ms": time.Since(totalStart).Milliseconds(), "schema": sess.schema,
+		})
+		return
+	}
+	defer rs.Close()
+	fetchStart := time.Now()
+	cols, rows, truncated, scanErr := scanSQLResultRowsLimited(rs, limit, sess.driver == "mysql")
+	fetchMs := time.Since(fetchStart).Milliseconds()
+	if scanErr != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"ok": false, "error": sqlFriendlyError(scanErr, ctx),
+			"exec_ms": execMs, "fetch_ms": fetchMs,
+			"total_ms": time.Since(totalStart).Milliseconds(), "schema": sess.schema,
+		})
+		return
+	}
+	res := &sqlWorkbenchQueryResult{
+		OK: true, Driver: sess.driver, Schema: sess.schema,
+		Columns: cols, Rows: rows, RowCount: len(rows), Limit: limit, Truncated: truncated,
+		ExecMs: execMs, FetchMs: fetchMs, TotalMs: time.Since(totalStart).Milliseconds(),
 	}
 	s.recordSQLHistory(r, "query", id, sqlText, nil)
 	writeJSON(w, http.StatusOK, res)
@@ -263,6 +273,43 @@ func pgWorkbenchQuery(c MySQLConnection, schema, sqlText string, limit int, time
 		Columns: cols, Rows: rows, RowCount: len(rows), Limit: limit, Truncated: truncated,
 		ExecMs: execMs, FetchMs: fetchMs, TotalMs: time.Since(totalStart).Milliseconds(),
 	}, nil
+}
+
+// scanSQLResultRowsLimited 读取至多 limit 行，并如实告诉调用方**是不是还有更多**。
+//
+// 老写法用 len(rows) >= limit 判断截断：结果正好等于 limit 行时会谎报"已截断"，
+// 用户以为数据没取全，其实取全了。这里多读一行来判断，读完就把多的那行丢掉。
+func scanSQLResultRowsLimited(rs *sql.Rows, limit int, mysqlStyle bool) ([]string, []map[string]any, bool, error) {
+	cols, err := rs.Columns()
+	if err != nil {
+		return nil, nil, false, err
+	}
+	prealloc := limit
+	if prealloc > 512 {
+		prealloc = 512 // 上限很大时不要一上来就吃内存
+	}
+	rows := make([]map[string]any, 0, prealloc)
+	truncated := false
+	vals := make([]any, len(cols))
+	ptrs := make([]any, len(cols))
+	for i := range vals {
+		ptrs[i] = &vals[i]
+	}
+	for rs.Next() {
+		if len(rows) >= limit {
+			truncated = true // 还有下一行 → 确实被截断了
+			break
+		}
+		if err := rs.Scan(ptrs...); err != nil {
+			return cols, rows, truncated, err
+		}
+		m := make(map[string]any, len(cols))
+		for i, col := range cols {
+			m[col] = sqlCellValue(vals[i], mysqlStyle)
+		}
+		rows = append(rows, m)
+	}
+	return cols, rows, truncated, rs.Err()
 }
 
 func scanSQLResultRows(rs *sql.Rows, limit int, mysqlStyle bool) ([]string, []map[string]any, error) {

@@ -250,6 +250,16 @@ func TestRouteAllowed(t *testing.T) {
 		{"operator can get auto-update policy", "GET", "/api/v1/agents/auto-update-policy", RoleOperator, true},
 		{"operator cannot set auto-update policy", "POST", "/api/v1/agents/auto-update-policy", RoleOperator, false},
 		{"admin can set auto-update policy", "POST", "/api/v1/agents/auto-update-policy", RoleAdmin, true},
+		// SQL 工作台：只读查询（含流式）viewer+ 就行；**批量导出是数据出境**，拔高到
+		// operator+ 并留痕。这条曾经踩过：新增 /query/stream、/query/export 之后，
+		// 它们不再以 "/query" 结尾，直接掉进了兜底的 admin 分支——功能对普通用户全哑。
+		{"viewer can run query", "POST", "/api/v1/sql/connections/c1/query", RoleViewer, true},
+		{"viewer can stream query", "POST", "/api/v1/sql/connections/c1/query/stream", RoleViewer, true},
+		{"viewer cannot export", "POST", "/api/v1/sql/connections/c1/query/export", RoleViewer, false},
+		{"operator can export", "POST", "/api/v1/sql/connections/c1/query/export", RoleOperator, true},
+		{"viewer cannot exec ddl", "POST", "/api/v1/sql/connections/c1/exec-ddl", RoleViewer, false},
+		{"viewer cannot create connection", "POST", "/api/v1/sql/connections", RoleViewer, false},
+		{"operator cannot create connection", "POST", "/api/v1/sql/connections", RoleOperator, false},
 		// unknown role
 		{"unknown role denied", "GET", "/api/v1/hosts", "weird", false},
 	}

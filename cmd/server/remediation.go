@@ -415,10 +415,10 @@ func (m *remediationManager) scheduleVerify(runID int64) {
 	if delay <= 0 {
 		delay = remediationVerifyDelay
 	}
-	go func() {
+	safeGo("remediation-verify", func() {
 		time.Sleep(delay)
 		m.verifyRun(runID)
-	}()
+	})
 }
 
 // verifyRun records whether the triggering alert survived the remediation.

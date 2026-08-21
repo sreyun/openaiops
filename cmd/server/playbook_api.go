@@ -488,10 +488,10 @@ func (s *Server) fireScheduledPlaybook(pb Playbook) {
 	exec := s.playbooks.StartScheduledExecution(pb, Tz("playbook.scheduler_actor"), hosts)
 	s.persistPlaybookExecution(exec.ID)
 	s.store.AddLog(LogEntry{Kind: KindOperation, Level: "info", Actor: "scheduler", Message: Tz("log.sched_fire", pb.Name, len(hosts))})
-	go func() {
+	safeGo("playbook-exec", func() {
 		s.runPlaybookExecution(pb, exec, hosts)
 		s.playbooks.clearSchedBusy(pb.ID)
-	}()
+	})
 }
 
 func (s *Server) notifyPlaybookPendingApproval(pb Playbook, exec *PlaybookExecution) {
@@ -549,11 +549,11 @@ func (s *Server) handleApprovePlaybookExecution(w http.ResponseWriter, r *http.R
 	s.persistPlaybookExecution(id)
 	s.store.AddLog(LogEntry{Kind: KindOperation, Level: "warning", Actor: actor, IP: s.clientIP(r),
 		Message: fmt.Sprintf("批准定时剧本执行「%s」(execution=%d)", pb.Name, id)})
-	go func() {
+	safeGo("playbook-exec-retry", func() {
 		fresh, _ := s.playbooks.GetExecution(id)
 		s.runPlaybookExecution(pb, &fresh, hosts)
 		s.playbooks.clearSchedBusy(pb.ID)
-	}()
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "execution_id": id})
 }
 

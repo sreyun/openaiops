@@ -13,6 +13,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -284,6 +285,45 @@ func cicdOwnerRepo(project string) (owner, repo string) {
 // addresses after DNS resolution — covering redirects and DNS rebinding too. It
 // cannot simply reuse newGuardedHTTPClient because the CA bundle / skip-verify
 // options need their own TLS config.
+// cicdTransportCache 复用 Transport。
+//
+// 原来每发一次请求都新建一个 Transport：连接池、TLS 会话全都用完即弃，于是**每次调用都要
+// 重新握手**。CI/CD 巡检一轮要打十几次 API，广域网上每次多花 100–300ms 全是白等；
+// 被丢弃的 Transport 还会各自留着空闲连接等 GC。
+// Transport 本身是并发安全的，按"影响连接行为的配置"做键缓存即可。
+var cicdTransportCache = struct {
+	mu sync.Mutex
+	m  map[string]*http.Transport
+}{m: map[string]*http.Transport{}}
+
+func cicdTransportKey(c CICDConnection) string {
+	sum := sha256.Sum256([]byte(c.CACert))
+	return fmt.Sprintf("%s|%v|%x", cicdAPIRoot(c), c.InsecureSkipTLS, sum[:8])
+}
+
+func cicdCachedTransport(c CICDConnection, build func() (*http.Transport, error)) (*http.Transport, error) {
+	key := cicdTransportKey(c)
+	cicdTransportCache.mu.Lock()
+	defer cicdTransportCache.mu.Unlock()
+	if tr, ok := cicdTransportCache.m[key]; ok {
+		return tr, nil
+	}
+	tr, err := build()
+	if err != nil {
+		return nil, err
+	}
+	// 连接数不会无限增长：键的数量等于"不同的 CI/CD 连接配置"，本来就是个位数。
+	// 仍加一道兜底，防止配置被反复改写时缓存越积越多。
+	if len(cicdTransportCache.m) > 64 {
+		for k, old := range cicdTransportCache.m {
+			old.CloseIdleConnections()
+			delete(cicdTransportCache.m, k)
+		}
+	}
+	cicdTransportCache.m[key] = tr
+	return tr, nil
+}
+
 func cicdHTTPClient(c CICDConnection, timeout time.Duration) (*http.Client, error) {
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
 	if c.InsecureSkipTLS {
@@ -296,15 +336,22 @@ func cicdHTTPClient(c CICDConnection, timeout time.Duration) (*http.Client, erro
 		}
 		tlsCfg.RootCAs = pool
 	}
-	tr := &http.Transport{
-		TLSClientConfig:     tlsCfg,
-		TLSHandshakeTimeout: 10 * time.Second,
-		Proxy:               http.ProxyFromEnvironment,
-		DialContext: (&net.Dialer{
-			Timeout:   10 * time.Second,
-			KeepAlive: 30 * time.Second,
-			Control:   ssrfDialControl,
-		}).DialContext,
+	tr, err := cicdCachedTransport(c, func() (*http.Transport, error) {
+		return &http.Transport{
+			TLSClientConfig:     tlsCfg,
+			TLSHandshakeTimeout: 10 * time.Second,
+			Proxy:               http.ProxyFromEnvironment,
+			MaxIdleConnsPerHost: 4,
+			IdleConnTimeout:     90 * time.Second,
+			DialContext: (&net.Dialer{
+				Timeout:   10 * time.Second,
+				KeepAlive: 30 * time.Second,
+				Control:   ssrfDialControl,
+			}).DialContext,
+		}, nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return &http.Client{Timeout: timeout, Transport: tr}, nil
 }

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os/exec"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -1149,9 +1150,9 @@ func (h *SreyunCore) Chat(ctx context.Context, session *SreyunSession, userMsg s
 	// Drafts stay out of retrieval until human activation after verify/accept.
 	if meta.ToolTurns >= 3 && len(meta.Tools) >= 2 && len([]rune(strings.TrimSpace(fullReply))) > 160 {
 		corpus := userMsg + "\n" + fullReply
-		go func() {
+		safeGo("sreyun-skill-promote", func() {
 			_, _, _ = h.s.promoteTextToSkillSyncStatus("hermes_loop", fmt.Sprintf("sreyun:%d", session.ID), corpus, "draft")
-		}()
+		})
 	}
 	return fullReply, meta, nil
 }
@@ -1389,10 +1390,21 @@ func (h *SreyunCore) runLoop(ctx context.Context, cfg AIConfig, msgs []map[strin
 				err    error
 			}
 			outCh := make(chan toolOut, 1)
-			go func(t SreyunTool, a map[string]any) {
+			// 工具实现遍布 SQL / K8s / 硬件 / 远程执行等各个子系统，一旦某个工具 panic，
+			// 没有 recover 的裸 goroutine 会**把整个服务端进程带走**——一次 AI 对话打挂面板。
+			// 这里把 panic 收敛成一次"工具执行失败"，对话继续，进程不受影响。
+			go func(t SreyunTool, a map[string]any, name string) {
+				defer func() {
+					if r := recover(); r != nil {
+						stack := string(debug.Stack())
+						slog.Error("AI 工具 panic（已隔离，不影响进程）", "tool", name, "panic", r, "stack", stack)
+						reportPanic("sreyun_tool:"+name, "tool_panic", r, stack)
+						outCh <- toolOut{"", fmt.Errorf("工具内部错误（已记录）")}
+					}
+				}()
 				res, e := t.Execute(a)
 				outCh <- toolOut{res, e}
-			}(tool, tc.Args)
+			}(tool, tc.Args, tc.Name)
 			var result string
 			var err error
 			select {

@@ -1408,8 +1408,28 @@
                 <div id="sqlTruncActions" class="sql-trunc-actions" hidden style="display:none;gap:8px;flex-wrap:wrap;margin:0 0 8px"></div>
                 <textarea id="sqlEditor" class="mono sql-editor" rows="14" spellcheck="false" placeholder="SELECT id, name FROM users WHERE status = 1 LIMIT 100;"></textarea>
               </div>
+              <div class="sql-run-opts">
+                <label class="sql-run-opt"><span data-i18n="sql.row_limit">行数上限</span>
+                  <select id="sqlLimitSel" class="sql-select">
+                    <option value="200">200</option>
+                    <option value="1000" selected>1000</option>
+                    <option value="5000">5000</option>
+                    <option value="20000">20000</option>
+                    <option value="50000">50000</option>
+                  </select>
+                </label>
+                <label class="sql-run-opt"><span data-i18n="sql.timeout_sec">超时(秒)</span>
+                  <select id="sqlTimeoutSel" class="sql-select">
+                    <option value="10">10</option>
+                    <option value="20" selected>20</option>
+                    <option value="60">60</option>
+                  </select>
+                </label>
+                <span id="sqlRunProgress" class="sql-run-progress" hidden></span>
+              </div>
               <div class="sql-actions">
                 <button type="button" class="btn primary" id="sqlRunBtn" data-i18n="sql.run" title="Ctrl/⌘+Enter">运行</button>
+                <button type="button" class="btn danger" id="sqlCancelBtn" data-i18n="sql.cancel_run" hidden>停止</button>
                 <button type="button" class="btn" id="sqlAnalyzeBtn" data-i18n="sql.analyze">全面分析</button>
                 <button type="button" class="btn" id="sqlBeautifyBtn" data-i18n="sql.beautify">美化</button>
                 <button type="button" class="btn" id="sqlExplainBtn" data-i18n="sql.explain">EXPLAIN</button>

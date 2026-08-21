@@ -1296,47 +1296,189 @@ async function runSQLOptimize() {
   });
 }
 
-async function runSQLQuery(connId, sqlOverride) {
-  if (connId && typeof connId === "object") { connId = null; sqlOverride = null; }
-  const sql = (sqlOverride != null ? String(sqlOverride) : sqlText()).trim();
-  let conn = String(connId || ($("sqlConnSel") && $("sqlConnSel").value) || "").trim();
-  if (!sql) { toast(sqlT("sql.empty", "请先输入 SQL"), "err"); return; }
+/* ---------- 查询执行：流式、可停、可翻页、可导出 ----------
+ *
+ * 老实现是"一把梭"：POST /query 等到整条查询跑完，把整个结果集一次性收下来再渲染。
+ * 数据量一大或查询一慢，每一环都出问题——用户在跑完之前什么都看不到、没法中途放弃、
+ * 关掉页面查询还在数据库上跑到底、行数写死 200 想多看一点都不行。
+ *
+ * 现在走 NDJSON 流式接口：列信息先到（表头立刻出来），行数据分批到（边到边画），
+ * 结束行带上耗时统计。AbortController 挂在"停止"按钮上——中止请求会让服务端的 ctx
+ * 取消，数据库那条查询随之被终止。
+ */
+
+let SQL_RUN_ABORT = null;          // 当前查询的 AbortController
+let SQL_RUN_TIMER = null;          // 已用时计时器
+let SQL_LAST_RUN = null;           // 最近一次运行的参数，供翻页/导出复用
+
+function sqlRunLimit() {
+  const el = $("sqlLimitSel");
+  const n = parseInt((el && el.value) || "1000", 10);
+  return Number.isFinite(n) && n > 0 ? n : 1000;
+}
+function sqlRunTimeout() {
+  const el = $("sqlTimeoutSel");
+  const n = parseInt((el && el.value) || "20", 10);
+  return Number.isFinite(n) && n > 0 ? n : 20;
+}
+
+function sqlSetRunning(on, startedAt) {
+  const runBtn = $("sqlRunBtn");
+  const cancelBtn = $("sqlCancelBtn");
+  const prog = $("sqlRunProgress");
+  if (runBtn) runBtn.disabled = !!on;
+  if (cancelBtn) cancelBtn.hidden = !on;
+  if (prog) prog.hidden = !on;
+  clearInterval(SQL_RUN_TIMER);
+  SQL_RUN_TIMER = null;
+  if (!on) return;
+  const tick = () => {
+    if (!prog) return;
+    const sec = ((Date.now() - startedAt) / 1000).toFixed(1);
+    const got = SQL_STREAM_ROWS ? SQL_STREAM_ROWS.length : 0;
+    prog.textContent = sqlT("sql.running_for", "运行中") + ` ${sec}s · ` + got + " " + sqlT("sql.query_rows", "行");
+  };
+  tick();
+  SQL_RUN_TIMER = setInterval(tick, 200);
+}
+
+function cancelSQLQuery() {
+  if (SQL_RUN_ABORT) {
+    try { SQL_RUN_ABORT.abort(); } catch (e) {}
+  }
+}
+window.cancelSQLQuery = cancelSQLQuery;
+
+let SQL_STREAM_ROWS = null;  // 当前流式结果的行缓冲（列式数组）
+let SQL_STREAM_COLS = null;
+
+/** 解析当前的连接 / 库，失败时给出可执行的提示并返回 null。 */
+async function sqlResolveRunTarget(connId, sql) {
   await loadSQLConnections();
   renderSQLConnSelect();
   const connSel = $("sqlConnSel");
+  let conn = String(connId || (connSel && connSel.value) || "").trim();
   if (connSel && conn) connSel.value = conn;
   conn = String((connSel && connSel.value) || conn || "").trim();
-  if (!conn) { toast(sqlT("sql.need_conn_run", "运行需要选择数据库连接"), "err"); return; }
+  if (!conn) { toast(sqlT("sql.need_conn_run", "运行需要选择数据库连接"), "err"); return null; }
   const c = sqlConnById(conn);
-  if (!c) { toast(sqlT("sql.conn_missing", "连接不存在或已删除，请刷新后重选"), "err"); return; }
-  if (c.enabled === false) { toast(sqlT("sql.conn_disabled", "连接已停用，请在「连接管理」中启用"), "err"); return; }
+  if (!c) { toast(sqlT("sql.conn_missing", "连接不存在或已删除，请刷新后重选"), "err"); return null; }
+  if (c.enabled === false) { toast(sqlT("sql.conn_disabled", "连接已停用，请在「连接管理」中启用"), "err"); return null; }
   let schema = sqlActiveSchema() || c.database || "";
   if (!schema) schema = inferSchemaFromSQLClient(sql);
   if (!schema) {
     toast(sqlT("sql.schema_needed", "未指定数据库：请在上方 Database 下拉框选择库后再运行"), "err");
     const dbSel = $("sqlDbSel"); if (dbSel) dbSel.focus();
-    return;
+    return null;
   }
   setActiveSQLDatabase(schema);
-  await withLoading("sqlRunBtn", async () => {
-    try {
-      const r = await fetch(`${API}/sql/connections/${encodeURIComponent(conn)}/query`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sql, schema, database: schema, limit: 200, timeout_sec: 20 })
-      });
-      const j = await r.json().catch(() => ({}));
-      if (!r.ok) {
-        toast(j.error || sqlT("sql.run_failed", "运行失败"), "err");
-        renderSQLQueryError(j);
-        return;
-      }
-      SQL_LAST.query = j;
-      renderSQLQueryResult(j);
-      const meta = `${j.row_count || 0} 行 · 执行 ${j.exec_ms ?? "—"} ms · 返回 ${j.fetch_ms ?? "—"} ms`;
-      toast(sqlT("sql.run_ok", "查询完成") + " · " + meta, "ok");
-    } catch (e) { toast(String(e), "err"); }
-  });
+  return { conn, schema };
 }
+
+async function runSQLQuery(connId, sqlOverride, opts) {
+  if (connId && typeof connId === "object") { connId = null; sqlOverride = null; }
+  opts = opts || {};
+  const sql = (sqlOverride != null ? String(sqlOverride) : sqlText()).trim();
+  if (!sql) { toast(sqlT("sql.empty", "请先输入 SQL"), "err"); return; }
+  const target = await sqlResolveRunTarget(connId, sql);
+  if (!target) return;
+
+  const limit = sqlRunLimit();
+  const offset = Math.max(0, parseInt(opts.offset || 0, 10) || 0);
+  SQL_LAST_RUN = { conn: target.conn, schema: target.schema, sql, limit, offset };
+  SQL_STREAM_ROWS = [];
+  SQL_STREAM_COLS = null;
+
+  const ac = new AbortController();
+  SQL_RUN_ABORT = ac;
+  const startedAt = Date.now();
+  sqlSetRunning(true, startedAt);
+  try {
+    const r = await fetch(`${API}/sql/connections/${encodeURIComponent(target.conn)}/query/stream`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, signal: ac.signal,
+      body: JSON.stringify({
+        sql, schema: target.schema, database: target.schema,
+        limit, offset, timeout_sec: sqlRunTimeout()
+      })
+    });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      toast(j.error || sqlT("sql.run_failed", "运行失败"), "err");
+      renderSQLQueryError(j);
+      return;
+    }
+    await sqlConsumeStream(r, { limit, offset });
+  } catch (e) {
+    if (e && e.name === "AbortError") {
+      toast(sqlT("sql.run_cancelled", "已停止查询"), "info");
+      renderSQLStreamResult({ cancelled: true, limit, offset });
+    } else {
+      toast(String(e && e.message || e), "err");
+      renderSQLQueryError({ error: String(e && e.message || e) });
+    }
+  } finally {
+    sqlSetRunning(false);
+    SQL_RUN_ABORT = null;
+  }
+}
+
+/** 逐行读取 NDJSON：表头先出来，行数据边到边画。 */
+async function sqlConsumeStream(resp, ctx) {
+  const reader = resp.body && resp.body.getReader ? resp.body.getReader() : null;
+  if (!reader) { // 极老内核没有流式读取：退回一次性读取，功能不打折，只是没有"边到边画"
+    const text = await resp.text();
+    text.split("\n").forEach(line => line.trim() && sqlHandleStreamLine(JSON.parse(line), ctx));
+    renderSQLStreamResult(ctx);
+    return;
+  }
+  const dec = new TextDecoder();
+  let buf = "";
+  let lastPaint = 0;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let nl;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line) continue;
+      let msg = null;
+      try { msg = JSON.parse(line); } catch (e) { continue; }
+      sqlHandleStreamLine(msg, ctx);
+    }
+    // 边到边画，但别每批都重排整张表——20fps 足够"看起来在动"。
+    if (Date.now() - lastPaint > 250) {
+      lastPaint = Date.now();
+      renderSQLStreamResult(ctx, true);
+    }
+  }
+  renderSQLStreamResult(ctx);
+}
+
+function sqlHandleStreamLine(msg, ctx) {
+  if (!msg || typeof msg !== "object") return;
+  if (msg.type === "meta") {
+    SQL_STREAM_COLS = Array.isArray(msg.columns) ? msg.columns : [];
+    ctx.meta = msg;
+    renderSQLStreamResult(ctx, true);
+    return;
+  }
+  if (msg.type === "rows" && Array.isArray(msg.rows)) {
+    for (const row of msg.rows) SQL_STREAM_ROWS.push(row);
+    return;
+  }
+  if (msg.type === "end") {
+    ctx.end = msg;
+    if (msg.error) toast(msg.error, "err");
+    return;
+  }
+  if (msg.type === "error") {
+    ctx.end = msg;
+    toast(msg.error || sqlT("sql.run_failed", "运行失败"), "err");
+  }
+}
+
 window.runSQLQuery = runSQLQuery;
 
 function renderSQLQueryError(j) {
@@ -1351,6 +1493,152 @@ function renderSQLQueryError(j) {
     ${timing.length ? `<div class="sql-query-meta">${esc(timing.join(" · "))}</div>` : ""}
     <div class="hint" style="margin-top:8px">${esc(sqlT("sql.run_hint", "仅允许只读 SELECT/WITH/SHOW；写操作请走变更单。"))}</div>`;
 }
+
+// 一次最多往 DOM 里放多少行。浏览器渲染几万行 <tr> 会直接卡死（这正是"数据量大就卡"
+// 的客户端那一半）；服务端可以给到 5 万行，但页面上先画 500 行，其余按需展开。
+const SQL_DOM_ROW_CHUNK = 500;
+
+/** renderSQLStreamResult 画流式结果。partial=true 表示还在流中（不画统计尾巴）。 */
+function renderSQLStreamResult(ctx, partial) {
+  const box = $("sqlResultPanel");
+  if (!box) return;
+  SQL_LAST_RENDER_CTX = ctx || {};
+  const cols = SQL_STREAM_COLS || [];
+  const rows = SQL_STREAM_ROWS || [];
+  const meta = (ctx && ctx.meta) || {};
+  const end = (ctx && ctx.end) || {};
+  const shown = Math.min(rows.length, box._sqlShown || SQL_DOM_ROW_CHUNK);
+  box._sqlShown = shown;
+
+  const bits = [];
+  if (meta.schema) bits.push(`<span class="badge">${esc(meta.schema)}</span>`);
+  bits.push(`<span><b>${rows.length}</b> ${esc(sqlT("sql.query_rows", "行"))}</span>`);
+  if (end.exec_ms != null || meta.exec_ms != null) {
+    bits.push(`<span>${esc(sqlT("sql.exec_ms", "执行时长"))} <b>${end.exec_ms ?? meta.exec_ms}</b> ms</span>`);
+  }
+  if (end.fetch_ms != null) bits.push(`<span>${esc(sqlT("sql.fetch_ms", "数据返回"))} <b>${end.fetch_ms}</b> ms</span>`);
+  if (end.total_ms != null) bits.push(`<span>${esc(sqlT("sql.total_ms", "合计"))} <b>${end.total_ms}</b> ms</span>`);
+  if (ctx && ctx.offset) bits.push(`<span class="badge">OFFSET ${ctx.offset}</span>`);
+  if (end.truncated) bits.push(`<span class="badge warn">${esc(sqlT("sql.query_truncated", "已截断"))} ≤${ctx.limit}</span>`);
+  if (ctx && ctx.cancelled) bits.push(`<span class="badge warn">${esc(sqlT("sql.run_cancelled", "已停止查询"))}</span>`);
+  if (partial) bits.push(`<span class="badge">${esc(sqlT("sql.streaming", "接收中…"))}</span>`);
+
+  const actions = partial ? "" : `
+    <div class="sql-result-actions">
+      <button type="button" class="btn sm" data-sql-page="prev"${(ctx.offset || 0) <= 0 ? " disabled" : ""}>${esc(sqlT("sql.page_prev", "上一页"))}</button>
+      <button type="button" class="btn sm" data-sql-page="next"${end.truncated ? "" : " disabled"}>${esc(sqlT("sql.page_next", "下一页"))}</button>
+      <button type="button" class="btn sm" data-sql-copy="csv">${esc(sqlT("sql.copy_csv", "复制为 CSV"))}</button>
+      <button type="button" class="btn sm" data-sql-export="csv">${esc(sqlT("sql.export_csv", "导出 CSV"))}</button>
+    </div>`;
+
+  if (!cols.length) {
+    box.innerHTML = `<div class="sql-query-meta">${bits.join("")}</div>` +
+      `<div class="hint">${esc(sqlT("sql.query_empty", "查询成功，无返回列（或无结果集）"))}</div>` + actions;
+    return;
+  }
+  const head = cols.map(c => `<th>${esc(c)}</th>`).join("");
+  const body = rows.slice(0, shown).map(row => {
+    const cells = cols.map((c, i) => {
+      const v = Array.isArray(row) ? row[i] : (row ? row[c] : null);
+      const text = v == null ? "NULL" : String(v);
+      const cls = v == null ? " class=\"sql-null\"" : (typeof v === "number" ? " class=\"num\"" : "");
+      return `<td${cls} title="${esc(text.length > 500 ? text.slice(0, 500) + "…" : text)}">${esc(text.length > 200 ? text.slice(0, 200) + "…" : text)}</td>`;
+    }).join("");
+    return `<tr>${cells}</tr>`;
+  }).join("");
+  const more = rows.length > shown
+    ? `<div class="sql-query-hint"><button type="button" class="btn sm" data-sql-more="1">${esc(sqlT("sql.show_more", "再显示 500 行"))}</button> ${esc(sqlT("sql.dom_capped", "（页面只渲染部分行以保持流畅，导出/复制不受影响）"))}</div>`
+    : "";
+  box.innerHTML = `<div class="sql-query-meta">${bits.join("")}</div>${actions}
+    <div class="sql-query-wrap"><table class="sql-query-table">
+      <thead><tr>${head}</tr></thead>
+      <tbody>${body || `<tr><td colspan="${cols.length}">${esc(sqlT("sql.query_no_rows", "无数据行"))}</td></tr>`}</tbody>
+    </table></div>${more}`;
+}
+
+/** 结果区的按钮：翻页 / 展开更多 / 复制 / 导出。 */
+function onSQLResultAction(e) {
+  const box = $("sqlResultPanel");
+  const more = e.target.closest && e.target.closest("[data-sql-more]");
+  if (more && box) {
+    box._sqlShown = (box._sqlShown || SQL_DOM_ROW_CHUNK) + SQL_DOM_ROW_CHUNK;
+    renderSQLStreamResult(SQL_LAST_RENDER_CTX || {});
+    return true;
+  }
+  const page = e.target.closest && e.target.closest("[data-sql-page]");
+  if (page && SQL_LAST_RUN) {
+    const dir = page.dataset.sqlPage;
+    const step = SQL_LAST_RUN.limit || 1000;
+    const next = dir === "next" ? (SQL_LAST_RUN.offset || 0) + step : Math.max(0, (SQL_LAST_RUN.offset || 0) - step);
+    runSQLQuery(SQL_LAST_RUN.conn, SQL_LAST_RUN.sql, { offset: next });
+    return true;
+  }
+  const copy = e.target.closest && e.target.closest("[data-sql-copy]");
+  if (copy) {
+    const text = sqlRowsToCSV(SQL_STREAM_COLS || [], SQL_STREAM_ROWS || []);
+    if (!text) { toast(sqlT("sql.nothing_to_copy", "没有可复制的结果"), "info"); return true; }
+    copyToClipboardOrPrompt(text).then(ok => { if (ok) toast(I18N.t("toast.copied", "已复制"), "ok"); });
+    return true;
+  }
+  const exp = e.target.closest && e.target.closest("[data-sql-export]");
+  if (exp) { exportSQLResultCSV(); return true; }
+  return false;
+}
+
+/** 把列式结果拼成 CSV（客户端复制用；导出走服务端流式接口，不受行数上限影响）。 */
+function sqlRowsToCSV(cols, rows) {
+  if (!cols.length) return "";
+  const cell = (v) => {
+    if (v == null) return "";
+    const s = String(v);
+    return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  const lines = [cols.map(cell).join(",")];
+  for (const row of rows) {
+    lines.push(cols.map((c, i) => cell(Array.isArray(row) ? row[i] : (row ? row[c] : null))).join(","));
+  }
+  return lines.join("\n");
+}
+
+/**
+ * exportSQLResultCSV 走服务端流式导出：**重跑一次查询直接写 CSV**，不受页面行数上限影响。
+ * 页面上只画了 500 行、内存里只有 5 万行，但导出可以拿到几十万行——这正是"数据量大"时
+ * 用户真正需要的出口。
+ */
+async function exportSQLResultCSV() {
+  if (!SQL_LAST_RUN) { toast(sqlT("sql.run_first", "请先运行一次查询"), "info"); return; }
+  const btnLabel = sqlT("sql.exporting", "正在导出…");
+  toast(btnLabel, "info");
+  try {
+    const r = await fetch(`${API}/sql/connections/${encodeURIComponent(SQL_LAST_RUN.conn)}/query/export`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sql: SQL_LAST_RUN.sql, schema: SQL_LAST_RUN.schema, database: SQL_LAST_RUN.schema,
+        offset: SQL_LAST_RUN.offset || 0, timeout_sec: 60,
+        filename: "sql-result-" + new Date().toISOString().slice(0, 19).replace(/[:T]/g, "")
+      })
+    });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      toast(j.error || sqlT("sql.export_failed", "导出失败"), "err");
+      return;
+    }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = (r.headers.get("Content-Disposition") || "").split("filename=")[1]?.replace(/"/g, "") || "sql-result.csv";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    toast(sqlT("sql.export_ok", "导出完成"), "ok");
+  } catch (e) {
+    toast(String(e && e.message || e), "err");
+  }
+}
+
+let SQL_LAST_RENDER_CTX = null;
 
 function renderSQLQueryResult(j) {
   const box = $("sqlResultPanel");
@@ -1872,6 +2160,9 @@ safeAddEventListener("sqlInnerTabs", "click", e => {
 });
 safeAddEventListener("sqlAnalyzeBtn", "click", () => runSQLAnalyze());
 safeAddEventListener("sqlRunBtn", "click", () => runSQLQuery());
+safeAddEventListener("sqlCancelBtn", "click", () => cancelSQLQuery());
+// 结果区的翻页 / 展开 / 复制 / 导出：结果是重画出来的，只能走事件委托。
+safeAddEventListener("sqlResultPanel", "click", (e) => { onSQLResultAction(e); });
 safeAddEventListener("sqlBeautifyBtn", "click", () => runSQLBeautify());
 safeAddEventListener("sqlAuditBtn", "click", () => runSQLAudit());
 safeAddEventListener("sqlOptimizeBtn", "click", () => runSQLOptimize());

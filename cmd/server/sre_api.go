@@ -462,7 +462,9 @@ func (s *Server) triggerPlaybookOnHost(pb Playbook, host *Host, operator string,
 	hosts := []*Host{host}
 	exec := s.playbooks.StartExecution(pb, operator, hosts)
 	s.persistPlaybookExecution(exec.ID)
-	go func() {
+	// 剧本执行会调到模块、远程 exec、AI 判定等一大片代码；裸 goroutine 里的 panic
+	// 会**把整个服务端带走**。safeGo 把它隔离成一条错误日志 + 平台自身故障记录。
+	safeGo("playbook-exec", func() {
 		s.runPlaybookExecution(pb, exec, hosts)
 		ok := false
 		if e, found := s.playbooks.GetExecution(exec.ID); found {
@@ -471,7 +473,7 @@ func (s *Server) triggerPlaybookOnHost(pb Playbook, host *Host, operator string,
 		if onDone != nil {
 			onDone(ok)
 		}
-	}()
+	})
 	return exec.ID
 }
 
@@ -3588,12 +3590,13 @@ func (s *Server) startMemoryWorkers() {
 	const workerCount = 3
 	for i := 0; i < workerCount; i++ {
 		s.memoryWg.Add(1)
-		go func() {
+		// 记忆写入 worker：一次 panic 不能既杀进程、又让整条队列永远没人消费。
+		safeGo("ai-memory-worker", func() {
 			defer s.memoryWg.Done()
 			for job := range s.memoryCh {
 				s.processMemoryJob(job)
 			}
-		}()
+		})
 	}
 }
 
@@ -3733,13 +3736,13 @@ func (s *Server) retrieveMemoryWithCitations(preferKind, userMsg string, topK in
 			found = found[:topK]
 		}
 	}
-	go func() {
+	safeGo("sre-batch-ids", func() {
 		ids := make([]int64, len(found))
 		for i, h := range found {
 			ids[i] = h.ID
 		}
 		s.pg.touchMemoryHits(ids)
-	}()
+	})
 	var b strings.Builder
 	b.WriteString("\n\n【历史运维经验（RAG 检索；回答时请标注依据来源：结案/诊断/已验证文档/避坑/技能）】\n")
 	n := 0
