@@ -422,7 +422,10 @@ function sendDeskQuality() {
     client_w: client.client_w,
     client_h: client.client_h,
     dpr: client.dpr,
-    client_codecs: DESK_CLIENT_CODEC.codecs
+    client_codecs: DESK_CLIENT_CODEC.codecs,
+    // 声明支持脏块差分帧。Agent 只有看到这一位才会发 'T'——老版控制台不认识它，
+    // 发过去就是整屏黑。
+    tiles: true
   };
   // Prefer Agent auto-scale; drop legacy fixed scale so it doesn't fight viewport fit.
   delete payloadObj.scale;
@@ -431,6 +434,67 @@ function sendDeskQuality() {
   buf[0] = "Q".charCodeAt(0);
   buf.set(payload, 1);
   DESK_WS.send(buf);
+}
+
+/**
+ * drawDeskTiles 画一帧脏块差分（'T'）。
+ *
+ * 载荷是紧凑二进制（见 Agent 侧 encodeDeskTiles）：
+ *   u16 frameW | u16 frameH | u16 count
+ *   count × ( u16 x | u16 y | u16 w | u16 h | u32 len | len 字节 JPEG )
+ *
+ * 差分帧只有在画布尺寸与帧头一致时才能画——尺寸对不上说明客户端手里的底图已经不是
+ * Agent 以为的那一张，硬画会画出错位的鬼影。这种情况直接忽略，等下一张整帧关键帧
+ * （Agent 至少每 5 秒发一张）。
+ */
+function drawDeskTiles(canvas, payload, onPainted) {
+  if (!canvas || !payload || payload.byteLength < 6) return;
+  const dv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+  const fw = dv.getUint16(0), fh = dv.getUint16(2), count = dv.getUint16(4);
+  if (!fw || !fh || !count) return;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  if (canvas.width !== fw || canvas.height !== fh) {
+    // 还没有底图（或底图尺寸变了）：等整帧，别画错位的块。
+    return;
+  }
+  let off = 6;
+  const jobs = [];
+  for (let i = 0; i < count && off + 12 <= payload.byteLength; i++) {
+    const x = dv.getUint16(off), y = dv.getUint16(off + 2);
+    const w = dv.getUint16(off + 4), h = dv.getUint16(off + 6);
+    const len = dv.getUint32(off + 8);
+    off += 12;
+    if (len <= 0 || off + len > payload.byteLength) break;
+    const bytes = payload.slice(off, off + len);
+    off += len;
+    jobs.push({ x, y, w, h, blob: new Blob([bytes], { type: "image/jpeg" }) });
+  }
+  if (!jobs.length) return;
+  const paintAll = (sources) => {
+    for (let i = 0; i < sources.length; i++) {
+      const src = sources[i];
+      if (!src) continue;
+      const j = jobs[i];
+      ctx.drawImage(src, j.x, j.y, j.w, j.h);
+      if (typeof src.close === "function") { try { src.close(); } catch (e) {} }
+    }
+    if (typeof onPainted === "function") onPainted();
+  };
+  if (typeof createImageBitmap === "function") {
+    Promise.all(jobs.map(j => createImageBitmap(j.blob).catch(() => null))).then(paintAll);
+    return;
+  }
+  // 老内核兜底：Image + object URL。
+  let left = jobs.length;
+  const imgs = new Array(jobs.length).fill(null);
+  jobs.forEach((j, i) => {
+    const url = URL.createObjectURL(j.blob);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); imgs[i] = img; if (--left === 0) paintAll(imgs); };
+    img.onerror = () => { URL.revokeObjectURL(url); if (--left === 0) paintAll(imgs); };
+    img.src = url;
+  });
 }
 
 function fillMonitorSelect(mons) {
@@ -621,10 +685,23 @@ function connectDesktopWS(id, name) {
           setDeskDot("waiting");
           return;
         }
-        if (meta.phase === "agent_up" && !DESK_GOT_FRAME) {
-          setDesktopStatus(I18N.t("desktop.agent_up"), false);
-          setDeskPlaceholder(I18N.t("desktop.agent_up"), I18N.t("desktop.streaming_hint"));
+        if (meta.phase === "agent_reconnecting") {
+          // Windows 登录 / 注销 / 切换用户会让服务在新会话里重开桌面 worker。
+          // 会话没断，只是换了一头——告诉用户"正在恢复"，别让人以为要重连。
+          DESK_PHASE = "connecting";
+          setDesktopStatus(I18N.t("desktop.agent_reconnecting", "远程会话切换中，正在恢复…"), false);
           setDeskDot("waiting");
+          return;
+        }
+        if (meta.phase === "agent_up") {
+          if (!DESK_GOT_FRAME) {
+            setDesktopStatus(I18N.t("desktop.agent_up"), false);
+            setDeskPlaceholder(I18N.t("desktop.agent_up"), I18N.t("desktop.streaming_hint"));
+            setDeskDot("waiting");
+          }
+          // 新接管的 worker 从默认参数起步：把画质/视口/能力位再报一次，
+          // 否则它不知道浏览器认识差分帧，会退回整屏推流。
+          sendDeskQuality();
         }
         if (meta.w) DESK_META.w = meta.w;
         if (meta.h) DESK_META.h = meta.h;
@@ -721,6 +798,22 @@ function connectDesktopWS(id, name) {
       }
       jpegPending = new Blob([payload.slice()], { type: "image/jpeg" });
       drawNextJPEG();
+      return;
+    }
+    if (typ === "T" && canvas) {
+      // 脏块差分帧：只画变化的那几块。
+      if ((DESK_QUALITY.codec === "h264" || DESK_QUALITY.codec === "h265") && $("deskVideo") && $("deskVideo").style.display !== "none") {
+        return;
+      }
+      drawDeskTiles(canvas, payload, () => {
+        const firstFrame = !DESK_GOT_FRAME;
+        markDeskStreaming();
+        if (firstFrame) { showDeskCanvas(true); fitDeskSurface(canvas); }
+        else if (canvas.style.display === "none") showDeskCanvas(true);
+        DESK_UNIFORM_STREAK = 0;
+        hideDeskPlaceholder();
+        setDeskDot("on");
+      });
       return;
     }
     if (typ === "P") {
@@ -1568,9 +1661,21 @@ async function playDeskReplay(id) {
     const data = await fetch(`${API}/desktop/sessions/${encodeURIComponent(id)}/replay`, { credentials: "include" }).then(r => r.json());
     const frames = data.frames || [];
     let i = 0;
+    const b64 = (str) => {
+      const bin = atob(str);
+      const u8 = new Uint8Array(bin.length);
+      for (let j = 0; j < bin.length; j++) u8[j] = bin.charCodeAt(j);
+      return u8;
+    };
     const tick = () => {
       if (i >= frames.length) return;
       const f = frames[i++];
+      // 差分帧：画在上一张关键帧之上（不能改画布尺寸，那会把底图清掉）。
+      if (f.type === "tiles" && f.data) {
+        drawDeskTiles(canvas, b64(f.data), null);
+        setTimeout(tick, 60);
+        return;
+      }
       if (f.type === "jpeg" && f.data) {
         const bin = atob(f.data);
         const u8 = new Uint8Array(bin.length);

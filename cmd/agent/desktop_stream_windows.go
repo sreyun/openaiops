@@ -48,6 +48,10 @@ var (
 	procMouseEvent             = modUser32.NewProc("mouse_event")
 	procKeybdEvent             = modUser32.NewProc("keybd_event")
 	procMapVirtualKeyW         = modUser32.NewProc("MapVirtualKeyW")
+	procVkKeyScanExW           = modUser32.NewProc("VkKeyScanExW")
+	procGetKeyboardLayout      = modUser32.NewProc("GetKeyboardLayout")
+	procGetForegroundWindow    = modUser32.NewProc("GetForegroundWindow")
+	procGetAsyncKeyState       = modUser32.NewProc("GetAsyncKeyState")
 
 	procOpenInputDesktop          = modUser32.NewProc("OpenInputDesktop")
 	procOpenDesktopW              = modUser32.NewProc("OpenDesktopW")
@@ -256,7 +260,12 @@ const (
 	keyeventfKeyUp         = 0x0002
 	keyeventfExtendedKey   = 0x0001
 	keyeventfUnicode       = 0x0004
+	keyeventfScancode      = 0x0008
 	mapVKToVSC             = 0 // MAPVK_VK_TO_VSC
+	// 修饰键的虚拟键码：typeRuneAsRealKey 要按当前布局补 Shift/Ctrl/Alt。
+	vkShift   = 0x10
+	vkControl = 0x11
+	vkMenu    = 0x12 // Alt
 )
 
 type bitmapInfoHeader struct {
@@ -1317,10 +1326,118 @@ func (i *winInput) SendCAD() error {
 	return injectSecureAttentionSequence()
 }
 
-// TypeText injects Unicode text via KEYEVENTF_UNICODE (works on lock screen
-// password boxes; layout/CapsLock independent). Live typing and unlock both use
-// this path for printable characters.
+// foregroundKeyboardLayout 取当前前台窗口线程的键盘布局（HKL）。
+// 取不到就退回本线程布局——总比拿 0 好，VkKeyScanExW(0) 的行为依赖调用线程。
+func foregroundKeyboardLayout() uintptr {
+	hwnd, _, _ := procGetForegroundWindow.Call()
+	var tid uintptr
+	if hwnd != 0 {
+		tid, _, _ = procGetWindowThreadProcessId.Call(hwnd, 0)
+	}
+	hkl, _, _ := procGetKeyboardLayout.Call(tid)
+	if hkl == 0 {
+		hkl, _, _ = procGetKeyboardLayout.Call(0)
+	}
+	return hkl
+}
+
+func keyIsDownNow(vk int) bool {
+	r, _, _ := procGetAsyncKeyState.Call(uintptr(vk))
+	return r&0x8000 != 0
+}
+
+// typeRuneAsRealKey 按"真键"注入一个字符：VkKeyScanExW 在**远端当前布局**下把字符还原成
+// VK + 需要的 Shift/Ctrl/Alt 组合，MapVirtualKey 补上扫描码，然后像真键盘那样按下抬起。
+//
+// 为什么必须这么做（这是"远程桌面里打开 cmd 敲不进字"的直接原因）：
+// KEYEVENTF_UNICODE 注入的是 VK=0、只带字符的键盘事件。绝大多数 GUI 程序从 WM_CHAR 读
+// 输入，所以照单全收；但**控制台（conhost/cmd.exe）读的是控制台输入缓冲里的 KEY_EVENT**，
+// 对 VK=0、扫描码为 0 的记录，cooked 模式下的 ReadConsole 会直接丢掉——于是浏览器地址栏
+// 能打字、cmd 里一个字符也进不去。真正的远程桌面（mstsc）传的就是扫描码，所以哪儿都能用：
+// 控制台、游戏的 DirectInput、BIOS 风格的全屏对话框，全都吃这一套。
+//
+// 返回 false 表示"这个字符在当前布局上打不出来"（典型是中日韩、emoji），
+// 调用方应退回 UNICODE 注入——那条路对 GUI 程序仍然有效。
+func (i *winInput) typeRuneAsRealKey(r rune) bool {
+	if r == 0 || r > 0xFFFF {
+		return false
+	}
+	hkl := foregroundKeyboardLayout()
+	res, _, _ := procVkKeyScanExW.Call(uintptr(uint16(r)), hkl)
+	vk, needShift, needCtrl, needAlt, ok := deskVkScanState(uint16(res))
+	if !ok {
+		return false // 当前布局敲不出这个字符 → 交给 UNICODE 兜底
+	}
+
+	// 只补当前**还没按下**的修饰键，事后也只松开自己按下的那几个：
+	// 用户可能正按着 Shift 连打大写，替他松开会把后面的字符全变成小写。
+	press := func(mvk int, need bool) bool {
+		if !need || keyIsDownNow(mvk) {
+			return false
+		}
+		_ = i.Key(mvk, true)
+		return true
+	}
+	didShift := press(vkShift, needShift)
+	didCtrl := press(vkControl, needCtrl)
+	didAlt := press(vkMenu, needAlt)
+
+	_ = i.Key(vk, true)
+	_ = i.Key(vk, false)
+
+	if didAlt {
+		_ = i.Key(vkMenu, false)
+	}
+	if didCtrl {
+		_ = i.Key(vkControl, false)
+	}
+	if didShift {
+		_ = i.Key(vkShift, false)
+	}
+	return true
+}
+
+// TypeText 注入一段文本。
+//
+// 逐字符**优先走真键**（typeRuneAsRealKey）——控制台、游戏、部分全屏对话框只认扫描码；
+// 布局打不出来的字符（中日韩、emoji）才退回 KEYEVENTF_UNICODE 批量注入，那条路对 GUI
+// 程序和登录界面的密码框仍然有效，也不受 CapsLock / 布局影响。
 func (i *winInput) TypeText(text string) error {
+	if err := i.ensureInputDesktop(); err != nil {
+		return err
+	}
+	var uni []rune
+	flushUni := func() error {
+		if len(uni) == 0 {
+			return nil
+		}
+		err := i.typeTextUnicode(string(uni))
+		uni = uni[:0]
+		return err
+	}
+	for _, r := range text {
+		if r == '\n' || r == '\r' || r == '\t' {
+			if err := flushUni(); err != nil {
+				return err
+			}
+			vk := 0x0D
+			if r == '\t' {
+				vk = 0x09
+			}
+			_ = i.Key(vk, true)
+			_ = i.Key(vk, false)
+			continue
+		}
+		if i.typeRuneAsRealKey(r) {
+			continue
+		}
+		uni = append(uni, r)
+	}
+	return flushUni()
+}
+
+// typeTextUnicode 是原来的 KEYEVENTF_UNICODE 批量注入路径（保留为兜底）。
+func (i *winInput) typeTextUnicode(text string) error {
 	if err := i.ensureInputDesktop(); err != nil {
 		return err
 	}

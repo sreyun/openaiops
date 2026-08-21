@@ -581,6 +581,7 @@
   "desktop.disconnected": "已断开",
   "desktop.waiting_agent": "等待 Agent 接入桌面通道…",
   "desktop.agent_up": "Agent 已接入，正在推送画面…",
+  "desktop.agent_reconnecting": "远程会话切换中，正在恢复…",
   "desktop.wait_hint": "请确认目标主机 Agent 为最新版且在线；Linux 需图形会话 + ffmpeg/grim，键鼠需 xdotool。",
   "desktop.streaming_hint": "正在接收第一帧画面…",
   "desktop.view_only": "只读画面 · 键鼠不可用（Windows 请确认 Agent 服务/桌面 worker；Linux 需 xdotool/ydotool；macOS 需辅助功能权限或 cliclick）",

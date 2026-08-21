@@ -578,6 +578,7 @@ window.DICT_TW = {
   "desktop.disconnected": "已斷開",
   "desktop.waiting_agent": "等待 Agent 接入桌面通道…",
   "desktop.agent_up": "Agent 已接入，正在推送畫面…",
+  "desktop.agent_reconnecting": "遠端工作階段切換中，正在恢復…",
   "desktop.wait_hint": "請確認目標主機 Agent 為最新版且線上；Linux 需圖形會話 + ffmpeg/grim，鍵鼠需 xdotool。",
   "desktop.streaming_hint": "正在接收第一幀畫面…",
   "desktop.view_only": "只讀畫面 · 鍵鼠不可用（Windows 請確認 Agent 服務/桌面 worker；Linux 需 xdotool/ydotool；macOS 需輔助功能許可權或 cliclick）",

@@ -71,25 +71,37 @@ func TestTerminalRightClickCopiesSelection(t *testing.T) {
 	if !strings.Contains(src, "getClientRects") {
 		t.Error("命中判断应基于选区自身的可视矩形（caretRangeFromPoint / caretPositionFromPoint 各内核不一致）")
 	}
-	menu := jsFunctionBody(t, src, "function showTermContextMenu(tab, e) {")
+	menu := jsFunctionBody(t, src, "function handleTermContextMenu(tab, e) {")
 	if !strings.Contains(menu, "termPointInSelection(e.clientX, e.clientY)") || !strings.Contains(menu, "termCopyText(selText)") {
-		t.Errorf("右键弹菜单时没有实现「点在高亮上即复制」：\n  %s", strings.TrimSpace(menu))
+		t.Errorf("右键没有实现「点在高亮上即复制」：\n  %s", strings.TrimSpace(menu))
+	}
+	// 点在高亮以外不能拦：那时应当把浏览器自己的菜单让出来。
+	if !strings.Contains(menu, "if (!selText || !termPointInSelection(e.clientX, e.clientY)) return;") {
+		t.Errorf("右键在没命中高亮时应当直接放行：\n  %s", strings.TrimSpace(menu))
 	}
 }
 
-func TestTerminalContextMenuIsEnabled(t *testing.T) {
+// 自绘右键菜单已经整体移除：复制走"高亮上右击"/Ctrl+C/标题栏按钮，粘贴走 Ctrl+V 的
+// 原生 paste，断线自动重连，清屏用 shell 的 clear——菜单只是在用户和终端之间多一层弹窗。
+// 这条用例守的是"别再把它加回来"，同时确认 contextmenu 监听还在（右击复制要靠它）。
+func TestTerminalHasNoCustomContextMenu(t *testing.T) {
 	src := readWebFile(t, "web/js/terminal.js")
+	css := readWebFile(t, "web/style.css")
 
-	if strings.Contains(src, `// screen.addEventListener("contextmenu"`) {
-		t.Fatal("终端右键菜单还是被注释掉的——复制/粘贴/全选都点不出来")
-	}
 	if !strings.Contains(src, `screen.addEventListener("contextmenu"`) {
-		t.Fatal("终端没有注册 contextmenu 监听，右键出不来菜单")
+		t.Fatal("终端没有注册 contextmenu 监听，右击复制无从谈起")
 	}
-	for _, action := range []string{`data-action="copy"`, `data-action="select-all"`, `data-action="copy-all"`} {
-		if !strings.Contains(src, action) {
-			t.Errorf("右键菜单缺少 %s（复制窗口内容要靠「全选」与「复制全部」）", action)
+	for _, gone := range []string{"term-cmenu", "showTermContextMenu", `data-action="select-all"`} {
+		if strings.Contains(src, gone) {
+			t.Errorf("自绘右键菜单的残留还在 terminal.js 里：%s", gone)
 		}
+	}
+	if strings.Contains(css, ".term-cmenu") {
+		t.Error("style.css 里还留着右键菜单的样式（已无引用）")
+	}
+	// 菜单没了，复制整屏的入口必须还在——那就是标题栏那个按钮。
+	if !strings.Contains(src, "function termCopyBtnClick()") || !strings.Contains(src, "termScreenText(tab)") {
+		t.Error("移除菜单后，复制整屏的入口（标题栏复制按钮）也没了")
 	}
 }
 

@@ -262,100 +262,21 @@ window.openContainerTerminal = function (hostId, hostName, containerId, containe
   });
 };
 
-/* ---------- 终端右键菜单 ---------- */
-let TERM_CMENU_EL = null;
-function initTermContextMenu() {
-  if (TERM_CMENU_EL) return;
-  TERM_CMENU_EL = document.createElement("div");
-  TERM_CMENU_EL.className = "term-cmenu";
-  TERM_CMENU_EL.innerHTML = `
-    <div class="term-cmenu-item" data-action="copy">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-      <span>${esc(I18N.t("term.cmenu_copy", "复制"))}</span><span class="cmenu-key">Ctrl+C</span>
-    </div>
-    <div class="term-cmenu-item" data-action="paste">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg>
-      <span>${esc(I18N.t("term.cmenu_paste", "粘贴"))}</span><span class="cmenu-key">Ctrl+V</span>
-    </div>
-    <div class="term-cmenu-sep"></div>
-    <div class="term-cmenu-item" data-action="select-all">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 12h8M12 8v8"/></svg>
-      <span>${esc(I18N.t("term.cmenu_select_all", "全选"))}</span>
-    </div>
-    <div class="term-cmenu-item" data-action="copy-all">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h10v4"/><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M4 4v10h4"/></svg>
-      <span>${esc(I18N.t("term.cmenu_copy_all", "复制全部内容"))}</span>
-    </div>
-    <div class="term-cmenu-sep"></div>
-    <div class="term-cmenu-item" data-action="reconnect">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg>
-      <span>${esc(I18N.t("term.cmenu_reconnect", "重新连接"))}</span>
-    </div>
-    <div class="term-cmenu-sep"></div>
-    <div class="term-cmenu-item" data-action="clear">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
-      <span>${esc(I18N.t("term.cmenu_clear", "清屏"))}</span>
-    </div>
-  `;
-  document.body.appendChild(TERM_CMENU_EL);
-  // 点击菜单外部关闭
-  document.addEventListener("click", (e) => {
-    if (TERM_CMENU_EL && !TERM_CMENU_EL.contains(e.target)) {
-      TERM_CMENU_EL.classList.remove("show");
-    }
-  });
-  // Esc 关闭
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && TERM_CMENU_EL) {
-      TERM_CMENU_EL.classList.remove("show");
-    }
-  });
-  // 菜单项点击处理
-  TERM_CMENU_EL.addEventListener("click", (e) => {
-    const item = e.target.closest(".term-cmenu-item");
-    if (!item || item.classList.contains("disabled")) return;
-    const action = item.dataset.action;
-    const tab = TERM_CMENU_EL._termTab;
-    TERM_CMENU_EL.classList.remove("show");
-    if (!tab) return;
-    switch (action) {
-      case "copy":
-        // 用菜单弹出那一刻抓到的选区：读选区在极端情况下要 blur 隐藏 textarea 再读，
-        // 而把焦点还回去会清掉高亮——点菜单时再读就成了空的。
-        termCopyText(TERM_CMENU_EL._termSel || termSelectionText(tab));
-        break;
-      case "select-all":
-        termSelectAllScreen(tab);
-        break;
-      case "copy-all":
-        termCopyText(termScreenText(tab));
-        break;
-      case "paste": {
-        // 聚焦输入框：读剪贴板失败时（明文 HTTP 下 navigator.clipboard 根本不存在，
-        // 或用户拒绝了读取授权）用户还能自己按 Ctrl+V，走原生 paste 事件那条路。
-        if (tab.inputEl) tab.inputEl.focus({ preventScroll: true });
-        if (navigator.clipboard && navigator.clipboard.readText) {
-          navigator.clipboard.readText().then(t => {
-            if (t && tab.ws && tab.ws.readyState === 1) termSend(tab.ws, t);
-          }).catch(() => toast(I18N.t("term.paste_manual", "浏览器不允许读取剪贴板，请按 Ctrl+V 粘贴"), "info"));
-        } else {
-          toast(I18N.t("term.paste_manual", "浏览器不允许读取剪贴板，请按 Ctrl+V 粘贴"), "info");
-        }
-        break;
-      }
-      case "reconnect":
-        if (tab.ws && tab.ws.readyState === 1) { toast(I18N.t("term.connected"), "info"); return; }
-        reconnectTermTab(tab);
-        break;
-      case "clear":
-        if (tab.vt && tab.vt.fullReset) {
-          tab.vt.fullReset();
-          tab.vt.render();
-        }
-        break;
-    }
-  });
-}
+/* ---------- 终端右键：直接复制，不弹自己的菜单 ----------
+ *
+ * 这里原来有一个自绘的右键菜单（复制 / 粘贴 / 全选 / 复制整屏 / 重连 / 清屏）。
+ * 它已经没有存在的理由了：
+ *   - 复制：在高亮上右击就复制，Ctrl+C 也复制，标题栏还有复制按钮；
+ *   - 粘贴：Ctrl+V 走浏览器原生 paste，比菜单里那条"请按 Ctrl+V"的提示直接得多；
+ *   - 全选 / 复制整屏：没有选区时点标题栏的复制按钮就是复制整屏；
+ *   - 重连：断线后本来就会自动重连（指数退避，见 connectTermWS）；
+ *   - 清屏：shell 自己的 clear/cls。
+ * 留着它只是在用户和终端之间多插一层弹窗。
+ *
+ * 现在的行为：**点在高亮上就复制**（PuTTY / Windows Terminal 的老习惯），并吞掉这次
+ * 右键——刚做完一个明确动作还弹出菜单是多余的；点在别处不拦，浏览器自己的菜单照常出来。
+ */
+
 /**
  * termPointInSelection 判断这一次右键是不是点在高亮上。
  *
@@ -376,37 +297,13 @@ function termPointInSelection(x, y) {
   return false;
 }
 
-function showTermContextMenu(tab, e) {
-  initTermContextMenu();
-  if (!TERM_CMENU_EL) return;
+/** handleTermContextMenu 右击：高亮上就复制并吞掉事件，其余一律放行。 */
+function handleTermContextMenu(tab, e) {
+  const selText = termSelectionText(tab);
+  if (!selText || !termPointInSelection(e.clientX, e.clientY)) return;
   e.preventDefault();
   e.stopPropagation();
-  TERM_CMENU_EL._termTab = tab;
-  // 更新菜单项状态
-  const copyItem = TERM_CMENU_EL.querySelector('[data-action="copy"]');
-  const reconnectItem = TERM_CMENU_EL.querySelector('[data-action="reconnect"]');
-  const selText = termSelectionText(tab);
-  TERM_CMENU_EL._termSel = selText;
-  // 右键点在高亮上 = 直接复制（PuTTY / Windows Terminal 的老习惯，也是用户嘴里的
-  // "右击复制"）。点在别处只开菜单——否则会把用户攒着准备粘贴的剪贴板内容冲掉。
-  if (selText && termPointInSelection(e.clientX, e.clientY)) {
-    termCopyText(selText);
-  }
-  if (copyItem) copyItem.classList.toggle("disabled", !selText);
-  const disconnected = !tab.ws || tab.ws.readyState !== 1;
-  if (reconnectItem) reconnectItem.classList.toggle("disabled", !disconnected);
-  // 定位
-  TERM_CMENU_EL.style.display = "block";
-  let x = e.clientX, y = e.clientY;
-  const mw = TERM_CMENU_EL.offsetWidth || 160;
-  const mh = TERM_CMENU_EL.offsetHeight || 150;
-  if (x + mw > window.innerWidth) x = window.innerWidth - mw - 4;
-  if (y + mh > window.innerHeight) y = window.innerHeight - mh - 4;
-  if (x < 0) x = 4;
-  if (y < 0) y = 4;
-  TERM_CMENU_EL.style.left = x + "px";
-  TERM_CMENU_EL.style.top = y + "px";
-  TERM_CMENU_EL.classList.add("show");
+  termCopyText(selText);
 }
 
 /* ---------- v5.3.0: 终端二次认证流程 ---------- */
@@ -831,9 +728,9 @@ function createTermTab(id, name, tabName, opts) {
     if (termFocusGuardBusy()) return;
     if (input && document.activeElement !== input) input.focus({ preventScroll: true });
   });
-  // 右键菜单：复制 / 粘贴 / 全选 / 复制全部内容 / 重连 / 清屏
+  // 右键：点在高亮上直接复制（不弹自绘菜单，见 handleTermContextMenu）
   screen.addEventListener("contextmenu", function(ev) {
-    showTermContextMenu(tabObj, ev);
+    handleTermContextMenu(tabObj, ev);
   });
   // JS fallback for :focus-within — toggle .term-focused class on screen
   // This ensures cursor blink animation works on iOS Safari where :focus-within
@@ -1932,25 +1829,6 @@ function termScreenText(tab) {
   const lines = [];
   rows.forEach(row => lines.push(row.textContent || ""));
   return normalizeTermCopyText(lines.join("\n")).replace(/\n+$/, "");
-}
-
-// termSelectAllScreen 选中整窗内容（右键菜单「全选」）。
-// 先 blur 隐藏 textarea：焦点在表单元素上时，加进去的 Range 落在另一个选区上下文里，
-// 用户看不到高亮，复制也读不到。
-function termSelectAllScreen(tab) {
-  if (!tab || !tab.screenEl) return false;
-  const rows = tab.screenEl.querySelectorAll(".term-row");
-  if (!rows.length) return false;
-  const ae = document.activeElement;
-  if (ae && ae.classList.contains("term-input")) ae.blur();
-  const range = document.createRange();
-  range.setStartBefore(rows[0]);
-  range.setEndAfter(rows[rows.length - 1]);
-  const sel = window.getSelection();
-  if (!sel) return false;
-  sel.removeAllRanges();
-  sel.addRange(range);
-  return true;
 }
 
 // termCopyText 复制到剪贴板并给出反馈。

@@ -96,6 +96,9 @@ type deskQuality struct {
 	Sharpness    float64  `json:"sharpness,omitempty"`
 	AutoScale    bool     `json:"auto_scale,omitempty"`
 	ClientCodecs []string `json:"client_codecs,omitempty"` // browser MSE capabilities
+	// Tiles: 浏览器声明自己认识 'T'（脏块差分帧）。默认 false —— 老版控制台只认整帧 'K'，
+	// 贸然发差分会让它整屏黑。协商位由客户端在 'Q' 里给出，Agent 只是照做。
+	Tiles bool `json:"tiles,omitempty"`
 }
 
 func defaultDeskQuality() deskQuality {
@@ -486,6 +489,12 @@ func (a *Agent) runDesktopSession(server, sid, lang string) {
 		var deskMetaAt time.Time
 		var lastFP uint64
 		var sameFP int
+		// 脏块差分状态。encScale/显示器一变就必须作废：客户端画布上的像素跟我们记的
+		// 校验和已经对不上了，再发差分会画出错位的鬼影。
+		tiler := newDeskTiler()
+		lastTileScale := -1.0
+		var lastFullAt time.Time
+		tilesSinceKey := false // 自上一张整帧以来发过差分吗（决定要不要补关键帧）
 		for !stop.Load() {
 			actMu.Lock()
 			inputHot := time.Since(lastActive) < 1800*time.Millisecond
@@ -722,8 +731,57 @@ func (a *Agent) runDesktopSession(server, sid, lang string) {
 				}
 			}
 			scaled := scaleImage(img, useScale)
+
+			// —— 脏块差分：只发变化的那几块 ——
+			//
+			// 整屏 JPEG 一帧 200–400KB，20fps 就是 32–64Mbps，链路给不出来，多余的字节
+			// 全堆在缓冲里——那个深度就是用户感受到的"点一下等三五秒"。改成只发变化区域
+			// 之后，敲一个字通常只有 2–4 个块、几 KB，延迟塌缩回一个 RTT。
+			//
+			// 三种情况仍然整帧发：客户端不认识 'T'（协商位）、几何/缩放变了（客户端画布
+			// 内容与我们记的校验和对不上）、变化面积过大（那时整帧压得更好）。
+			// 另外每 5 秒至少来一张整帧：既给录像留关键帧，也让任何一次丢块自愈。
+			if cq.Tiles {
+				if useScale != lastTileScale {
+					tiler.reset()
+					lastTileScale = useScale
+				}
+				rgba := deskToRGBA(scaled)
+				rects, full := tiler.changed(rgba)
+				// 每 5 秒补一张整帧关键帧：一是给录像留可回放的整屏，二是任何一次
+				// 丢块（浏览器慢时服务端会丢旧画面）都能在几秒内自愈。
+				// 但只有"这期间真的发过差分"才需要补 —— 桌面完全静止时一个字节都不该发。
+				needKey := tilesSinceKey && (lastFullAt.IsZero() || time.Since(lastFullAt) > 5*time.Second)
+				if !full && len(rects) == 0 && !needKey {
+					// 一个块都没变：不用编码，也不用发。
+					//
+					// 这里可以放心地"什么都不做"，而整帧那条路不敢：那边靠稀疏采样的
+					// 指纹判断整帧是否相同，会漏掉密码框里多出来的一个小圆点，所以打字
+					// 期间只能每一拍都重编一整屏。块校验和覆盖**每一个像素**，漏判不可能
+					// 发生，于是"打字时疯狂重编整屏"这条也一起没了。
+					time.Sleep(interval)
+					continue
+				}
+				if !full && !needKey && len(rects) > 0 {
+					if payload, err := encodeDeskTiles(rgba, rects, encQual); err == nil && len(payload) > 0 {
+						if err := writeTx(deskTxFrame('T', payload)); err != nil {
+							return
+						}
+						tilesSinceKey = true
+						time.Sleep(interval)
+						continue
+					}
+					// 编码失败：退回整帧，别把这一帧丢掉。
+				}
+				// 走到这里就是要发整帧。基线不用重置：changed() 已经把校验和更新成了
+				// 当前这一帧，正是客户端马上要拿到的那一帧。
+				lastFullAt = time.Now()
+				tilesSinceKey = false
+			}
+
 			var jbuf bytes.Buffer
 			if err := jpeg.Encode(&jbuf, scaled, &jpeg.Options{Quality: encQual}); err != nil {
+				tiler.reset() // 这一帧没发出去，基线作废，下一帧重来
 				time.Sleep(interval)
 				continue
 			}
@@ -783,6 +841,7 @@ func (a *Agent) runDesktopSession(server, sid, lang string) {
 				}
 			}
 			if len(jpegBytes) > hardMax {
+				tiler.reset() // 同上：丢帧就必须作废基线
 				time.Sleep(interval)
 				continue
 			}
@@ -1194,6 +1253,7 @@ func readDeskFrames(r io.Reader, inp deskInput, lang string, q *deskQuality, qMu
 				if nq.ClientH > 0 {
 					q.ClientH = nq.ClientH
 				}
+				q.Tiles = nq.Tiles
 				if nq.DPR > 0 {
 					q.DPR = nq.DPR
 				}

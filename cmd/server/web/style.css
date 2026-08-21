@@ -2013,17 +2013,6 @@ svg.sparkline{width:100%; height:46px; display:block}
   background:var(--panel); border-radius:0 0 var(--r-lg) var(--r-lg); letter-spacing:.01em}
 #termMask.maximized .term-hint{border-radius:0}
 /* 终端右键菜单 */
-.term-cmenu{position:fixed; z-index:9999; min-width:160px; background:var(--panel); border:1px solid var(--line2);
-  border-radius:var(--r-md); box-shadow:0 8px 24px rgba(0,0,0,.45); padding:4px 0;
-  font-size:13px; color:var(--text); display:none; user-select:none}
-.term-cmenu.show{display:block}
-.term-cmenu-item{display:flex; align-items:center; gap:8px; padding:8px 14px; cursor:pointer;
-  transition:background var(--transition-fast); white-space:nowrap}
-.term-cmenu-item:hover{background:var(--hover)}
-.term-cmenu-item.disabled{color:var(--muted3); cursor:default; pointer-events:none}
-.term-cmenu-item svg{width:15px; height:15px; flex:none; color:var(--muted)}
-.term-cmenu-item .cmenu-key{font-size:11px; color:var(--muted2); margin-left:auto; padding-left:12px}
-.term-cmenu-sep{height:1px; background:var(--line2); margin:4px 0}
 /* 图标按钮统一的按压反馈，提升一致的触感 */
 .tb-icon:active, .tb-action:active, .term-ctl:active, .vt-btn:active, .mini-btn:active, .chart-enlarge:active{transform:translateY(1px)}
 /* 主机卡片·终端按钮 */

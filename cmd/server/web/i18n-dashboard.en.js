@@ -578,6 +578,7 @@ window.DICT_EN = {
   "desktop.disconnected": "Disconnected",
   "desktop.waiting_agent": "Waiting for agent desktop channel…",
   "desktop.agent_up": "Agent attached, waiting for first frame…",
+  "desktop.agent_reconnecting": "Remote session switching — restoring…",
   "desktop.wait_hint": "Ensure the agent is up to date and online. Linux needs a GUI session + ffmpeg/grim; mouse/keyboard needs xdotool.",
   "desktop.streaming_hint": "Receiving the first frame…",
   "desktop.view_only": "View-only · input unavailable (Windows: Agent service/desktop worker; Linux: xdotool/ydotool; macOS: Accessibility / cliclick)",

@@ -213,3 +213,23 @@ func deskVKExtended(vk int) bool {
 	}
 	return false
 }
+
+// deskVkScanState 解 VkKeyScanExW 的返回值。
+//
+// 低字节是虚拟键码，高字节是**需要按住哪些修饰键**才能打出这个字符：
+// 1=Shift、2=Ctrl、4=Alt（AltGr 在 Win32 上就是 Ctrl+Alt，所以会同时出现 2 和 4）。
+// 返回 -1（0xFFFF）表示"当前布局敲不出这个字符"，调用方应退回 UNICODE 注入。
+//
+// 单独抽出来是为了能测：这段位运算错一位，远程桌面里就会变成"打 a 出 A"或"打不出符号"，
+// 而 Win32 调用本身在 Linux 上没法跑。
+func deskVkScanState(res uint16) (vk int, shift, ctrl, alt, ok bool) {
+	if int16(res) == -1 {
+		return 0, false, false, false, false
+	}
+	vk = int(byte(res & 0xff))
+	if vk == 0 {
+		return 0, false, false, false, false
+	}
+	state := byte((res >> 8) & 0xff)
+	return vk, state&1 != 0, state&2 != 0, state&4 != 0, true
+}

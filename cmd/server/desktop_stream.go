@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
@@ -41,12 +42,25 @@ type deskSession struct {
 	doneOnce  sync.Once
 
 	lastActive atomic.Int64 // unix nano; idle timeout
+	rearms     atomic.Int32 // Agent 侧断线后重新接管的次数（见 rearmAgent）
+	txLive     atomic.Int32 // 当前挂着的 Agent tx 流数量
 	createdAt  int64
 	recording  []deskRecordFrame
 	recMu      sync.Mutex
 }
 
 func (s *deskSession) markAgentUp() { s.upOnce.Do(func() { close(s.agentUp) }) }
+
+// txLive 记录当前是否有 Agent 的 tx 流挂着。重新接管的判定要看它，
+// 不能看 agentUp —— 那是个只关一次的信号，第一个 worker 上来之后就永远是"已连接"。
+func (s *deskSession) setAgentAttached(v bool) {
+	if v {
+		s.txLive.Add(1)
+		return
+	}
+	s.txLive.Add(-1)
+}
+func (s *deskSession) agentAttached() bool { return s.txLive.Load() > 0 }
 func (s *deskSession) close() {
 	s.doneOnce.Do(func() { close(s.done) })
 }
@@ -160,6 +174,66 @@ func (m *deskManager) notifyAgent(hostID, sessionID string) (ok bool, alive bool
 		m.mu.Unlock()
 		return true, alive
 	}
+}
+
+// deskMaxRearms 限制一次会话里允许 Agent 侧重新接管多少次。
+// Windows 上登录/注销/切换用户会让服务重新派生桌面 worker，一次会话经历两三次很正常；
+// 但如果 worker 起来就崩、崩了又起，无限重试只会让用户对着"正在恢复"干等。
+const deskMaxRearms = 6
+
+// deskRearmWait 是等新 worker 接管的时间上限。服务里的督导循环 2 秒一轮，
+// 加上派生进程 + 长轮询接单，正常情况下几秒内就能回来。
+const deskRearmWait = 45 * time.Second
+
+// rearmAgent 在 **Agent 侧断了、浏览器还连着** 时把会话重新挂回待接管队列。
+//
+// 这修的是现场那句"Windows 登录窗口输完用户名密码后要重新进一次才能看到画面"：
+// 登录会改变活动会话，SYSTEM 服务据此杀掉旧的桌面 worker、在新会话里派生一个新的。
+// 旧 worker 的 tx 一断，服务端原来直接把整个会话关掉 —— 浏览器那边就是"已断开"，
+// 只能关掉重开。可这时候浏览器明明还在，新 worker 也马上就会来接单。
+//
+// 现在改成：留住会话、告诉浏览器"正在恢复"、把 session 重新排进待接管队列。
+// 新 worker 通过 deskWait 拿到**同一个 session id**，接着推流即可；超时才真正收摊。
+func (m *deskManager) rearmAgent(sess *deskSession) bool {
+	if sess == nil {
+		return false
+	}
+	select {
+	case <-sess.done:
+		return false // 浏览器早就走了，没人可等
+	default:
+	}
+	if sess.rearms.Add(1) > deskMaxRearms {
+		return false
+	}
+	select {
+	case sess.toBrowser <- append([]byte{'S'}, mustJSON(map[string]any{"phase": "agent_reconnecting"})...):
+	default:
+	}
+	m.notifyAgent(sess.hostID, sess.id)
+	go func() {
+		t := time.NewTimer(deskRearmWait)
+		defer t.Stop()
+		select {
+		case <-t.C:
+			select {
+			case <-sess.done:
+				return
+			default:
+			}
+			if sess.agentAttached() {
+				return // 新 worker 已经接上了
+			}
+			select {
+			case sess.toBrowser <- append([]byte{'E'}, mustJSON(map[string]string{"error": Tz("desktop.timeout")})...):
+			default:
+			}
+			time.Sleep(200 * time.Millisecond)
+			sess.close()
+		case <-sess.done:
+		}
+	}()
+	return true
 }
 
 func (m *deskManager) registerWaiter(hostID string) chan string {
@@ -383,6 +457,12 @@ func (s *Server) handleDesktopWS(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 			case 'M', 'W', 'B', 'Q', 'N', 'C', 'f', 'u', 'e', 'd':
+				// 上行方向也要防积压：链路一慢，60Hz 的鼠标移动就会在队列里排成一串，
+				// 于是"松手之后光标还在慢慢挪"。中间那些移动点没有信息价值——真正的
+				// 远程桌面同样只保最新位置。按下/抬起/滚轮/按键一个都不能丢。
+				if typ == 'M' && len(sess.toAgent) > deskAgentMoveBacklog && deskIsMouseMove(payload) {
+					continue
+				}
 				// framed to agent below
 			default:
 				continue
@@ -418,6 +498,11 @@ func (s *Server) handleDesktopWS(w http.ResponseWriter, r *http.Request) {
 					if time.Now().UnixMilli()%500 < 120 {
 						sess.recordFrame("jpeg", b[1:])
 					}
+				case 'T':
+					// 脏块差分帧。录像必须连着存：只存整帧的话，回放会退化成
+					// 5 秒一张幻灯片（整帧现在只在关键帧时才发）。
+					gotVideo.Store(true)
+					sess.recordFrame("tiles", b[1:])
 				case 'H':
 					gotVideo.Store(true)
 					sess.recordFrame("h264", b[1:])
@@ -609,7 +694,9 @@ func (s *Server) handleAgentDeskTx(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess.markAgentUp()
+	sess.setAgentAttached(true)
 	defer func() {
+		sess.setAgentAttached(false)
 		deadline := time.Now().Add(1500 * time.Millisecond)
 		for time.Now().Before(deadline) {
 			if len(sess.toBrowser) == 0 {
@@ -620,6 +707,10 @@ func (s *Server) handleAgentDeskTx(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			time.Sleep(20 * time.Millisecond)
+		}
+		// Agent 断了不等于会话结束：浏览器还在的话就等新 worker 接管（见 rearmAgent）。
+		if s.desk.rearmAgent(sess) {
+			return
 		}
 		sess.close()
 	}()
@@ -649,18 +740,41 @@ func (s *Server) handleAgentDeskTx(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// deskAgentMoveBacklog：上行队列积压超过这么多帧时，丢弃新的"纯移动"事件。
+// 队列本身有 128 的容量，32 已经是明显落后（60Hz 下约半秒）。
+const deskAgentMoveBacklog = 32
+
+// deskIsMouseMove 判断一个 'M' 载荷是不是纯移动（不含按下/抬起）。
+// 只做字节匹配，不解 JSON：这条路径在每个鼠标事件上都会走一遍。
+func deskIsMouseMove(payload []byte) bool {
+	return bytes.Contains(payload, []byte(`"action":"move"`))
+}
+
+// deskIsVideoFrame 判断是不是"可以丢"的画面帧。
+// 'K' 整帧 JPEG、'H' H.264 分片、'T' 脏块差分——它们都描述画面，晚到的不如新的。
+func deskIsVideoFrame(b []byte) bool {
+	return len(b) > 0 && (b[0] == 'K' || b[0] == 'H' || b[0] == 'T')
+}
+
+// deskBrowserVideoBacklog 是允许积压的画面帧数。
+//
+// 这个数字直接就是延迟：浏览器消费不过来时，队列有多深，用户看到的画面就落后多少帧。
+// 原来的 256 在 20fps 下等于**十几秒**的缓冲——现场"点一下等三五秒"有一半来自这里。
+// 实时画面的正确策略是丢旧留新：留 3 帧只是给突发抖动一点余量。
+const deskBrowserVideoBacklog = 3
+
 // enqueueBrowser forwards an agent frame to the browser writer.
 //
-// Video frames ('K' JPEG / 'H' H264) are lossy: if the browser is slow and the
-// queue is full we prefer the newest frame, but we ONLY ever drop a *stale video*
-// frame to make room. Control/meta/error frames ('S','E','C','F','D',…) are never
-// evicted — dropping them raced with deskSendError and left the UI with a bare
-// WebSocket close ("已断开") instead of the real cause.
+// 控制帧（'S' 元信息 / 'E' 错误 / 'C' 剪贴板 / 'F','D' 文件…）**永不丢弃**：丢了它们
+// 曾经把 deskSendError 的原因吃掉，UI 上只剩一句"已断开"。
+//
+// 画面帧相反：浏览器慢下来时**必须丢旧的**。差分帧被丢会让那一块停在旧像素上，
+// 但 Agent 每 5 秒一定发一张整帧关键帧，最坏情况下几秒内自愈；相比之下"画面整体
+// 落后十几秒"是不可用的。
 //
 // Returns false only when the session is done (caller should stop relaying).
 func (s *deskSession) enqueueBrowser(out []byte) bool {
-	isVideo := len(out) > 0 && (out[0] == 'K' || out[0] == 'H')
-	if !isVideo {
+	if !deskIsVideoFrame(out) {
 		// Control frames block until delivered (or session ends).
 		select {
 		case s.toBrowser <- out:
@@ -669,6 +783,8 @@ func (s *deskSession) enqueueBrowser(out []byte) bool {
 			return false
 		}
 	}
+	// 先把积压的旧画面清到阈值以下，再放新的。
+	s.trimVideoBacklog(deskBrowserVideoBacklog)
 	select {
 	case s.toBrowser <- out:
 		return true
@@ -676,25 +792,48 @@ func (s *deskSession) enqueueBrowser(out []byte) bool {
 		return false
 	default:
 	}
-	// Queue full: make room by discarding at most one *stale video* frame.
+	// 还是满的（队列容量本来就小、或者全是控制帧）：再丢一帧最旧的画面腾位置。
+	// "最新的那一帧必须进得去"是这段的硬要求——丢新留旧等于让用户看着过期画面。
+	s.trimVideoBacklog(0)
 	select {
-	case old := <-s.toBrowser:
-		if len(old) > 0 && (old[0] == 'K' || old[0] == 'H') {
-			select {
-			case s.toBrowser <- out:
-			case <-s.done:
-				return false
-			default:
-			}
-		} else {
-			// Head was a control frame — put it back, drop the incoming video.
-			select {
-			case s.toBrowser <- old:
-			case <-s.done:
-				return false
-			}
-		}
+	case s.toBrowser <- out:
+		return true
+	case <-s.done:
+		return false
 	default:
+		return true // 实在放不下就丢这一帧，下一帧马上就来
 	}
-	return true
+}
+
+// trimVideoBacklog 把队列里的旧画面丢到只剩 keep 帧；途中捞出来的控制帧一个都不丢，
+// 原样按序放回队尾。keep=0 表示"至少丢一帧画面"。
+func (s *deskSession) trimVideoBacklog(keep int) {
+	var held [][]byte
+	dropped := 0
+drain:
+	for len(s.toBrowser) > keep {
+		select {
+		case old := <-s.toBrowser:
+			if deskIsVideoFrame(old) {
+				dropped++
+				if keep == 0 {
+					break drain // 只需要腾一格
+				}
+				continue
+			}
+			held = append(held, old)
+		default:
+			break drain // 消费者刚好把队列掏空了
+		}
+	}
+	for _, b := range held {
+		select {
+		case s.toBrowser <- b:
+		case <-s.done:
+			return
+		default:
+			return
+		}
+	}
+	_ = dropped
 }
