@@ -12,6 +12,18 @@ ARG BASE_REGISTRY=swr.cn-east-3.myhuaweicloud.com/sreyun/docker.io
 # Vitess sqlparser（SQL 工具）与安全修复需要 Go ≥1.26。
 # SWR 若无对应标签：docker build --build-arg BASE_REGISTRY=docker.io --build-arg GO_VERSION=1.26 ...
 ARG GO_VERSION=1.26
+ARG NODE_VERSION=22
+
+# ---- Frontend stage: Vue 控制台（/v2）----
+# 产物必须在 go build **之前**落到 cmd/server/web/v2，否则 go:embed 打进去的是空目录，
+# 镜像里就没有 /v2——这正是 v0.19.61 之后「前端门禁绿了、镜像里却没有新界面」的老问题。
+FROM --platform=$BUILDPLATFORM ${BASE_REGISTRY}/node:${NODE_VERSION}-alpine AS frontend
+WORKDIR /src/frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY frontend/ ./
+# vite 的 outDir 指向 ../cmd/server/web/v2，所以这一步写到 /src/cmd/server/web/v2。
+RUN NODE_OPTIONS=--max-old-space-size=2048 npm run build
 
 # ---- Build stage (always runs on the native BUILDPLATFORM) ----
 FROM --platform=$BUILDPLATFORM ${BASE_REGISTRY}/golang:${GO_VERSION}-alpine AS builder
@@ -26,6 +38,8 @@ COPY shared/ shared/
 COPY cmd/ cmd/
 # 将配置示例复制到 cmd/agent/ 以供 go:embed 内嵌（.gitignore 排除，构建时复制）
 COPY config.example.yaml cmd/agent/config_example.yaml
+# Vue 控制台产物（gitignore 掉的构建目录，必须在 go build 之前就位）
+COPY --from=frontend /src/cmd/server/web/v2/ cmd/server/web/v2/
 
 # Server + agent binaries for THIS image's target arch (native cross-compile).
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH GOFLAGS=-mod=vendor \

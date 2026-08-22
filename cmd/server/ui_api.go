@@ -10,10 +10,15 @@ import (
 )
 
 func (s *Server) handleHosts(w http.ResponseWriter, r *http.Request) {
-	hosts := s.filterHostsForUser(r, s.store.ListHosts())
-	if s.cfg.ensureHostFoldersMigrated(hosts) {
+	all := s.store.ListHosts()
+	// 迁移是**全局**动作：首次迁移那条分支会用传进去的列表整体重建 HostFolders 与
+	// HostFolderAssign。这里原来传的是按权限过滤后的列表——只要升级后第一个访问
+	// /api/v1/hosts 的人是受限用户（只授权了几台机器），其余所有主机的分类就会在这一次
+	// 请求里被丢掉。谁在看，不能决定别人的数据怎么迁。
+	if s.cfg.ensureHostFoldersMigrated(all) {
 		_ = s.cfg.save()
 	}
+	hosts := s.filterHostsForUser(r, all)
 	now := time.Now().Unix()
 	offline := int64(s.cfg.Thresholds().OfflineAfter.Seconds())
 	// staleAfter 是"数据滞后但主机尚未判离线"的阈值。它必须高于正常上报节奏（默认 30s），
@@ -176,7 +181,7 @@ func (s *Server) handleDeleteHost(w http.ResponseWriter, r *http.Request) {
 	label := s.hostLabelForID(id)
 	ok := s.store.DeleteHost(id)
 	lastHistoryFallbackReason.Delete(id) // 主机没了，它的降级留痕也该走
-	_ = s.cfg.SetCategory(id, "") // drop override + folder assign for the removed host
+	_ = s.cfg.forgetHost(id)             // 主机没了，配置里它的分类与分组归属一并删掉（不是标成"未分组"）
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "common.host_not_found")})
 		return
@@ -196,6 +201,8 @@ func (s *Server) handleAlerts(w http.ResponseWriter, r *http.Request) {
 	// SNMP 网络设备 + NetFlow 流量异常并入实时列表
 	alerts = append(alerts, EvaluateSNMP(s.snmp, s.cfg.Thresholds())...)
 	alerts = append(alerts, EvaluateNetFlow(s.nf, s.cfg.Thresholds())...)
+	// 列表与通知看到的是同一条信息：告警属于哪个分组。
+	alerts = s.cfg.decorateAlertGroups(alerts)
 	since := s.notifier.ActiveSince()
 	states := s.store.AlertStates()
 	for i := range alerts {
@@ -349,6 +356,9 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 		"version":          appVersion,
 		"terminal_enabled": s.cfg.TerminalEnabled(),
 		"desktop_enabled":  s.cfg.TerminalEnabled(),
+		// 这个二进制里到底有没有打进 Vue 控制台。经典版据此决定要不要显示「新版控制台」
+		// 入口——没构建前端时 /v2 是 404，给一个点了就 404 的菜单项比没有还糟。
+		"v2_console": v2ConsoleEmbedded(),
 	})
 }
 
