@@ -146,6 +146,9 @@ func (s *Server) handleHyperVEvents(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "host required"})
 		return
 	}
+	if !s.requireHostAccess(w, r, hostID) {
+		return
+	}
 	if s.pg == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"events": []any{}})
 		return

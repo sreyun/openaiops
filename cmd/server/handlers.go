@@ -513,6 +513,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/ai/mcp-clients/sync", s.handleSyncMCPClient)
 	mux.HandleFunc("POST /api/v1/ai/terminal-access", s.handleAITerminalAccess)
 	mux.HandleFunc("POST /api/v1/ai/chat", s.handleAIChat)
+	// docs/INSTALL_EN.md 的「app-aligned public endpoints」表里写的是 POST /api/v1/chat
+	// （注明"兼容旧的 /ai/chat"），但这条路由一直没注册——照文档接的客户端拿到的是 404。
+	// 两个路径指向同一个 handler，文档与实现就都成立了。
+	mux.HandleFunc("POST /api/v1/chat", s.handleAIChat)
 	mux.HandleFunc("POST /api/v1/ai/assist", s.handleAIAssist)                     // 全站「AI 辅助」按钮统一入口（任务化 SSE）
 	mux.HandleFunc("POST /api/v1/ai/assist/feedback", s.handleAIAssistFeedback)    // 采纳/评价 AI 辅助结果 → 学习闭环强化
 	mux.HandleFunc("POST /api/v1/ai/write-approval", s.handleIssueAIWriteApproval) // 写工具 per-action 审批令牌

@@ -105,6 +105,9 @@ func (s *Server) handleForwardGroupDelete(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "common.invalid_id")})
 		return
 	}
+	if !s.requireForwardGroupAccess(w, r, gid) {
+		return
+	}
 	deleted := 0
 	for _, id := range s.forward.groupRuleIDs(gid) {
 		if s.forward.removeRule(id) {
@@ -133,6 +136,9 @@ func (s *Server) handleForwardGroupToggle(w http.ResponseWriter, r *http.Request
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "common.invalid_json")})
+		return
+	}
+	if !s.requireForwardGroupAccess(w, r, gid) {
 		return
 	}
 	toggled := 0
@@ -165,6 +171,9 @@ func (s *Server) handleForwardGroupCopy(w http.ResponseWriter, r *http.Request) 
 	operator := s.clientIP(r)
 	if user.Username != "" {
 		operator = user.Username
+	}
+	if !s.requireForwardGroupAccess(w, r, gid) {
+		return
 	}
 	listenHost := s.cfg.ForwardListenAddr()
 	var created []forwardInfo
@@ -203,6 +212,10 @@ func (s *Server) handleForwardGroupEdit(w http.ResponseWriter, r *http.Request) 
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "common.invalid_json")})
+		return
+	}
+	// 组内每一条规则都得在授权范围内（改到新主机的授权在下面单独检查）。
+	if !s.requireForwardGroupAccess(w, r, gid) {
 		return
 	}
 	// 收集组内旧规则（目标端口 / 主机 / 协议），并求最小端口作为整段平移的基准。
@@ -400,6 +413,9 @@ func (s *Server) handleHTTPProxyDelete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "common.invalid_id")})
 		return
 	}
+	if !s.requireHTTPProxyAccess(w, r, id) {
+		return
+	}
 	if err := s.cfg.DeleteHTTPProxy(id); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -422,6 +438,9 @@ func (s *Server) handleForwardToggle(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "common.invalid_json")})
+		return
+	}
+	if _, ok := s.requireForwardRuleAccess(w, r, id); !ok {
 		return
 	}
 	rule, err := s.forward.toggleRule(id, req.Enabled)
@@ -490,9 +509,17 @@ func (s *Server) handleForwardEdit(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "forward.invalid_port")})
 		return
 	}
+	if _, ok := s.requireForwardRuleAccess(w, r, id); !ok {
+		return
+	}
 	// Lookup hostname when host_id is provided
 	var hostname string
 	if req.HostID != "" {
+		// 改到新主机同样要有新主机的授权，否则等于用一条自己有权的规则，
+		// 把隧道的另一端换成一台无权访问的机器。
+		if !s.requireHostAccess(w, r, req.HostID) {
+			return
+		}
 		hostname = s.hostLabelForID(req.HostID)
 	}
 	rule, err := s.forward.updateRule(id, req.HostID, hostname, req.TargetPort, req.LocalPort, req.RemoteTarget)
@@ -566,9 +593,8 @@ func (s *Server) handleForwardCopy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Look up the original rule to copy its parameters
-	orig := s.forward.getRule(id)
-	if orig == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "forward.rule_not_found")})
+	orig, ok := s.requireForwardRuleAccess(w, r, id)
+	if !ok {
 		return
 	}
 	user, _ := s.currentUser(r)
@@ -645,6 +671,9 @@ func (s *Server) handleHTTPProxyEdit(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.HostID == "" || req.TargetPort < 1 || req.TargetPort > 65535 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "forward.host_port_required")})
+		return
+	}
+	if !s.requireHTTPProxyAccess(w, r, id) || !s.requireHostAccess(w, r, req.HostID) {
 		return
 	}
 	// Lookup hostname

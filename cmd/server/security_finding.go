@@ -298,6 +298,11 @@ func (s *Server) handleUpdateSecurityFindingState(w http.ResponseWriter, r *http
 		writeSecErr(w, http.StatusServiceUnavailable, "finding store unavailable")
 		return
 	}
+	// 标记"已忽略/已修复"会改变这台主机的安全结论，属于写操作：
+	// 主机组授权受限的账号不能替范围外的主机下这个结论。
+	if strings.TrimSpace(req.HostID) != "" && !s.requireHostAccess(w, r, req.HostID) {
+		return
+	}
 	key := strings.TrimSpace(req.Key)
 	if key == "" {
 		switch strings.TrimSpace(req.Scope) {

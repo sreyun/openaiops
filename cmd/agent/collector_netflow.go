@@ -432,8 +432,11 @@ func (nr *netflowReceiver) decodeV9Data(templateID uint16, data []byte, sourceID
 	if !ok {
 		return // template not yet received
 	}
-	tmpl := val.(*v9Template)
-	if tmpl.recordLen == 0 {
+	// NetFlow 是无认证的 UDP 入口，这条解码路径全程跑在攻击者可构造的报文上。
+	// 目前 v9Templates 里只会存 *v9Template，断言不会失败；写成带 ok 的形式是为了
+	// 万一以后往这个 map 里塞了别的东西，代价是一条 return 而不是整个 agent 崩掉。
+	tmpl, ok := val.(*v9Template)
+	if !ok || tmpl == nil || tmpl.recordLen == 0 {
 		return
 	}
 

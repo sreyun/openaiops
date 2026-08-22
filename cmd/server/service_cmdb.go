@@ -223,7 +223,7 @@ func (s *Server) handleChangeImpact(w http.ResponseWriter, r *http.Request) {
 	}
 	var open []map[string]any
 	if s.incidents != nil {
-		for _, inc := range s.incidents.List() {
+		for _, inc := range s.filterIncidentsForUser(r, s.incidents.List()) {
 			if inc.Status == "resolved" {
 				continue
 			}

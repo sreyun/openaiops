@@ -116,9 +116,13 @@ func TestAgentUpdateEvidenceEndpoint(t *testing.T) {
 	putTestHost(srv, &Host{ID: "hw", Hostname: "server11", OS: "windows", Arch: "amd64", LastSeen: time.Now().Unix()})
 	putTestHost(srv, &Host{ID: "hl", Hostname: "debian", OS: "linux", Arch: "amd64", LastSeen: time.Now().Unix()})
 
+	// 这条接口挂在 /api/v1/agents/**（控制台侧，operator+），而且现在按主机授权校验，
+	// 所以直调 handler 时也得带上会话——否则量到的是 401，不是它自己的边界。
+	sess := srv.auth.issueSession("admin")
 	post := func(body string) *httptest.ResponseRecorder {
 		rr := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/update/evidence", strings.NewReader(body))
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: sess})
 		srv.handleAgentUpdateEvidence(rr, req)
 		return rr
 	}

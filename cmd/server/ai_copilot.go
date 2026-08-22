@@ -15,7 +15,9 @@ func (s *Server) handleAICopilotContext(w http.ResponseWriter, r *http.Request) 
 	duty, notable := s.buildDutyReportContext()
 
 	var open []map[string]any
-	for _, inc := range s.incidents.List() {
+	// 这段上下文会直接进 AI 对话：不过滤就等于把范围外主机的事件标题、主机名喂给
+	// 只该看到自己那几台机器的人。
+	for _, inc := range s.filterIncidentsForUser(r, s.incidents.List()) {
 		if inc.Status == "resolved" {
 			continue
 		}

@@ -424,6 +424,9 @@ func (s *Server) handleIncidentRelatedChanges(w http.ResponseWriter, r *http.Req
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "incident.not_found")})
 		return
 	}
+	if !s.requireIncidentAccess(w, r, inc.HostID) {
+		return
+	}
 	since := time.Now().Add(-14 * 24 * time.Hour).Unix()
 	writeJSON(w, http.StatusOK, s.changes.RelatedToHosts([]string{inc.HostID}, since))
 }

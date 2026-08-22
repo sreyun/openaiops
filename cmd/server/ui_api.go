@@ -415,6 +415,11 @@ func (s *Server) handleAlertClear(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "common.invalid_json")})
 		return
 	}
+	// 清除告警状态是写操作：主机组授权受限的账号不能清掉范围外主机的告警
+	// （告警列表本身已按 filterAlertsForUser 过滤，这里补上写入侧的同一条线）。
+	if req.HostID != "" && !s.requireHostAccess(w, r, req.HostID) {
+		return
+	}
 	key := req.HostID + "/" + req.Type + "/" + req.Scope
 	s.store.ClearAlertState(key)
 	label := s.hostLabelForID(req.HostID)

@@ -18,6 +18,9 @@ func (s *Server) handleIncidentCaseExport(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "incident.not_found")})
 		return
 	}
+	if !s.requireIncidentAccess(w, r, inc.HostID) {
+		return
+	}
 	out := map[string]any{
 		"incident":    inc,
 		"loop":        inc.Loop,

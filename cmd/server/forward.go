@@ -1051,9 +1051,8 @@ func (s *Server) handleForwardCreate(w http.ResponseWriter, r *http.Request) {
 // handleForwardDelete closes a forwarding rule and its listener.
 func (s *Server) handleForwardDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	rule := s.forward.getRule(id)
-	if rule == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "forward.rule_not_found")})
+	rule, ok := s.requireForwardRuleAccess(w, r, id)
+	if !ok {
 		return
 	}
 	operator, clientIP := s.actorIP(r)
@@ -1065,7 +1064,7 @@ func (s *Server) handleForwardDelete(w http.ResponseWriter, r *http.Request) {
 
 // handleForwardList returns all active forwarding rules.
 func (s *Server) handleForwardList(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.forward.listRules())
+	writeJSON(w, http.StatusOK, s.filterForwardRulesForUser(r, s.forward.listRules()))
 }
 
 // serveForwardListener accepts TCP connections for a rule and tunnels each
@@ -1095,6 +1094,11 @@ func (s *Server) serveForwardListener(rule *forwardRule) {
 }
 
 // handleForwardTCPConn relays one user TCP connection through the agent.
+// maxRewriteBytes 限制"为注入 <base> 而在内存里展开的 HTML"大小。上游响应本身有
+// 50MB 的硬上限，但 gzip 解压没有——一枚压缩比 1000:1 的 gzip 炸弹足以把服务端
+// 内存吃光。超过这个尺寸就放弃改写、原样转发。
+const maxRewriteBytes int64 = 8 << 20
+
 func (s *Server) handleForwardTCPConn(rule *forwardRule, conn net.Conn) {
 	defer conn.Close()
 	sess, err := s.forward.createSession(rule.id, rule.hostID, rule.hostname, rule.targetPort, "tcp", rule.operator)
@@ -1473,11 +1477,19 @@ readResponse:
 				decoded, canRewrite := body, enc == ""
 				if enc == "gzip" {
 					if gz, gerr := gzip.NewReader(bytes.NewReader(body)); gerr == nil {
-						if d, derr := io.ReadAll(gz); derr == nil {
+						// 解压必须封顶：上游那 50MB 的响应体如果是一枚 gzip 炸弹，
+						// 展开后可以是几十 GB，`io.ReadAll` 会直接把服务端内存吃光。
+						// 超过上限就不改写、按原样（仍是压缩态）转发——注 base 标签
+						// 是锦上添花，把面板打死不是。
+						d, derr := io.ReadAll(io.LimitReader(gz, maxRewriteBytes+1))
+						if derr == nil && int64(len(d)) <= maxRewriteBytes {
 							decoded, canRewrite = d, true // will re-serve uncompressed
 						}
 						gz.Close()
 					}
+				}
+				if int64(len(decoded)) > maxRewriteBytes {
+					canRewrite = false
 				}
 				if canRewrite {
 					decoded = injectBaseTag(decoded, "/proxy/"+hostID+"/"+strconv.Itoa(port)+"/")

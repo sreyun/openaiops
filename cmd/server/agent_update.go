@@ -920,6 +920,9 @@ func (s *Server) handleAgentUpdateEvidence(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "host not found"})
 		return
 	}
+	if !s.requireHostAccess(w, r, h.ID) {
+		return
+	}
 	if goos, _ := hostGOOSArch(h); goos != "windows" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": "升级助手取证目前只适用于 Windows 主机（Linux/macOS 的换版由 shell 脚本内联完成，结果直接回在任务消息里）",

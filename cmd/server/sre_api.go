@@ -497,7 +497,7 @@ func sreParseID(r *http.Request) (int64, bool) {
 // ----------------------------------------------------------------------------
 
 func (s *Server) handleListIncidents(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.incidents.List())
+	writeJSON(w, http.StatusOK, s.filterIncidentsForUser(r, s.incidents.List()))
 }
 
 func (s *Server) handleGetIncident(w http.ResponseWriter, r *http.Request) {
@@ -511,6 +511,9 @@ func (s *Server) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "incident.not_found")})
 		return
 	}
+	if !s.requireIncidentAccess(w, r, inc.HostID) {
+		return
+	}
 	writeJSON(w, http.StatusOK, inc)
 }
 
@@ -522,6 +525,11 @@ func (s *Server) handleCreateIncident(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Title == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "incident.title_required")})
+		return
+	}
+	// 建单时就把主机绑上了：不校验的话，被主机授权限制住的账号可以给范围外的机器
+	// 开一张单，再顺着这张单走 AI 诊断 / 闭环，把那台机器的数据读出来。
+	if in.HostID != "" && !s.requireHostAccess(w, r, in.HostID) {
 		return
 	}
 	hostname := ""
@@ -615,6 +623,9 @@ func (s *Server) handleEscalateIncident(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "incident.not_found")})
 		return
 	}
+	if !s.requireIncidentAccess(w, r, inc.HostID) {
+		return
+	}
 	prio := "p2"
 	if inc.Severity == "critical" {
 		prio = "p1"
@@ -658,6 +669,9 @@ func (s *Server) handleIncidentEmergencyChange(w http.ResponseWriter, r *http.Re
 	inc, found := s.incidents.Get(id)
 	if !found {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "incident.not_found")})
+		return
+	}
+	if !s.requireIncidentAccess(w, r, inc.HostID) {
 		return
 	}
 	var in struct {
@@ -706,6 +720,9 @@ func (s *Server) handleIncidentLinkTicket(w http.ResponseWriter, r *http.Request
 	inc, found := s.incidents.Get(id)
 	if !found {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "incident.not_found")})
+		return
+	}
+	if !s.requireIncidentAccess(w, r, inc.HostID) {
 		return
 	}
 	tk, found := s.tickets.Get(in.TicketID)
@@ -804,6 +821,9 @@ func (s *Server) handleProposeRemediation(w http.ResponseWriter, r *http.Request
 	inc, found := s.incidents.Get(id)
 	if !found {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "事件不存在"})
+		return
+	}
+	if !s.requireIncidentAccess(w, r, inc.HostID) {
 		return
 	}
 	if strings.TrimSpace(inc.HostID) == "" {
@@ -908,6 +928,10 @@ func (s *Server) handleTopologyRCA(w http.ResponseWriter, r *http.Request) {
 	}
 	if hostID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请提供 host_id 或 incident_id"})
+		return
+	}
+	// RCA 会顺着拓扑把这台主机与上下游的告警、指标翻一遍，是明确的主机数据读取。
+	if !s.requireHostAccess(w, r, hostID) {
 		return
 	}
 	days, _ := strconv.Atoi(r.URL.Query().Get("days"))
@@ -3007,6 +3031,9 @@ func (s *Server) handleDiagnoseChatIncident(w http.ResponseWriter, r *http.Reque
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "incident.not_found")})
 		return
 	}
+	if !s.requireIncidentAccess(w, r, inc.HostID) {
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, 32<<20)
 	var req struct {
 		Message string `json:"message"`
@@ -3541,11 +3568,32 @@ func (s *Server) handleSREOverview(w http.ResponseWriter, r *http.Request) {
 			breaching++
 		}
 	}
+	// 待审批的剧本执行与 SQL 变更单：这两类"卡在别人手上"的活儿此前不在任何汇总里，
+	// 只有点进自动化页 / SQL 工具页才看得见——审批放着不动没人会发现。导航角标要
+	// 报出来，就得先在这里数出来。
+	pendingPlaybooks := 0
+	if s.playbooks != nil {
+		for _, e := range s.playbooks.ExecutionHistory() {
+			if e.Status == "pending_approval" {
+				pendingPlaybooks++
+			}
+		}
+	}
+	pendingSQLChanges := 0
+	if s.sqlChanges != nil {
+		for _, cr := range s.sqlChanges.List(time.Now()) {
+			if cr.Status == "pending" {
+				pendingSQLChanges++
+			}
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]int{
 		"open_incidents":       s.incidents.OpenCount(),
 		"pending_remediations": s.remediation.PendingCount(),
 		"open_tickets":         s.tickets.OpenCount(),
 		"slo_breaching":        breaching,
+		"pending_playbooks":    pendingPlaybooks,
+		"pending_sql_changes":  pendingSQLChanges,
 	})
 }
 

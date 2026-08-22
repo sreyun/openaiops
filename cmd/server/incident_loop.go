@@ -70,6 +70,9 @@ func (s *Server) handleGetIncidentLoop(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "incident.not_found")})
 		return
 	}
+	if !s.requireIncidentAccess(w, r, inc.HostID) {
+		return
+	}
 	gate := latestDiagnosisGate(inc)
 	loop := ensureLoop(&inc)
 	if gate.HasDiagnosis && (loop.Stage == "idle" || loop.Stage == "") {
@@ -95,6 +98,9 @@ func (s *Server) handleIncidentLoopAction(w http.ResponseWriter, r *http.Request
 	inc, found := s.incidents.Get(id)
 	if !found {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "incident.not_found")})
+		return
+	}
+	if !s.requireIncidentAccess(w, r, inc.HostID) {
 		return
 	}
 	actor := s.actorName(r)

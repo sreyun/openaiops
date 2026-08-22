@@ -2386,6 +2386,9 @@ func (s *Server) handleAIDashboardFromIncident(w http.ResponseWriter, r *http.Re
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "事件不存在"})
 		return
 	}
+	if !s.requireIncidentAccess(w, r, inc.HostID) {
+		return
+	}
 	title, hostname, hostID, typ, sev := inc.Title, inc.Hostname, inc.HostID, inc.Type, inc.Severity
 	need := "为一个正在排障的运维事件生成【分析看板】，聚焦定位该事件根因所需的关键指标（黄金信号：饱和度/错误/延迟/流量，以及相关资源使用率）。"
 	seed := "事件标题：" + title + "\n严重级别：" + sev

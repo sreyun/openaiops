@@ -661,8 +661,17 @@ func feishuSSOProfile(cfg SSOProviderConfig, _ /* redirect */, code string) (sso
 
 func feishuAppAccessToken(appID, secret string) (string, error) {
 	body, _ := json.Marshal(map[string]string{"app_id": appID, "app_secret": secret})
-	resp, err := http.Post("https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal",
-		"application/json", strings.NewReader(string(body)))
+	req, err := http.NewRequest(http.MethodPost, "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal",
+		strings.NewReader(string(body)))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	// 这里原来是 http.Post，走的是 http.DefaultClient——**没有超时**。
+	// 登录回调恰好是最不能挂住的路径：飞书那端不回包，这条请求就一直占着一个
+	// 处理协程，同一时间的登录会跟着一起卡。与本文件其它出站调用取齐。
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}

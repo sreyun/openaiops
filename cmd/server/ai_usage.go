@@ -577,7 +577,9 @@ type termCommandRow struct {
 	Message   string `json:"message"`
 }
 
-func (p *pgStore) queryTerminalCommands(fromTs, toTs int64, host, actor, q string, limit, offset int) ([]termCommandRow, int) {
+// allowHosts 非空时把查询收窄到这些主机（主机名与主机 ID 都算），供主机组授权用户使用；
+// 为空表示不限制（管理员或未设主机授权的账号）。
+func (p *pgStore) queryTerminalCommands(fromTs, toTs int64, host, actor, q string, limit, offset int, allowHosts []string) ([]termCommandRow, int) {
 	if p == nil || p.db == nil {
 		return nil, 0
 	}
@@ -604,6 +606,15 @@ func (p *pgStore) queryTerminalCommands(fromTs, toTs int64, host, actor, q strin
 		where += ` AND data->>'message' ILIKE $` + strconv.Itoa(n)
 		args = append(args, "%"+q+"%")
 		n++
+	}
+	if len(allowHosts) > 0 {
+		ph := make([]string, 0, len(allowHosts))
+		for _, h := range allowHosts {
+			ph = append(ph, "$"+strconv.Itoa(n))
+			args = append(args, h)
+			n++
+		}
+		where += ` AND data->>'host' IN (` + strings.Join(ph, ",") + `)`
 	}
 	var total int
 	_ = p.db.QueryRow(`SELECT COUNT(*) FROM audit_log_p WHERE `+where, args...).Scan(&total)
@@ -641,10 +652,31 @@ func (s *Server) handleTerminalCommands(w http.ResponseWriter, r *http.Request) 
 	host := strings.TrimSpace(r.URL.Query().Get("host"))
 	actor := strings.TrimSpace(r.URL.Query().Get("actor"))
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	// 终端命令历史里有的是密码、密钥与业务数据。此前这个接口完全不看主机授权：
+	// 被主机组/标签限制住的账号只要传一个 host= 就能读到范围外机器上敲过的每一条命令，
+	// 不传 host 更是直接返回全部主机的。授权受限时按可见主机名单收窄查询。
+	u, _ := s.currentUser(r)
+	var allowHosts []string
+	if u.hostScopeRestricted() && roleRank(u.Role) < roleRank(RoleAdmin) {
+		// 审计行里的 host 存的是展示标签（hostDisplayLabel），不是裸主机名，
+		// 所以这里也按标签取，两边才对得上。
+		for _, h := range s.store.ListHosts() {
+			if h != nil && s.userCanAccessHost(u, h.ID) {
+				allowHosts = append(allowHosts, hostDisplayLabelFromHost(h))
+			}
+		}
+		if len(allowHosts) == 0 {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"from": fromTs, "to": toTs, "total": 0, "limit": limit, "offset": offset,
+				"items": []termCommandRow{}, "persisted": s.pg != nil,
+			})
+			return
+		}
+	}
 	var items []termCommandRow
 	var total int
 	if s.pg != nil {
-		items, total = s.pg.queryTerminalCommands(fromTs, toTs, host, actor, q, limit, offset)
+		items, total = s.pg.queryTerminalCommands(fromTs, toTs, host, actor, q, limit, offset, allowHosts)
 	}
 	if items == nil {
 		items = []termCommandRow{}
