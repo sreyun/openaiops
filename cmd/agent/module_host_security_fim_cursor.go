@@ -178,6 +178,34 @@ func fimRegionKnown(p string, prevDirs map[string]bool) bool {
 	return false
 }
 
+// fimResumeScope 记录本轮某个扫描根实际使用的续扫游标（开走时的 Next）。
+// 删除判定必须拿它把"字典序上还没重走的前缀"排除掉，见 fimRegionVisited。
+type fimResumeScope struct {
+	Root   string
+	Cursor string
+}
+
+// fimUnderRoot 判断路径是否落在该扫描根之下（含根自身）。
+func fimUnderRoot(p, root string) bool {
+	pk, rk := fimMatchKey(p), fimMatchKey(root)
+	if pk == rk {
+		return true
+	}
+	if rk == "/" {
+		return strings.HasPrefix(pk, "/")
+	}
+	return strings.HasPrefix(pk, rk+"/")
+}
+
+// fimBeforeResume 判断 p 是否仍处在该根续扫游标之前——本轮被 fimSubtreeBefore /
+// fimPathBefore 跳过、根本没重新枚举的那一段。
+func fimBeforeResume(p, root, cursor string) bool {
+	if cursor == "" || !fimUnderRoot(p, root) {
+		return false
+	}
+	return fimMatchKey(p) < fimMatchKey(cursor)
+}
+
 // fimRegionVisited 回答"这一条基线记录所在的位置，本轮真的走到了吗"。
 //
 // 删除判定必须以此为前提。直接看"父目录在不在 visitedDirs"是不够的：目录被整个删掉时，
@@ -187,7 +215,18 @@ func fimRegionKnown(p string, prevDirs map[string]bool) bool {
 // blocked 是本轮读不进去的目录（权限不足等）：它们下面的东西"看不见"，不是"没了"，
 // 沿途撞上就停。被截断的停点祖先同样不在 visited 里（调用方在扫描收尾时剔除），
 // 所以"还没轮到扫"的区域不会被误判成删除。
-func fimRegionVisited(p string, visited, blocked map[string]bool) bool {
+//
+// resumes 更关键：续扫时 WalkDir 仍会把游标的祖先目录标成 visited（否则进不去
+// 游标所在的那棵子树），但游标之前的兄弟子树是整棵 SkipDir 掉的，里面的基线条目
+// 不在 cur 里。若只看 visited，那一整段前缀会被当成"已枚举却不见了"——误报删除，
+// 并从基线里抹掉；下一轮再走到时又会当成新增，安全基线在续扫循环里被反复摧毁。
+// 字典序上仍排在本轮游标之前的路径，一律视为"本轮没走到"。
+func fimRegionVisited(p string, visited, blocked map[string]bool, resumes []fimResumeScope) bool {
+	for _, s := range resumes {
+		if fimBeforeResume(p, s.Root, s.Cursor) {
+			return false
+		}
+	}
 	for d := fimParentDir(p); d != ""; d = fimParentDir(d) {
 		k := fimMatchKey(d)
 		if blocked[k] {
