@@ -528,3 +528,68 @@ func TestFimVolumeQuotaRespectsSmallLimit(t *testing.T) {
 		t.Fatalf("应当因为上限被截断：%+v", stats)
 	}
 }
+
+func TestFimBeforeResumeSkipsOnlyPrefix(t *testing.T) {
+	root := "/data"
+	cursor := "/data/b_dir/c.txt"
+	if !fimBeforeResume("/data/a_dir/a.txt", root, cursor) {
+		t.Error("游标之前的路径应当视为未重走")
+	}
+	if !fimBeforeResume("/data/b_dir/a.txt", root, cursor) {
+		t.Error("同一目录里排在游标前的文件也应当视为未重走")
+	}
+	if fimBeforeResume("/data/b_dir/c.txt", root, cursor) {
+		t.Error("游标自身本轮会处理，不能算未重走")
+	}
+	if fimBeforeResume("/data/c_dir/a.txt", root, cursor) {
+		t.Error("游标之后的路径本轮会走到")
+	}
+	if fimBeforeResume("/other/a.txt", root, cursor) {
+		t.Error("别的扫描根不受此游标影响")
+	}
+	if fimBeforeResume("/data/a_dir/a.txt", root, "") {
+		t.Error("没有游标时不该跳过")
+	}
+}
+
+// Resume skips earlier subtrees but still marks ancestors visited — those skipped
+// entries must NOT be treated as deletes / wiped from the baseline.
+func TestCollectFIMResumeMustNotDropEarlierBaseline(t *testing.T) {
+	root := t.TempDir()
+	for _, d := range []string{"a_dir", "b_dir", "c_dir"} {
+		for i := 0; i < 4; i++ {
+			writeFile(t, filepath.Join(root, d, string(rune('a'+i))+".txt"), "x\n")
+		}
+	}
+	opts := fimTestOpts(t, root)
+
+	// Full baseline first so earlier paths are known.
+	collectFIMChanges(opts)
+
+	opts.MaxFiles = 5
+	_, st := collectFIMChanges(opts)
+	if !st.LimitHit || st.ResumeFrom == "" {
+		t.Fatalf("expected truncation with resume cursor, got %+v", st)
+	}
+
+	for i := 0; i < 20; i++ {
+		changes, st2 := collectFIMChanges(opts)
+		for _, c := range changes {
+			if c.Change == "removed" && strings.Contains(c.Path, "a_dir") {
+				t.Fatalf("resume finish falsely removed pre-cursor path: %+v (stats=%+v)", c, st2)
+			}
+		}
+		base, ok := fimLoadBaseline(fimBaselinePath())
+		if !ok {
+			t.Fatal("baseline missing")
+		}
+		want := fimNormPath(filepath.Join(root, "a_dir", "a.txt"))
+		if _, ok := base[want]; !ok {
+			t.Fatalf("resume wiped earlier baseline entry %s (resume=%q); changes=%+v", want, st2.ResumeFrom, changes)
+		}
+		if st2.ResumeFrom == "" {
+			return
+		}
+	}
+	t.Fatal("never finished a full root cycle")
+}

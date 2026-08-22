@@ -629,6 +629,7 @@ type fimWalkOutcome struct {
 	visitedDirs map[string]bool
 	blockedDirs map[string]bool
 	cursors     map[string]fimRootState
+	resumes     []fimResumeScope
 	roots       []string
 	stopAt      string
 	files       int
@@ -659,6 +660,10 @@ func fimWalkVolume(group []string, opts fimOptions, excl *fimExcluder, patterns 
 		rootKey := fimMatchKey(norm)
 		out.roots = append(out.roots, norm)
 		resume := prevCursors[rootKey].Next
+		// 开走时的游标：删除判定要用它排除本轮 SkipDir 掉的前缀（见 fimRegionVisited）。
+		if resume != "" {
+			out.resumes = append(out.resumes, fimResumeScope{Root: norm, Cursor: resume})
+		}
 		rootDone := true
 		_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 			np := fimNormPath(p)
@@ -825,6 +830,7 @@ func collectFIMChanges(opts fimOptions) ([]hostSecFileChange, hostSecFIMStats) {
 	cur := make(map[string]fimEntry, len(prev)+1024)
 	visitedDirs := make(map[string]bool, 1024)
 	blockedDirs := make(map[string]bool, 8)
+	var resumes []fimResumeScope
 	var stopPoints []string
 	for _, o := range outcomes {
 		for p, e := range o.cur {
@@ -836,6 +842,7 @@ func collectFIMChanges(opts fimOptions) ([]hostSecFileChange, hostSecFIMStats) {
 		for d := range o.blockedDirs {
 			blockedDirs[d] = true
 		}
+		resumes = append(resumes, o.resumes...)
 		for k, v := range o.cursors {
 			state.Roots[k] = v
 		}
@@ -868,7 +875,7 @@ func collectFIMChanges(opts fimOptions) ([]hostSecFileChange, hostSecFIMStats) {
 	}
 	prevDirs := fimKnownDirs(prev)
 	stats.KnownDirs = len(prevDirs)
-	changes := fimDiffBaseline(prev, cur, visitedDirs, blockedDirs, prevDirs, patterns, opts.ContentDiff, maxChanges, &stats)
+	changes := fimDiffBaseline(prev, cur, visitedDirs, blockedDirs, prevDirs, resumes, patterns, opts.ContentDiff, maxChanges, &stats)
 	stats.DurationMS = time.Since(start).Milliseconds()
 
 	// 没走到的区域必须保留上一份基线的记忆，否则下一轮会把它们全报成删除。
@@ -885,7 +892,7 @@ func collectFIMChanges(opts fimOptions) ([]hostSecFileChange, hostSecFIMStats) {
 		if _, ok := cur[p]; ok {
 			continue
 		}
-		if fimRegionVisited(p, visitedDirs, blockedDirs) {
+		if fimRegionVisited(p, visitedDirs, blockedDirs, resumes) {
 			delete(merged, p)
 		}
 	}
@@ -929,9 +936,10 @@ func fimSubtreeBefore(dir, cursor string) bool {
 // 两条判定都以"覆盖面"为前提，这正是增量扫描下唯一诚实的做法：
 //   - **新增**只在"以前完整枚举过的目录"里成立（fimRegionKnown）。第一次走到某片区域时，
 //     那里的每个条目对基线来说都是"没见过"，但它们不是新增，只是我们以前没走到。
-//   - **删除**只在"本轮完整枚举过的目录"里成立（visitedDirs）。没走到的地方看不见文件，
+//   - **删除**只在"本轮完整枚举过的目录"里成立（visitedDirs），且不能落在续扫游标之前
+//     的跳过前缀里（resumes，见 fimRegionVisited）。没走到的地方看不见文件，
 //     那不等于文件没了——早先那版一截断就整轮不报删除，代价是大机器上删除永远看不见。
-func fimDiffBaseline(prev, cur map[string]fimEntry, visitedDirs, blockedDirs, prevDirs map[string]bool, patterns []string, contentDiff bool, maxChanges int, stats *hostSecFIMStats) []hostSecFileChange {
+func fimDiffBaseline(prev, cur map[string]fimEntry, visitedDirs, blockedDirs, prevDirs map[string]bool, resumes []fimResumeScope, patterns []string, contentDiff bool, maxChanges int, stats *hostSecFIMStats) []hostSecFileChange {
 	var changes []hostSecFileChange
 	for p, c := range cur {
 		o, ok := prev[p]
@@ -963,7 +971,7 @@ func fimDiffBaseline(prev, cur map[string]fimEntry, visitedDirs, blockedDirs, pr
 		if _, ok := cur[p]; ok {
 			continue
 		}
-		if !fimRegionVisited(p, visitedDirs, blockedDirs) {
+		if !fimRegionVisited(p, visitedDirs, blockedDirs, resumes) {
 			continue // 本轮没走到它所在的位置，无从判断它是不是被删了
 		}
 		stats.Removed++
