@@ -63,11 +63,6 @@ func isPublicPath(r *http.Request) bool {
 	if strings.HasPrefix(p, "/js/") || strings.HasPrefix(p, "/css/") {
 		return true
 	}
-	// Vue 控制台的外壳与哈希资源同理：登录页本身就在这个 SPA 里，拿不到外壳就没法登录。
-	// 放行的只是静态产物（不含任何数据），/api/v1 依旧全程需要会话。
-	if p == "/v2" || strings.HasPrefix(p, "/v2/") {
-		return true
-	}
 	// Agent-facing terminal reverse channels are token-gated, not session-gated.
 	if strings.HasPrefix(p, "/api/v1/agent/terminal/") {
 		return true
@@ -148,11 +143,7 @@ func (s *Server) routeAllowed(r *http.Request, role string) bool {
 		return rank >= roleRank(RoleAdmin)
 	}
 	// Content audit / AI tool audit / audit export: high-sensitivity security data.
-	// 链校验（verify-chain）也归到这里：它是 GET，但会把两张审计全表各扫几遍，
-	// 落进下面"读接口 viewer+"的兜底等于把一条重查询开放给只读账号连点。
-	// 代价与限流细节见 audit_chain.go 里 verifyAuditChainShared 的注释。
-	if strings.HasPrefix(p, "/api/v1/content-audit") || p == "/api/v1/ai/tool-audit" ||
-		p == "/api/v1/audit/verify-chain" {
+	if strings.HasPrefix(p, "/api/v1/content-audit") || p == "/api/v1/ai/tool-audit" {
 		return rank >= roleRank(RoleOperator)
 	}
 	// Host / Web security scan: operator+; nuclei path & allow_private config → admin.
@@ -202,14 +193,8 @@ func (s *Server) routeAllowed(r *http.Request, role string) bool {
 		if r.Method == http.MethodGet {
 			return rank >= roleRank(RoleViewer)
 		}
-		// 批量导出是**数据出境**：一次几十万行与"页面上翻 200 行"不是一回事，
-		// 单独拔高到 operator+，并在历史里留痕（recordSQLHistory 的 export 动作）。
-		if strings.HasSuffix(p, "/query/export") {
-			return rank >= roleRank(RoleOperator)
-		}
 		if p == "/api/v1/sql/beautify" || p == "/api/v1/sql/audit" || p == "/api/v1/sql/optimize" ||
-			p == "/api/v1/sql/analyze" || strings.HasSuffix(p, "/explain") ||
-			strings.HasSuffix(p, "/query") || strings.HasSuffix(p, "/query/stream") {
+			p == "/api/v1/sql/analyze" || strings.HasSuffix(p, "/explain") || strings.HasSuffix(p, "/query") {
 			return rank >= roleRank(RoleViewer)
 		}
 		if strings.HasSuffix(p, "/exec-ddl") {
@@ -371,15 +356,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		SMSCode   string `json:"sms_code"`   // OTP for login_type=sms
 	}
 	ip := s.clientIP(r)
-	s.warnUntrustedProxyOnce(r)
 	if !s.auth.loginAllowed(ip) {
-		// 反代没被信任时，这个 IP 是全公司共用的 127.0.0.1 —— 被挡住的人多半不是
-		// 输错密码的那个。不把这条线索说出来，运维只会以为"是我自己密码错太多次"。
-		msg := Tr(r, "auth.too_many_attempts")
-		if s.untrustedProxyDetected(r) {
-			msg += " " + Tr(r, "auth.too_many_attempts_proxy")
-		}
-		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": msg})
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": Tr(r, "auth.too_many_attempts")})
 		return
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

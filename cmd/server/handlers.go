@@ -235,7 +235,6 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/hosts/{id}/history", s.handleHostHistory)
 	mux.HandleFunc("POST /api/v1/hosts/{id}/category", s.handleSetCategory)
 	mux.HandleFunc("POST /api/v1/hosts/{id}/folder", s.handleSetHostFolder)
-	mux.HandleFunc("POST /api/v1/hosts/folder/batch", s.handleSetHostFolderBatch)
 	mux.HandleFunc("POST /api/v1/hosts/{id}/desktop", s.handleOpenDesktop)
 	mux.HandleFunc("GET /api/v1/hosts/{id}/desktop/ws", s.handleDesktopWS)
 	mux.HandleFunc("GET /api/v1/agent/desktop/wait", s.handleAgentDeskWait)
@@ -243,8 +242,6 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/agent/desktop/tx", s.handleAgentDeskTx)
 	mux.HandleFunc("GET /api/v1/desktop/sessions", s.handleListDesktopSessions)
 	mux.HandleFunc("GET /api/v1/desktop/sessions/{id}/replay", s.handleDesktopReplay)
-	mux.HandleFunc("GET /api/v1/resource-notes", s.handleGetResourceNotes)
-	mux.HandleFunc("PUT /api/v1/resource-notes/{key}", s.handlePutResourceNote)
 	mux.HandleFunc("GET /api/v1/host-folders", s.handleGetHostFolders)
 	mux.HandleFunc("PUT /api/v1/host-folders", s.handlePutHostFolders)
 	mux.HandleFunc("POST /api/v1/host-folders", s.handlePostHostFolder)
@@ -513,10 +510,6 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/ai/mcp-clients/sync", s.handleSyncMCPClient)
 	mux.HandleFunc("POST /api/v1/ai/terminal-access", s.handleAITerminalAccess)
 	mux.HandleFunc("POST /api/v1/ai/chat", s.handleAIChat)
-	// docs/INSTALL_EN.md 的「app-aligned public endpoints」表里写的是 POST /api/v1/chat
-	// （注明"兼容旧的 /ai/chat"），但这条路由一直没注册——照文档接的客户端拿到的是 404。
-	// 两个路径指向同一个 handler，文档与实现就都成立了。
-	mux.HandleFunc("POST /api/v1/chat", s.handleAIChat)
 	mux.HandleFunc("POST /api/v1/ai/assist", s.handleAIAssist)                     // 全站「AI 辅助」按钮统一入口（任务化 SSE）
 	mux.HandleFunc("POST /api/v1/ai/assist/feedback", s.handleAIAssistFeedback)    // 采纳/评价 AI 辅助结果 → 学习闭环强化
 	mux.HandleFunc("POST /api/v1/ai/write-approval", s.handleIssueAIWriteApproval) // 写工具 per-action 审批令牌
@@ -675,9 +668,6 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/sql/connections/{id}/test", s.handleTestMySQLConnection)
 	mux.HandleFunc("POST /api/v1/sql/connections/{id}/explain", s.handleMySQLExplain)
 	mux.HandleFunc("POST /api/v1/sql/connections/{id}/query", s.handleSQLWorkbenchQuery)
-	// 流式查询与 CSV 导出：边读边发、随时可停（见 sql_query_stream.go）。
-	mux.HandleFunc("POST /api/v1/sql/connections/{id}/query/stream", s.handleSQLQueryStream)
-	mux.HandleFunc("POST /api/v1/sql/connections/{id}/query/export", s.handleSQLQueryExport)
 	mux.HandleFunc("POST /api/v1/sql/connections/{id}/exec-ddl", s.handleMySQLExecDDL)
 	mux.HandleFunc("GET /api/v1/sql/connections/{id}/schema", s.handleMySQLSchema)
 	mux.HandleFunc("GET /api/v1/sql/connections/{id}/schema/health", s.handleMySQLSchemaHealth)
@@ -802,80 +792,6 @@ func (s *Server) Routes() http.Handler {
 	})
 	// P3-1: WebSocket push endpoint for real-time updates
 	mux.HandleFunc("GET /ws/push", s.handlePushWS)
-	// 未注册的 /api/ 路径一律 404 JSON —— 必须排在 "GET /" 之前理解其存在意义：
-	//
-	// `GET /` 是**根子树模式**，在 Go 的 ServeMux 里匹配任意路径。没有这条兜底时，
-	// 一个 POST 到不存在的接口会被判成"路径匹配（GET /）、方法不符"，回 **405**。
-	// 于是"这台面板的版本里没有这个接口"在用户眼里成了一句莫名其妙的
-	// "HTTP 405 Method Not Allowed"——方向完全指错。
-	//
-	// 老部署升级上来最容易撞：compose 里 image 还是本地缓存的旧 latest，或 .env 钉了
-	// 旧 AIOPS_IMAGE_TAG，前端已经有了新按钮、后端还是旧二进制。真实反馈就是这么来的
-	// （批量变更分组 → "修改失败 HTTP 405"）。
-	//
-	// `/api/` 比 `/` 更具体，所以每一条真实注册的 API 路由仍然优先命中；只有确实不存在的
-	// 才落到这里，而且**对所有方法**都回同一个 404，不再有假 405。
-	// 逐个方法注册而不是一条 `/api/`：后者是"任意方法 + 较具体路径"，与 `GET /` 的
-	// "单一方法 + 最泛路径"互不包含，Go 的 ServeMux 会判定冲突并在注册期 panic。
-	// 按方法展开之后，`GET /api/` 严格比 `GET /` 更具体（后者让位），其余方法则与
-	// `GET /` 根本不重叠。HEAD 不注册——Go 的 GET 模式本身就吃 HEAD，再注册会冲突。
-	apiMethods := []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions}
-	// 兜底自己也要分清两件事，否则会把"方法用错了"也说成"接口不存在"：
-	// 拿同一条路径换个方法再问一次 mux，命中的模式不是本兜底，就说明这条路径**确实有**
-	// 路由，只是方法不对 —— 那才是真正该回 405 的情形，并且要在 Allow 里告诉对方哪些方法可用。
-	otherMethods := func(r *http.Request) []string {
-		var out []string
-		for _, m := range apiMethods {
-			if m == r.Method {
-				continue
-			}
-			probe := r.Clone(r.Context())
-			probe.Method = m
-			// 命中的若是兜底本身（"<方法> /api/"）或根子树（"<方法> /"），都不算"这条路径
-			// 支持该方法"——根子树匹配任意路径，认它就会得出"这个接口支持 GET"的假结论。
-			if _, pattern := mux.Handler(probe); pattern != "" &&
-				!strings.HasSuffix(pattern, " /api/") && !strings.HasSuffix(pattern, " /") {
-				out = append(out, m)
-			}
-		}
-		return out
-	}
-	apiNotFound := func(w http.ResponseWriter, r *http.Request) {
-		if allow := otherMethods(r); len(allow) > 0 {
-			list := strings.Join(allow, ", ")
-			w.Header().Set("Allow", list)
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{
-				"error": Tr(r, "common.api_method_not_allowed", r.Method, r.URL.Path, list),
-			})
-			return
-		}
-		// 把**正在跑的版本号**一起说出来：用户拿它和页面/镜像 tag 一比就知道是不是没换成，
-		// 否则"升级面板后重试"听着像客套话，没人知道该去核对什么。
-		//
-		// 用的是新增的 _versioned 键，而不是给原键加一个占位符：语言包与 handlers.go
-		// 不一定同步（开源镜像仓那份 handlers.go 就是分叉维护的），改原键的参数个数会让
-		// 不同步的一侧渲染出 %!s(MISSING)。新增键的话，两边各自都是自洽的。
-		writeJSON(w, http.StatusNotFound, map[string]string{
-			"error": Tr(r, "common.api_not_found_versioned", r.Method, r.URL.Path, appVersion),
-		})
-	}
-	for _, m := range apiMethods {
-		mux.HandleFunc(m+" /api/", apiNotFound)
-	}
-	// 同一件事还要在**根**上再兜一层，否则上面那层只挡得住 /api/ 开头的路径。
-	//
-	// `GET /` 是根子树模式，匹配任意路径。一个 POST 到任何未注册路径，Go 会判成
-	// "路径匹配（GET /）、方法不符"，回一个**纯文本 405 Method Not Allowed**——
-	// 没有 JSON、没有原因、没有下一步，正是最误导人的那种回答：用户以为是"方法用错了"，
-	// 实际是"这台面板的二进制里根本没有这个接口"。
-	//
-	// 真实场景就是新旧不匹配：Service Worker 缓存了新版页面、容器里还是旧二进制
-	// （compose 没真的换镜像、或 .env 钉了旧 tag），新页面调新接口 → 纯文本 405。
-	// 已注册的非 /api 写接口（POST/PUT/PATCH/DELETE /proxy/{hostID}/{port}/{path...}）
-	// 是更具体的模式，照常优先命中，这里只接住真正没人认领的那些。
-	for _, m := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
-		mux.HandleFunc(m+" /", apiNotFound)
-	}
 	mux.HandleFunc("GET /", s.handleDashboard)
 	// static assets served from the embedded web/ dir
 	if sub, err := fs.Sub(webFS, "web"); err == nil {
@@ -919,30 +835,13 @@ func (s *Server) Routes() http.Handler {
 		// 注意：不能 StripPrefix——文件在 web/js、web/css 子目录下，需保留前缀映射到子目录。
 		mux.Handle("GET /css/", fsrv)
 		mux.Handle("GET /js/", fsrv)
-		// Vue 控制台（/v2）与经典版并行：默认界面仍是 `/` 的经典版，/v2 是可选的新版入口。
-		//
-		// 产物由 `npm run build` 直接写进 web/v2（见 frontend/vite.config.ts 的 outDir），
-		// 所以只有构建过前端的二进制才带 /v2——没构建时这里根本不注册路由，请求落到
-		// 下面的通配处理返回 404，而不是给一个 200 的空壳让人以为界面坏了。
-		//
-		// 缓存：入口 index.html 每次都回源（换版立即生效），带哈希的 assets 永久不可变。
-		if _, err := webFS.ReadFile("web/v2/index.html"); err == nil {
-			if v2sub, subErr := fs.Sub(webFS, "web/v2"); subErr == nil {
-				v2srv := http.StripPrefix("/v2/", http.FileServer(http.FS(v2sub)))
-				mux.HandleFunc("GET /v2", func(w http.ResponseWriter, r *http.Request) {
-					w.Header().Set("Cache-Control", "no-cache")
-					http.Redirect(w, r, "/v2/", http.StatusTemporaryRedirect)
-				})
-				mux.Handle("GET /v2/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if strings.HasPrefix(r.URL.Path, "/v2/assets/") {
-						w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-					} else {
-						w.Header().Set("Cache-Control", "no-cache")
-					}
-					v2srv.ServeHTTP(w, r)
-				}))
-			}
-		}
+		// Former Vue SPA paths stay closed (404) — classic UI only.
+		mux.HandleFunc("GET /v2/", func(w http.ResponseWriter, r *http.Request) {
+			http.NotFound(w, r)
+		})
+		mux.HandleFunc("GET /v2", func(w http.ResponseWriter, r *http.Request) {
+			http.NotFound(w, r)
+		})
 		mux.Handle("GET /manifest.json", fsrv)
 		mux.Handle("GET /icon.svg", fsrv)
 		// Service Worker: needs Service-Worker-Allowed header for root scope control
@@ -955,23 +854,8 @@ func (s *Server) Routes() http.Handler {
 				http.Error(w, "not found", 404)
 				return
 			}
-			w.Write(stampServiceWorker(data))
+			w.Write(data)
 		})
-		// /v2/sw.js 同样要盖版本戳。它本可以走上面的 /v2/ 文件服务，但那样字节永不变化，
-		// 浏览器就永远不认为 SW 有新版本——SW 自身的逻辑升不了级，历次发版的哈希 chunk
-		// 也永远不会被回收。更具体的路由优先于 "GET /v2/" 前缀路由。
-		if _, err := webFS.ReadFile("web/v2/sw.js"); err == nil {
-			mux.HandleFunc("GET /v2/sw.js", func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
-				w.Header().Set("Cache-Control", "no-cache")
-				data, err := webFS.ReadFile("web/v2/sw.js")
-				if err != nil {
-					http.Error(w, "not found", 404)
-					return
-				}
-				w.Write(stampServiceWorker(data))
-			})
-		}
 	}
 	// Windows Agent 升级助手正文。注册在 distDir 判断之外：它是服务端生成的，
 	// 不读磁盘，且它正是「Agent 侧助手坏掉时的唯一逃生口」——没有 dist 目录的
