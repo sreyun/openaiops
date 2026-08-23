@@ -134,3 +134,21 @@ func TestSafeGoIsolatesPanic(t *testing.T) {
 	}
 	// 走到这里就说明进程没被带走。
 }
+
+// safeDo 给长期循环的单次迭代用：panic 只丢掉这一次，后续迭代还要跑。
+// 这是 startMemoryWorkers 不能整段包进 safeGo 的原因——整段被吞掉后队列就没人读了。
+func TestSafeDoContinuesAfterPanic(t *testing.T) {
+	var ran []int
+	for i := 0; i < 3; i++ {
+		i := i
+		safeDo("test-iter", func() {
+			ran = append(ran, i)
+			if i == 1 {
+				panic("boom")
+			}
+		})
+	}
+	if len(ran) != 3 {
+		t.Fatalf("safeDo must continue after panic, ran=%v", ran)
+	}
+}

@@ -464,15 +464,19 @@ func (s *Server) triggerPlaybookOnHost(pb Playbook, host *Host, operator string,
 	s.persistPlaybookExecution(exec.ID)
 	// 剧本执行会调到模块、远程 exec、AI 判定等一大片代码；裸 goroutine 里的 panic
 	// 会**把整个服务端带走**。safeGo 把它隔离成一条错误日志 + 平台自身故障记录。
+	// onDone 必须用 defer：panic 被隔离后仍要回调，否则 remediation 等调用方会永远等不到结果。
 	safeGo("playbook-exec", func() {
+		defer func() {
+			ok := false
+			if e, found := s.playbooks.GetExecution(exec.ID); found {
+				ok = e.Status == "completed"
+			}
+			if onDone != nil {
+				onDone(ok)
+			}
+		}()
+		defer s.finishPlaybookAfterPanic(exec.ID)
 		s.runPlaybookExecution(pb, exec, hosts)
-		ok := false
-		if e, found := s.playbooks.GetExecution(exec.ID); found {
-			ok = e.Status == "completed"
-		}
-		if onDone != nil {
-			onDone(ok)
-		}
 	})
 	return exec.ID
 }
@@ -3642,13 +3646,16 @@ func (s *Server) startMemoryWorkers() {
 	const workerCount = 3
 	for i := 0; i < workerCount; i++ {
 		s.memoryWg.Add(1)
-		// 记忆写入 worker：一次 panic 不能既杀进程、又让整条队列永远没人消费。
-		safeGo("ai-memory-worker", func() {
+		// 记忆写入是**常驻消费者**，不能整段包进 safeGo：panic 被吞掉后 goroutine
+		// 直接退出，剩下的 worker 也会被同类坏数据一个个打死，队列满了 rememberAI
+		// 就静默丢记忆（default 分支）。隔离必须落在单次 processMemoryJob 上。
+		go func() {
 			defer s.memoryWg.Done()
 			for job := range s.memoryCh {
-				s.processMemoryJob(job)
+				job := job
+				safeDo("ai-memory-worker", func() { s.processMemoryJob(job) })
 			}
-		})
+		}()
 	}
 }
 

@@ -79,6 +79,9 @@ func runSupervised(name string, fn func()) (returnedNormally bool) {
 
 // safeGo runs a one-shot background task whose panic must not take the process
 // with it. 用于「每个事件一个 goroutine」这类路径：单次失败只丢这一次。
+//
+// 不要用 safeGo 包住「长期 for-range 消费队列」的整段循环：panic 被吞掉后
+// goroutine 直接退出，队列就再也没人读了（见 safeDo / startMemoryWorkers）。
 func safeGo(name string, fn func()) {
 	go func() {
 		defer func() {
@@ -91,4 +94,18 @@ func safeGo(name string, fn func()) {
 		}()
 		fn()
 	}()
+}
+
+// safeDo runs fn and isolates a panic to this call. 给长期循环里的「单次迭代」用：
+// 坏数据导致的 panic 只丢掉这一次，循环本身继续转。
+func safeDo(name string, fn func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			stack := string(debug.Stack())
+			slog.Error("后台迭代 panic（已隔离，循环继续）",
+				"task", name, "panic", r, "stack", stack)
+			reportPanic(name, "task_panic", r, stack)
+		}
+	}()
+	fn()
 }

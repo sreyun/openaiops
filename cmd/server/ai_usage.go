@@ -577,8 +577,8 @@ type termCommandRow struct {
 	Message   string `json:"message"`
 }
 
-// allowHosts 非空时把查询收窄到这些主机（主机名与主机 ID 都算），供主机组授权用户使用；
-// 为空表示不限制（管理员或未设主机授权的账号）。
+// allowHosts 非空时把查询收窄到这些主机展示标签（及 "label · …" 容器会话派生标签），
+// 供主机组授权用户使用；为空表示不限制（管理员或未设主机授权的账号）。
 func (p *pgStore) queryTerminalCommands(fromTs, toTs int64, host, actor, q string, limit, offset int, allowHosts []string) ([]termCommandRow, int) {
 	if p == nil || p.db == nil {
 		return nil, 0
@@ -608,13 +608,24 @@ func (p *pgStore) queryTerminalCommands(fromTs, toTs int64, host, actor, q strin
 		n++
 	}
 	if len(allowHosts) > 0 {
-		ph := make([]string, 0, len(allowHosts))
+		// 主机终端审计存 hostDisplayLabel；容器终端存 "label · 容器名"（见 serveTerminalWS）。
+		// 只做精确 IN 会把容器会话整段漏掉，授权用户看到空白历史。
+		parts := make([]string, 0, len(allowHosts)*2)
 		for _, h := range allowHosts {
-			ph = append(ph, "$"+strconv.Itoa(n))
+			h = strings.TrimSpace(h)
+			if h == "" {
+				continue
+			}
+			parts = append(parts, `data->>'host' = $`+strconv.Itoa(n))
 			args = append(args, h)
 			n++
+			parts = append(parts, `data->>'host' LIKE $`+strconv.Itoa(n))
+			args = append(args, h+" · %")
+			n++
 		}
-		where += ` AND data->>'host' IN (` + strings.Join(ph, ",") + `)`
+		if len(parts) > 0 {
+			where += ` AND (` + strings.Join(parts, ` OR `) + `)`
+		}
 	}
 	var total int
 	_ = p.db.QueryRow(`SELECT COUNT(*) FROM audit_log_p WHERE `+where, args...).Scan(&total)
@@ -644,6 +655,25 @@ ORDER BY ts DESC LIMIT $`+strconv.Itoa(n)+` OFFSET $`+strconv.Itoa(n+1), args...
 	return out, total
 }
 
+// terminalHostAllowed mirrors the allowHosts SQL predicate (exact label or
+// "label · …" container session) for unit tests without a live Postgres.
+func terminalHostAllowed(host string, allowHosts []string) bool {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return false
+	}
+	for _, a := range allowHosts {
+		a = strings.TrimSpace(a)
+		if a == "" {
+			continue
+		}
+		if host == a || strings.HasPrefix(host, a+" · ") {
+			return true
+		}
+	}
+	return false
+}
+
 // handleTerminalCommands GET /api/v1/terminal/commands?from=&to=&host=&actor=&q=&limit=&offset=
 func (s *Server) handleTerminalCommands(w http.ResponseWriter, r *http.Request) {
 	fromTs, toTs := parseTimeRangeQuery(r, 30*24*time.Hour)
@@ -658,8 +688,8 @@ func (s *Server) handleTerminalCommands(w http.ResponseWriter, r *http.Request) 
 	u, _ := s.currentUser(r)
 	var allowHosts []string
 	if u.hostScopeRestricted() && roleRank(u.Role) < roleRank(RoleAdmin) {
-		// 审计行里的 host 存的是展示标签（hostDisplayLabel），不是裸主机名，
-		// 所以这里也按标签取，两边才对得上。
+		// 审计行里的 host 存的是展示标签（hostDisplayLabel）；容器会话还会拼
+		// " · 容器名"。这里只放标签，queryTerminalCommands 再匹配派生标签。
 		for _, h := range s.store.ListHosts() {
 			if h != nil && s.userCanAccessHost(u, h.ID) {
 				allowHosts = append(allowHosts, hostDisplayLabelFromHost(h))

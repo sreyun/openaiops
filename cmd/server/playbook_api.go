@@ -488,10 +488,28 @@ func (s *Server) fireScheduledPlaybook(pb Playbook) {
 	exec := s.playbooks.StartScheduledExecution(pb, Tz("playbook.scheduler_actor"), hosts)
 	s.persistPlaybookExecution(exec.ID)
 	s.store.AddLog(LogEntry{Kind: KindOperation, Level: "info", Actor: "scheduler", Message: Tz("log.sched_fire", pb.Name, len(hosts))})
+	// clearSchedBusy / 收尾必须用 defer：safeGo 吞掉 panic 后进程还活着，
+	// 若清 busy 写在 run 后面就会执行不到，这本剧本的定时调度会永久卡死。
 	safeGo("playbook-exec", func() {
+		defer s.playbooks.clearSchedBusy(pb.ID)
+		defer s.finishPlaybookAfterPanic(exec.ID)
 		s.runPlaybookExecution(pb, exec, hosts)
-		s.playbooks.clearSchedBusy(pb.ID)
 	})
+}
+
+// finishPlaybookAfterPanic 给 safeGo 包住的剧本执行用：panic 被隔离后进程还活着，
+// 若执行记录仍停在 running，就标成 failed，避免 UI / 调用方永远看见「执行中」。
+// 正常跑完时 Status 已是终态，这里是 no-op。
+func (s *Server) finishPlaybookAfterPanic(execID int64) {
+	if s == nil || s.playbooks == nil || execID == 0 {
+		return
+	}
+	e, ok := s.playbooks.GetExecution(execID)
+	if !ok || e.Status != "running" {
+		return
+	}
+	s.playbooks.FinishExecution(execID, "failed")
+	s.persistPlaybookExecution(execID)
 }
 
 func (s *Server) notifyPlaybookPendingApproval(pb Playbook, exec *PlaybookExecution) {
@@ -550,9 +568,10 @@ func (s *Server) handleApprovePlaybookExecution(w http.ResponseWriter, r *http.R
 	s.store.AddLog(LogEntry{Kind: KindOperation, Level: "warning", Actor: actor, IP: s.clientIP(r),
 		Message: fmt.Sprintf("批准定时剧本执行「%s」(execution=%d)", pb.Name, id)})
 	safeGo("playbook-exec-retry", func() {
+		defer s.playbooks.clearSchedBusy(pb.ID)
+		defer s.finishPlaybookAfterPanic(id)
 		fresh, _ := s.playbooks.GetExecution(id)
 		s.runPlaybookExecution(pb, &fresh, hosts)
-		s.playbooks.clearSchedBusy(pb.ID)
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "execution_id": id})
 }
