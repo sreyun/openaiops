@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 )
 
@@ -205,6 +206,49 @@ func fimRegionVisited(p string, visited, blocked map[string]bool) bool {
 // 多盘机器上必须给每个盘留份额：C 盘上百万文件，如果不设下限，按"总额/卷数"分下来
 // D/E 盘可能只分到几千个，覆盖一圈遥遥无期。同时它也是"总额很小时别把某个盘饿死"的兜底。
 const fimMinVolumeQuota = 20000
+
+// fimOrderRootsForScan 决定同一卷内本轮先走哪个根。
+//
+// 同卷根共享一份文件配额。若永远按"要害目录在前"的固定顺序走，第一个大根
+// （Windows 的 C:\Users、Linux 的 /home）每走完一圈就把 Next 清成 ""，下一轮又从
+// 头独占配额——后面的根（整盘 C:\、/）游标永远推不动，基线里永远没有那些路径。
+//
+// 所以本轮排序：
+//  1. 还在续扫的根（Next != ""）优先，把上一轮的断点走完；
+//  2. 其余按 Cycles 升序，让每个根都轮到一波完整覆盖后再一起进入下一圈；
+//  3. 上述都相同时保持原有相对顺序（同一波里要害目录仍然在前）。
+func fimOrderRootsForScan(group []string, prev map[string]fimRootState) []string {
+	if len(group) <= 1 {
+		return group
+	}
+	type item struct {
+		idx  int
+		root string
+		next string
+		cyc  int
+	}
+	items := make([]item, len(group))
+	for i, r := range group {
+		st := prev[fimMatchKey(fimNormPath(r))]
+		items[i] = item{idx: i, root: r, next: st.Next, cyc: st.Cycles}
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		a, b := items[i], items[j]
+		aIn, bIn := a.next != "", b.next != ""
+		if aIn != bIn {
+			return aIn
+		}
+		if !aIn && a.cyc != b.cyc {
+			return a.cyc < b.cyc
+		}
+		return a.idx < b.idx
+	})
+	out := make([]string, len(items))
+	for i, it := range items {
+		out[i] = it.root
+	}
+	return out
+}
 
 // fimGroupRootsByVolume 把扫描根分成可以**并发**走的若干组。
 //

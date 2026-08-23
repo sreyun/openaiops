@@ -651,8 +651,12 @@ func fimWalkVolume(group []string, opts fimOptions, excl *fimExcluder, patterns 
 		blockedDirs: make(map[string]bool, 8),
 		cursors:     make(map[string]fimRootState, len(group)),
 	}
+	// 同卷多根共享配额：按续扫进度公平排序，避免先根循环重启饿死后根。
+	group = fimOrderRootsForScan(group, prevCursors)
 	for _, root := range group {
-		if out.limitHit || out.budgetHit {
+		// files 已用尽时绝不能再走进下一个根：否则会在第一个条目上立刻
+		// SkipAll，并把该根的游标写成"根自身"——下一轮先根又占满配额，后根永久卡死。
+		if out.files >= quota || out.limitHit || out.budgetHit {
 			break
 		}
 		norm := fimNormPath(root)
