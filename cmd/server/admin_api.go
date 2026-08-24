@@ -10,6 +10,13 @@ import (
 
 // handleGetConfig returns the alert config with webhooks/secrets masked.
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.sanitizedConfig())
+}
+
+// sanitizedConfig 是**唯一**一份脱敏口径：配置里所有密钥/令牌/DSN 在这里统一打码。
+// 诊断包（support_bundle.go）也走这个函数——脱敏清单一旦分叉成两份，早晚有一份漏掉
+// 新加的密钥字段，而诊断包是要发给售后甚至发到工单系统里的。
+func (s *Server) sanitizedConfig() ServerConfig {
 	c := s.cfg.Get()
 	c.Categories = nil
 	c.Feishu.Webhook = maskSecret(c.Feishu.Webhook)
@@ -66,7 +73,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	// Never expose the password hash/salt or the MFA secret to the browser.
 	c.Account.Salt, c.Account.Hash, c.Account.MFASecret = "", "", ""
 	c.Users = nil // the user list (with hashes) is served via /api/v1/users, not here
-	writeJSON(w, http.StatusOK, c)
+	return c
 }
 
 func (s *Server) handleSetConfig(w http.ResponseWriter, r *http.Request) {

@@ -6,7 +6,9 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -412,7 +414,11 @@ func (s *Server) handleSQLQueryExport(w http.ResponseWriter, r *http.Request) {
 	// UTF-8 BOM：Excel 不带 BOM 打开中文 CSV 就是乱码，这是导出功能最常见的投诉。
 	_, _ = w.Write([]byte{0xEF, 0xBB, 0xBF})
 	cw := csv.NewWriter(w)
-	_ = cw.Write(cols)
+	header := make([]string, len(cols))
+	for i, c := range cols {
+		header[i] = neutralizeCSVFormula(c)
+	}
+	_ = cw.Write(header)
 	flusher, _ := w.(http.Flusher)
 
 	mysqlStyle := sess.driver == "mysql"
@@ -423,11 +429,17 @@ func (s *Server) handleSQLQueryExport(w http.ResponseWriter, r *http.Request) {
 	}
 	line := make([]string, len(cols))
 	count := 0
+	truncated := false
+	failure := ""
 	for rs.Next() {
 		if count >= limit {
+			truncated = true
 			break
 		}
 		if err := rs.Scan(ptrs...); err != nil {
+			// 与下面的 rs.Err() 走同一套翻译：中途超时最常见的表现就是 Scan 失败，
+			// 直接把驱动原文写进文件既不好懂，也和接口上的报错对不上。
+			failure = sqlFriendlyError(err, ctx)
 			break
 		}
 		for i := range cols {
@@ -436,7 +448,7 @@ func (s *Server) handleSQLQueryExport(w http.ResponseWriter, r *http.Request) {
 				line[i] = ""
 				continue
 			}
-			line[i] = fmt.Sprint(v)
+			line[i] = neutralizeCSVFormula(fmt.Sprint(v))
 		}
 		if err := cw.Write(line); err != nil {
 			return
@@ -449,11 +461,62 @@ func (s *Server) handleSQLQueryExport(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if failure == "" && rs.Err() != nil {
+		failure = sqlFriendlyError(rs.Err(), ctx)
+	}
+	// 响应头早就发出去了，改不了状态码。但一份**看起来完整**的残缺 CSV 比一个错误
+	// 危险得多——报表会被当成全量数据去做判断。所以在文件末尾留一条显式标记行。
+	if failure != "" || truncated {
+		note := fmt.Sprintf("%s 导出在第 %d 行结束", csvIncompleteMarker, count)
+		if truncated {
+			note = fmt.Sprintf("%s 已达导出上限 %d 行，结果不完整", csvIncompleteMarker, limit)
+		}
+		if failure != "" {
+			note += "：" + failure
+		}
+		tail := make([]string, len(cols))
+		if len(tail) == 0 {
+			tail = []string{""}
+		}
+		tail[0] = neutralizeCSVFormula(note)
+		_ = cw.Write(tail)
+		slog.Warn("SQL 导出未完整结束", "conn", id, "rows", count, "truncated", truncated, "err", failure)
+	}
 	cw.Flush()
 	if flusher != nil {
 		flusher.Flush()
 	}
 	s.recordSQLHistory(r, "export", id, req.SQL, nil)
+}
+
+// csvIncompleteMarker 标记导出被截断 / 中途出错。以 # 开头，既不像公式也不像数据。
+const csvIncompleteMarker = "#AIOPS_EXPORT_INCOMPLETE"
+
+// rePlainNumber 是"这就是个数字"的判据：带符号的整数/小数。
+var rePlainNumber = regexp.MustCompile(`^[+-]?\d+(\.\d+)?$`)
+
+// neutralizeCSVFormula 防电子表格公式注入（CWE-1236）。
+//
+// 导出的每一格都是**业务库里的任意内容**——比 Web 端导出的告警文本更不可控。
+// Excel / LibreOffice / Numbers / WPS 打开 CSV 时，以 = + - @ 开头（以及被解析前
+// 就会被剥掉的前导 Tab / CR）的单元格会被当公式执行，`=cmd|'...'!A1` 这类载荷
+// 可以在打开报表的运维同事机器上落地执行。前缀一个单引号让它变回字面文本。
+//
+// 例外：纯数字（"-12"、"+3.5"）是数据不是公式，加前缀会把数值列毁掉——
+// 与 Web 端 rowsToCSV / Android HyperVExport 保持同一套判据。
+func neutralizeCSVFormula(s string) string {
+	if s == "" {
+		return s
+	}
+	switch s[0] {
+	case '=', '+', '-', '@', '\t', '\r':
+	default:
+		return s
+	}
+	if rePlainNumber.MatchString(s) {
+		return s
+	}
+	return "'" + s
 }
 
 // sanitizeExportFilename 把用户给的文件名收敛成安全的 ASCII 文件名。

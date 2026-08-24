@@ -6326,3 +6326,17 @@ html.embed-mode body {
 .alert-group{margin-left:6px;padding:1px 6px;border-radius:4px;font-size:12px;
   color:var(--muted,#8b96a8);background:var(--panel-2,rgba(127,127,127,.10));white-space:nowrap;
   max-width:220px;overflow:hidden;text-overflow:ellipsis;display:inline-block;vertical-align:middle}
+
+/* ---------- 授权状态横幅 ----------
+   过期/超限会改变平台行为（拦新主机注册、写操作降级为只读），所以它跟"提示"不是
+   一回事：常驻在内容区顶部、切页也不消失，严重态用危险色。 */
+.lic-banner{
+  margin:0 0 12px; padding:11px 14px; border-radius:var(--r-sm, 8px);
+  border:1px solid var(--warn-border, rgba(232,161,60,.3));
+  background:var(--warn-soft); color:var(--warn-txt, var(--warn));
+  font-size:13px; line-height:1.5;
+}
+.lic-banner.crit{
+  border-color:var(--crit-border, rgba(239,77,90,.3));
+  background:var(--crit-soft); color:var(--crit-txt, var(--crit));
+}

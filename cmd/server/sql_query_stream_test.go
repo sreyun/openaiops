@@ -135,3 +135,34 @@ func TestSQLFriendlyError(t *testing.T) {
 		t.Fatalf("没有错误时不该编一个出来：%q", got)
 	}
 }
+
+// CSV 导出的每一格都是业务库里的任意内容。Excel / WPS / LibreOffice / Numbers
+// 打开 CSV 时会把 = + - @ 开头的格子当公式求值——判据必须和新版控制台
+// src/shared/export.ts 的 rowsToCSV、Android 的 HyperVExport 完全一致，
+// 尤其是"纯数字放行"这条：把 -12 变成 '-12 会把整列数值毁掉。
+func TestNeutralizeCSVFormula(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", ""},
+		{"normal", "normal"},
+		{"web-01", "web-01"},
+		{"=cmd|' /c calc'!A1", "'=cmd|' /c calc'!A1"},
+		{"+1+1", "'+1+1"},
+		{"@SUM(A1:A9)", "'@SUM(A1:A9)"},
+		{"-2+3", "'-2+3"},
+		{"\tleading tab", "'\tleading tab"},
+		{"\rleading cr", "'\rleading cr"},
+		// 数据不是公式：带符号的整数 / 小数原样保留数值语义。
+		{"-12", "-12"},
+		{"+3.5", "+3.5"},
+		{"0", "0"},
+		{"-0.001", "-0.001"},
+		// 看着像数字但不是：仍要中和。
+		{"-1.2.3", "'-1.2.3"},
+		{"-1e9", "'-1e9"},
+	}
+	for _, c := range cases {
+		if got := neutralizeCSVFormula(c.in); got != c.want {
+			t.Errorf("neutralizeCSVFormula(%q) = %q，期望 %q", c.in, got, c.want)
+		}
+	}
+}

@@ -76,8 +76,29 @@ function renderCards(s) {
   // 比不给还糟——用户会以为是自己环境坏了。
   const v2Entry = $("ddV2Console");
   if (v2Entry) v2Entry.style.display = s.v2_console ? "" : "none";
+  renderLicenseBanner(s.license);
   TERMINAL_ENABLED = s.terminal_enabled !== false;
   if (typeof DESKTOP_ENABLED !== "undefined") DESKTOP_ENABLED = s.desktop_enabled !== false;
+}
+
+/* ---------- 渲染：授权状态横幅 ----------
+   过期/超限不是"提示"，是平台行为已经变了：新主机注册会被拒、写操作会降级为只读。
+   只在需要人动手时出现——自建/开源模式（未开启强制）下没装授权是正常形态，不打扰。 */
+function renderLicenseBanner(lic) {
+  const el = $("licenseBanner");
+  if (!el) return;
+  if (!lic || !lic.state || lic.state === "active" || (lic.state === "unlicensed" && !lic.enforced)) {
+    el.style.display = "none";
+    el.textContent = "";
+    return;
+  }
+  const key = "license.banner_" + lic.state;
+  const txt = I18N.t(key);
+  const severe = lic.state === "expired" || lic.state === "invalid";
+  el.className = "lic-banner" + (severe ? " crit" : "");
+  const used = (lic.used_hosts || 0) + "/" + (lic.max_hosts ? lic.max_hosts : "∞");
+  el.textContent = (txt === key ? "" : txt) + "（" + I18N.t("license.hosts") + " " + used + "）";
+  el.style.display = "";
 }
 
 /* ---------- 渲染：统计与健康小结 ---------- */
@@ -503,10 +524,13 @@ function applyLogFilters(items) {
 function exportLogsCSV() {
   const rows = applyLogFilters(LAST_LOG);
   if (!rows.length) { toast(I18N.t("empty.no_log_export"), "err"); return; }
-  const escCsv = v => `"${String(v == null ? "" : v).replace(/"/g, '""')}"`;
-  const lines = ["时间,类型,级别,用户名,操作者,IP,主机,内容"];
-  rows.forEach(e => lines.push([fmtDateTime(e.timestamp), translateLogKind(e.kind), translateLogLevel(e.level), e.username || "", e.actor || "", e.ip || "", formatLogHost(e), redactLogMessage(e.message || "")].map(escCsv).join(",")));
-  const blob = new Blob(["\uFEFF" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
+  // 日志正文来自 Agent / 被监控主机：以 = 开头的一行日志能在打开导出的人机器上执行。
+  const head = ["时间", "类型", "级别", "用户名", "操作者", "IP", "主机", "内容"];
+  const csv = expRowsToCsv(head, rows.map(e => [
+    fmtDateTime(e.timestamp), translateLogKind(e.kind), translateLogLevel(e.level),
+    e.username || "", e.actor || "", e.ip || "", formatLogHost(e), redactLogMessage(e.message || "")
+  ]));
+  const blob = new Blob([EXP_CSV_BOM + csv], { type: "text/csv;charset=utf-8" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
   a.download = `AIOps-logs-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.csv`;

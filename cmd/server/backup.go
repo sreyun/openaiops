@@ -65,6 +65,11 @@ type BackupConfig struct {
 	RetainCount int                `json:"retain_count,omitempty"`
 	Dir         string             `json:"dir,omitempty"` // override AIOPS_BACKUP_DIR
 	Remote      BackupRemoteConfig `json:"remote,omitempty"`
+	// 灾备的另一半：时序与录像。默认关闭是刻意的——导出时序会占磁盘，
+	// 得让运维明确知道自己开了什么。见 backup_full.go。
+	IncludeVM         bool `json:"include_vm,omitempty"`
+	VMDays            int  `json:"vm_days,omitempty"` // 导出最近 N 天时序，默认 90
+	IncludeRecordings bool `json:"include_recordings,omitempty"`
 }
 
 func (b BackupConfig) withDefaults() BackupConfig {
@@ -73,6 +78,9 @@ func (b BackupConfig) withDefaults() BackupConfig {
 	}
 	if b.RetainCount <= 0 {
 		b.RetainCount = 14
+	}
+	if b.VMDays <= 0 {
+		b.VMDays = 90
 	}
 	return b
 }
@@ -222,7 +230,8 @@ func (s *Server) listBackupsFS() ([]BackupMeta, error) {
 	}
 	var out []BackupMeta
 	for _, e := range ents {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".dump") {
+		if e.IsDir() || !(strings.HasSuffix(e.Name(), ".dump") ||
+			strings.HasSuffix(e.Name(), ".native.gz") || strings.HasSuffix(e.Name(), ".tar.gz")) {
 			continue
 		}
 		info, _ := e.Info()
@@ -293,15 +302,27 @@ func (s *Server) createPGBackup(operator, note string) (BackupMeta, error) {
 	return meta, nil
 }
 
+// pruneBackups 按**种类**各留 retain 份。混在一起排序会出现"新做的 VM 备份被一串
+// PG 备份挤出保留窗口"——那等于时序备份开了等于没开。
 func (s *Server) pruneBackups(retain int) {
 	if retain <= 0 {
 		return
 	}
 	list, err := s.listBackups()
-	if err != nil || len(list) <= retain {
-		return
+	if err != nil {
+		// 台账读不到（PG 未就绪/表还没建）不该让保留策略整个失效——
+		// 备份文件本身在盘上，按文件系统裁剪照样是对的。
+		if list, err = s.listBackupsFS(); err != nil {
+			return
+		}
 	}
-	for _, m := range list[retain:] {
+	kept := map[string]int{}
+	for _, m := range list { // listBackups 已按 created_at 倒序
+		kind := backupKindOf(m.ID)
+		kept[kind]++
+		if kept[kind] <= retain {
+			continue
+		}
 		_ = os.Remove(m.Path)
 		if s.pg != nil {
 			_, _ = s.pg.db.Exec(`DELETE FROM backup_meta WHERE id=$1`, m.ID)
@@ -330,6 +351,11 @@ func (s *Server) restorePGBackup(id, operator string) error {
 	}
 	if meta == nil {
 		return fmt.Errorf("备份不存在")
+	}
+	// 时序/录像备份不是 pg_dump 产物，喂给 pg_restore 只会得到一条难懂的报错，
+	// 而这条路径**会先删库**——必须在删库之前拦住。
+	if backupKindOf(meta.ID) != "postgres" {
+		return fmt.Errorf("该备份是 %s 类型，不能用 PostgreSQL 还原流程；请按 docs/DEPLOY_GUIDE.md 的对应章节还原", backupKindOf(meta.ID))
 	}
 	if _, err := os.Stat(meta.Path); err != nil {
 		return fmt.Errorf("备份文件缺失: %w", err)
@@ -493,6 +519,20 @@ func (s *Server) startBackupScheduler() {
 						slog.Error("scheduled PG backup failed", "err", err)
 					} else {
 						slog.Info("scheduled PG backup ok")
+					}
+					if cfg.IncludeVM {
+						if m, err := s.createVMBackup("scheduler", "scheduled"); err != nil {
+							slog.Error("定时时序备份失败", "err", err)
+						} else {
+							slog.Info("定时时序备份完成", "id", m.ID, "size", m.SizeBytes)
+						}
+					}
+					if cfg.IncludeRecordings {
+						if m, err := s.createRecordingsBackup("scheduler", "scheduled"); err != nil {
+							slog.Error("定时录像备份失败", "err", err)
+						} else {
+							slog.Info("定时录像备份完成", "id", m.ID, "size", m.SizeBytes)
+						}
 					}
 				}
 			}

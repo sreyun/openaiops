@@ -4,6 +4,12 @@
  * Regenerate with scripts/build_i18n_tw.js. Key-parity enforced by check_i18n_parity.js.
  */
 window.DICT_TW = {
+  "license.banner_grace": "授權已過期，正處於寬限期：功能未受影響，請盡快續期。",
+  "license.banner_expired": "授權已過期且超出寬限期：寫入操作已降級為唯讀，採集與告警仍在運行。",
+  "license.banner_over_quota": "已達授權主機數上限：新主機無法註冊，已登記主機不受影響。",
+  "license.banner_invalid": "授權檔案無效（簽章或部署指紋不符），請重新上傳。",
+  "license.banner_unlicensed": "尚未安裝授權檔案：寫入操作已降級為唯讀。",
+  "license.hosts": "主機用量",
   "toast.deleted": "已刪除",
   "toast.host_deleted": "已刪除主機",
   "toast.saved": "已儲存",

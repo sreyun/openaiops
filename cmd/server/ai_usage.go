@@ -139,6 +139,7 @@ GROUP BY task ORDER BY COUNT(*) DESC`, sinceTs)
 			}
 			byTask[task] = aiTaskAgg{Count: cnt, Fail: fl, AvgMs: int64(avg)}
 		}
+		noteRowsErr("aiCallStatsFromPG#1", rows)
 	}
 	out["by_task"] = byTask
 
@@ -163,6 +164,7 @@ ORDER BY id DESC LIMIT $2`, sinceTs, recentLimit)
 			}
 			recent = append(recent, st)
 		}
+		noteRowsErr("aiCallStatsFromPG#2", rrows)
 		out["recent"] = recent
 	}
 	return out
@@ -220,6 +222,7 @@ GROUP BY task ORDER BY COUNT(*) DESC`, sinceTs)
 			}
 			byTask[task] = row
 		}
+		noteRowsErr("aiFeedbackStatsFromPG", rows)
 	}
 	out["feedback_by_task"] = byTask
 	return out
@@ -277,6 +280,7 @@ GROUP BY 1 ORDER BY 1`
 		}
 		out = append(out, pt)
 	}
+	noteRowsErr("queryAIUsageHistory", rows)
 	return out
 }
 
@@ -321,6 +325,7 @@ GROUP BY 1 ORDER BY SUM(approx_tokens) DESC NULLS LAST LIMIT $3`, fromTs, toTs, 
 		}
 		out = append(out, r)
 	}
+	noteRowsErr("queryAIUsageByUser", rows)
 	return out
 }
 
@@ -405,6 +410,7 @@ GROUP BY 1 ORDER BY 1`, fromTs, toTs)
 		}
 		out = append(out, r)
 	}
+	noteRowsErr("billingReconcileFromPG", rows)
 	return out
 }
 
@@ -579,16 +585,24 @@ type termCommandRow struct {
 
 // allowHosts 非空时把查询收窄到这些主机（主机名与主机 ID 都算），供主机组授权用户使用；
 // 为空表示不限制（管理员或未设主机授权的账号）。
-func (p *pgStore) queryTerminalCommands(fromTs, toTs int64, host, actor, q string, limit, offset int, allowHosts []string) ([]termCommandRow, int) {
-	if p == nil || p.db == nil {
-		return nil, 0
-	}
+// clampTermCommandPage 是分页的唯一判据。handler 与查询都要用它——
+// 此前 handler 把用户原样传来的 limit 回显进响应，而查询内部会把 limit=1000
+// 收敛成 100：前端据回显算总页数，翻到后面就是空白页，且完全看不出为什么。
+func clampTermCommandPage(limit, offset int) (int, int) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
 	if offset < 0 {
 		offset = 0
 	}
+	return limit, offset
+}
+
+func (p *pgStore) queryTerminalCommands(fromTs, toTs int64, host, actor, q string, limit, offset int, allowHosts []string) ([]termCommandRow, int) {
+	if p == nil || p.db == nil {
+		return nil, 0
+	}
+	limit, offset = clampTermCommandPage(limit, offset)
 	args := []any{fromTs, toTs}
 	where := `ts >= $1 AND ts <= $2 AND data->>'kind' = 'terminal'`
 	n := 3
@@ -641,6 +655,7 @@ ORDER BY ts DESC LIMIT $`+strconv.Itoa(n)+` OFFSET $`+strconv.Itoa(n+1), args...
 		}
 		out = append(out, r)
 	}
+	noteRowsErr("queryTerminalCommands", rows)
 	return out, total
 }
 
@@ -649,6 +664,7 @@ func (s *Server) handleTerminalCommands(w http.ResponseWriter, r *http.Request) 
 	fromTs, toTs := parseTimeRangeQuery(r, 30*24*time.Hour)
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	limit, offset = clampTermCommandPage(limit, offset)
 	host := strings.TrimSpace(r.URL.Query().Get("host"))
 	actor := strings.TrimSpace(r.URL.Query().Get("actor"))
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
@@ -752,6 +768,7 @@ func (p *pgStore) listPlaybookExecutions(limit int) []PlaybookExecution {
 			out = append(out, e)
 		}
 	}
+	noteRowsErr("listPlaybookExecutions", rows)
 	return out
 }
 
@@ -801,5 +818,6 @@ func (p *pgStore) listRemediationRuns(limit int) []RemediationRun {
 			out = append(out, run)
 		}
 	}
+	noteRowsErr("listRemediationRuns", rows)
 	return out
 }

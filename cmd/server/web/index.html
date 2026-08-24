@@ -243,6 +243,10 @@
     </header>
 
     <div class="content">
+      <!-- 授权状态横幅：过期/超限会**改变平台行为**（拦新主机、写操作降级），
+           必须摆在界面上，而不是等用户操作失败了才发现。由 overview.js 按
+           /api/v1/summary 的 license 字段渲染；未开启强制且未装授权时不显示。 -->
+      <div id="licenseBanner" class="lic-banner" style="display:none" role="alert"></div>
       <div id="viewTabs" class="view-tabs" style="display:none"></div>
       <div id="resourceSearchBar" class="resource-search-bar" style="display:none">
         <div class="resource-search-box">
@@ -2523,11 +2527,31 @@
           <div class="field"><label>Secret Key</label><input type="password" id="bakRemoteSecretKey" autocomplete="off" placeholder="留空则保留原值"></div>
           <div class="field"><label>对象前缀</label><input type="text" id="bakRemotePrefix" placeholder="pg/"></div>
         </div>
+        <div class="subhead">备份范围（灾备的另一半）</div>
+        <div class="hint">默认只备份 PostgreSQL —— 时序曲线与终端/桌面录像都不在里面。录像恰恰是审计取证时唯一有价值的东西。打开下面两项后，「整套备份」与每日计划会一并导出。恢复演练用 <code>scripts/backup-verify.sh</code>（起一次性 PG/VM 真还原一遍，不碰生产）。</div>
+        <div class="grid2">
+          <div class="field"><label class="switch"><input type="checkbox" id="bakIncludeVM"> 包含时序数据（VictoriaMetrics）</label></div>
+          <div class="field"><label>时序导出天数</label><input type="number" id="bakVMDays" min="1" placeholder="90"></div>
+          <div class="field"><label class="switch"><input type="checkbox" id="bakIncludeRec"> 包含终端/桌面录像</label></div>
+        </div>
         <div class="mfa-foot" style="gap:8px;display:flex;flex-wrap:wrap">
           <button class="btn primary sm" id="bakCfgSaveBtn" type="button">保存备份计划</button>
           <button class="btn sm" id="bakNowBtn" type="button">立即备份</button>
+          <button class="btn sm" id="bakFullBtn" type="button">整套备份（PG+时序+录像）</button>
         </div>
         <div id="backupList" class="sre-list" style="margin-top:10px"></div>
+
+        <div class="subhead">授权与用量</div>
+        <div class="hint">授权文件离线验签，平台不会联网回调。超出主机数或到期时<b>只降级不停服</b>：采集、告警与 Agent 上报照常运行，被拦的是新主机注册与人发起的写操作。签发授权需要下面的「部署指纹」。</div>
+        <div id="licInfo" class="sre-list" style="margin-bottom:10px"></div>
+        <div class="field"><label>授权文件内容</label><textarea id="licText" rows="5" spellcheck="false" placeholder="粘贴供应商签发的授权文件（含 BEGIN/END 行也可以）"></textarea></div>
+        <div class="mfa-foot" style="gap:8px;display:flex;flex-wrap:wrap">
+          <button class="btn primary sm" id="licInstallBtn" type="button">安装授权</button>
+          <button class="btn danger sm" id="licRemoveBtn" type="button">移除授权</button>
+          <button class="btn sm" id="licRefreshBtn" type="button">刷新状态</button>
+          <a class="btn sm" id="licBundleLink" href="/api/v1/admin/support-bundle">下载诊断包</a>
+        </div>
+        <div class="hint">诊断包含版本、脱敏配置、迁移版本、PG/VM 连通性、最近活动日志与 goroutine 快照，可直接发给技术支持；不含任何密钥与业务数据。</div>
 
         <div class="subhead">对外 Status Page</div>
         <div class="hint">公开地址 <code>/status</code>（HTML）与 <code>/api/v1/public/status</code>（JSON）。可选 Bearer/query token。</div>

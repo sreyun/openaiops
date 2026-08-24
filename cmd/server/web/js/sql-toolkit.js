@@ -1692,12 +1692,18 @@ function onSQLResultAction(e) {
   return false;
 }
 
-/** 把列式结果拼成 CSV（客户端复制用；导出走服务端流式接口，不受行数上限影响）。 */
+/**
+ * 把列式结果拼成 CSV（客户端复制用；导出走服务端流式接口，不受行数上限影响）。
+ *
+ * 单元格内容是业务库里的任意文本。粘进 Excel/WPS 时，`=`/`+`/`-`/`@` 开头的格子
+ * 同样按公式求值——粘贴路径和下载路径在这一点上没有区别，所以判据与 export.js 的
+ * expCsvNeutralize、服务端 neutralizeCSVFormula 完全一致（纯数字放行）。
+ */
 function sqlRowsToCSV(cols, rows) {
   if (!cols.length) return "";
   const cell = (v) => {
     if (v == null) return "";
-    const s = String(v);
+    const s = expCsvNeutralize(String(v));
     return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
   };
   const lines = [cols.map(cell).join(",")];

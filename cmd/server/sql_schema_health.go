@@ -90,6 +90,7 @@ LIMIT 80`
 				Suggest: "补充 PRIMARY KEY / 业务唯一键，降低复制与变更风险",
 			})
 		}
+		noteRowsErr("mysqlSchemaHealth#1", rs)
 		rs.Close()
 	}
 
@@ -114,6 +115,7 @@ LIMIT 50`
 				Suggest: "评估迁移到 InnoDB 以获得事务与崩溃恢复",
 			})
 		}
+		noteRowsErr("mysqlSchemaHealth#2", rs)
 		rs.Close()
 	}
 
@@ -144,6 +146,7 @@ LIMIT 40`
 				Suggest: "核查查询路径并补充合适二级索引",
 			})
 		}
+		noteRowsErr("mysqlSchemaHealth#3", rs)
 		rs.Close()
 	}
 

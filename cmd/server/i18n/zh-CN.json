@@ -471,5 +471,21 @@
   "log.terminal_password_set": "设置终端密码：%s",
   "log.terminal_verified": "终端密码验证通过：%s",
   "agent_update.actor": "Agent 升级",
-  "platform.self_fault": "平台自检"
+  "platform.self_fault": "平台自检",
+  "license.read_only": "授权已过期，平台已降级为只读：采集、告警与 Agent 上报照常运行，写操作需续期后恢复。请联系供应商续期后在「系统设置 → 授权」上传新的授权文件。",
+  "license.host_quota": "已达授权主机数上限或授权已过期，新主机暂时无法注册；已登记主机的采集不受影响。",
+  "license.invalid": "授权文件无效",
+  "license.bad_format": "授权文件格式不正确，请确认粘贴的是完整内容",
+  "license.bad_signature": "授权文件签名校验失败，可能被篡改或来自其他签发方",
+  "license.install_mismatch": "授权文件绑定的部署指纹与本部署不一致，请用本页显示的部署指纹重新签发",
+  "log.license_installed": "安装授权：客户 %s，主机上限 %d，有效期至 %s",
+  "log.license_install_failed": "授权安装失败：%s",
+  "log.license_removed": "移除授权文件",
+  "log.license_expiring": "授权到期提醒：客户 %s，有效期至 %s，剩余 %d 天",
+  "log.license_host_rejected": "授权限制：拒绝新主机注册 %s（已用 %d / 上限 %d）",
+  "log.support_bundle_export": "导出平台诊断包",
+  "log.backup_full": "创建整套备份（PG+时序+录像）：%s；失败 %d 项",
+  "backup.full_hint": "PostgreSQL 用备份列表的「还原」；时序用 vmctl 或 curl 推回 /api/v1/import/native；录像解压回录像目录。完整步骤见 docs/DEPLOY_GUIDE.md「备份与恢复」。",
+  "license.not_installed": "本部署尚未安装授权文件，写操作已降级为只读：采集、告警与 Agent 上报照常运行。请向供应商索取授权文件后，在控制台「授权与用量」上传。",
+  "license.read_only_invalid": "授权文件无效（签名或部署指纹不匹配），写操作已降级为只读。请用控制台显示的部署指纹重新签发。"
 }

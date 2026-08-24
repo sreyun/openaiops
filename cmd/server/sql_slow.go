@@ -720,6 +720,7 @@ func mysqlRecoverSQLByDigest(ctx context.Context, db *sql.DB, digest, digestText
 					return
 				}
 			}
+			noteRowsErr("mysqlRecoverSQLByDigest#1", rows)
 		}()
 		if best.SQL != "" && !sqltoolkit.HasDigestPlaceholders(best.SQL) {
 			break
@@ -745,6 +746,7 @@ func mysqlRecoverSQLByDigest(ctx context.Context, db *sql.DB, digest, digestText
 					return
 				}
 			}
+			noteRowsErr("mysqlRecoverSQLByDigest#2", rowsSL)
 		}()
 	} else {
 		var text string
@@ -786,6 +788,7 @@ func mysqlRecoverSQLByDigest(ctx context.Context, db *sql.DB, digest, digestText
 						}
 					}
 				}
+				noteRowsErr("mysqlRecoverSQLByDigest#3", rows)
 			}()
 		}
 	}

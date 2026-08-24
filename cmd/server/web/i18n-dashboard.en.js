@@ -4,6 +4,12 @@
  * Key-parity with zh-CN is enforced by scripts/check_i18n_parity.js.
  */
 window.DICT_EN = {
+  "license.banner_grace": "License expired and now in its grace period — features are unaffected; please renew soon.",
+  "license.banner_expired": "License expired past the grace period — writes are read-only; collection and alerting keep running.",
+  "license.banner_over_quota": "Host quota reached — new hosts cannot register; existing hosts are unaffected.",
+  "license.banner_invalid": "License is invalid (signature or deployment ID mismatch) — please upload it again.",
+  "license.banner_unlicensed": "No license installed — writes are degraded to read-only.",
+  "license.hosts": "Host usage",
   "toast.deleted": "Deleted",
   "toast.host_deleted": "Host deleted",
   "toast.saved": "Saved",

@@ -717,7 +717,7 @@ async function openSlaReport() {
       body.innerHTML = `<div class="empty-line">暂无数据（接口探测运行一段时间、数据入 VM 后才有 SLA 报表；需启用 VictoriaMetrics）。</div>`;
       return;
     }
-    body.innerHTML = `<div class="hint" style="margin-bottom:10px">近 ${d.days} 天 · 共 ${rows.length} 个接口 · 可用率 = 成功探测 / 总探测；估算停机 = 不可用比例 × 窗口时长</div>
+    body.innerHTML = `<div class="hint" style="margin-bottom:10px">近 ${esc(d.days)} 天 · 共 ${rows.length} 个接口 · 可用率 = 成功探测 / 总探测；估算停机 = 不可用比例 × 窗口时长</div>
       <div class="api-table-wrap"><table class="api-table">
         <thead><tr><th>业务系统</th><th>接口</th><th>可用率</th><th>估算停机</th><th>P95</th><th>P99</th><th>探测数</th></tr></thead>
         <tbody>${rows.map(r => `<tr>
@@ -736,13 +736,12 @@ function exportSlaCsv() {
   const rows = window._slaRows || [];
   if (!rows.length) { toast("暂无数据可导出", "err"); return; }
   const head = ["业务系统", "接口", "URL", "可用率(%)", "估算停机(分钟)", "P95(ms)", "P99(ms)", "探测数"];
-  const csvCell = x => `"${String(x).replace(/"/g, '""')}"`;
-  const lines = [head.map(csvCell).join(",")].concat(rows.map(r => [
+  // 系统名 / 接口名 / URL 都是用户与被监控侧填进来的自由文本 → 统一走 expRowsToCsv 中和公式。
+  const csv = expRowsToCsv(head, rows.map(r => [
     r.system, r.endpoint, r.url, (r.availability || 0).toFixed(3), (r.downtime_min || 0).toFixed(0),
     (r.p95_ms || 0).toFixed(0), (r.p99_ms || 0).toFixed(0), (r.samples || 0).toFixed(0)
-  ].map(csvCell).join(",")));
-  const bom = String.fromCharCode(0xFEFF); // UTF-8 BOM，保证 Excel 正确识别中文
-  const blob = new Blob([bom + lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
+  ]));
+  const blob = new Blob([EXP_CSV_BOM + csv], { type: "text/csv;charset=utf-8" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob); a.download = "sla-report.csv"; a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);

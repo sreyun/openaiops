@@ -254,15 +254,19 @@ window.exportNfCSV = function() {
   const flows = window._nfFlowsCache || [];
   if (flows.length === 0) return;
 
-  // org 里可能含逗号（如 "GOOGLE, US"），这些富化字段必须加引号转义。
-  const q = s => `"${String(s == null ? "" : s).replace(/"/g, '""')}"`;
-  let csv = "source,src_ip,src_port,dst_ip,dst_port,protocol,bytes,packets,first_seen,last_seen,dst_host,dst_org,dst_country,src_host,src_org\n";
-  flows.forEach(f => {
+  // 富化字段（反查域名 / WHOIS 组织名）是外部可影响的文本：org 里带逗号（"GOOGLE, US"）
+  // 只是显示错位，以 = 开头则会在 Excel 里当公式执行。整表统一走 expRowsToCsv：
+  // 每一格都加引号（原来只有 5 个富化字段加，first_seen 之类含逗号就会串列），并中和公式。
+  const head = ["source", "src_ip", "src_port", "dst_ip", "dst_port", "protocol", "bytes", "packets",
+    "first_seen", "last_seen", "dst_host", "dst_org", "dst_country", "src_host", "src_org"];
+  const csv = expRowsToCsv(head, flows.map(f => {
     const de = f.dst_enrich || {}, se = f.src_enrich || {};
-    csv += `${f.source},${f.src_ip},${f.src_port},${f.dst_ip},${f.dst_port},${f.protocol},${f.bytes},${f.packets},${f.first_seen || ""},${f.last_seen || ""},${q(de.host)},${q(de.org)},${q(de.country)},${q(se.host)},${q(se.org)}\n`;
-  });
+    return [f.source, f.src_ip, f.src_port, f.dst_ip, f.dst_port, f.protocol, f.bytes, f.packets,
+      f.first_seen || "", f.last_seen || "", de.host, de.org, de.country, se.host, se.org];
+  }));
 
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  // BOM：中文组织名（"阿里云计算有限公司"）不带 BOM 在 Excel 里就是乱码。
+  const blob = new Blob([EXP_CSV_BOM + csv], { type: "text/csv;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;

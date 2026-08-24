@@ -174,6 +174,7 @@ GROUP BY 1 ORDER BY COUNT(*) DESC`, expID, sinceTs)
 			"unhelpful": unhelpful, "applied": applied, "helpful_rate": rate,
 		})
 	}
+	noteRowsErr("aiExperimentStats", rows)
 	return out
 }
 
@@ -293,6 +294,7 @@ func (p *pgStore) listAIExperiments() []aiExperiment {
 		}
 		out = append(out, exp)
 	}
+	noteRowsErr("listAIExperiments", rows)
 	return out
 }
 

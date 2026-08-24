@@ -7,6 +7,12 @@
 (function() {
   "use strict";
   var DICT_ZH = {
+  "license.banner_grace": "授权已过期，正处于宽限期：功能未受影响，请尽快续期。",
+  "license.banner_expired": "授权已过期且超出宽限期：写操作已降级为只读，采集与告警仍在运行。",
+  "license.banner_over_quota": "已达授权主机数上限：新主机无法注册，已登记主机不受影响。",
+  "license.banner_invalid": "授权文件无效（签名或部署指纹不匹配），请重新上传。",
+  "license.banner_unlicensed": "尚未安装授权文件：写操作已降级为只读。",
+  "license.hosts": "主机用量",
   "toast.deleted": "已删除",
   "toast.host_deleted": "已删除主机",
   "toast.saved": "已保存",

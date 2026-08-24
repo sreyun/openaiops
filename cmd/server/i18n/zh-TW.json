@@ -463,5 +463,21 @@
   "log.terminal_password_set": "設定終端密碼：%s",
   "log.terminal_verified": "終端密碼驗證通過：%s",
   "agent_update.actor": "Agent 升級",
-  "platform.self_fault": "平台自檢"
+  "platform.self_fault": "平台自檢",
+  "license.read_only": "授權已過期，平台已降級為唯讀：採集、告警與 Agent 回報照常運行，寫入操作需續期後恢復。請聯繫供應商續期後在「系統設定 → 授權」上傳新的授權檔案。",
+  "license.host_quota": "已達授權主機數上限或授權已過期，新主機暫時無法註冊；已登記主機的採集不受影響。",
+  "license.invalid": "授權檔案無效",
+  "license.bad_format": "授權檔案格式不正確，請確認貼上的是完整內容",
+  "license.bad_signature": "授權檔案簽章驗證失敗，可能遭竄改或來自其他簽發方",
+  "license.install_mismatch": "授權檔案綁定的部署指紋與本部署不一致，請用本頁顯示的部署指紋重新簽發",
+  "log.license_installed": "安裝授權：客戶 %s，主機上限 %d，有效期至 %s",
+  "log.license_install_failed": "授權安裝失敗：%s",
+  "log.license_removed": "移除授權檔案",
+  "log.license_expiring": "授權到期提醒：客戶 %s，有效期至 %s，剩餘 %d 天",
+  "log.license_host_rejected": "授權限制：拒絕新主機註冊 %s（已用 %d / 上限 %d）",
+  "log.support_bundle_export": "匯出平台診斷包",
+  "log.backup_full": "建立整套備份（PG+時序+錄影）：%s；失敗 %d 項",
+  "backup.full_hint": "PostgreSQL 用備份清單的「還原」；時序用 vmctl 或 curl 推回 /api/v1/import/native；錄影解壓回錄影目錄。完整步驟見 docs/DEPLOY_GUIDE.md「備份與還原」。",
+  "license.not_installed": "本部署尚未安裝授權檔案，寫入操作已降級為唯讀：採集、告警與 Agent 回報照常運行。請向供應商索取授權檔案後，在控制台「授權與用量」上傳。",
+  "license.read_only_invalid": "授權檔案無效（簽章或部署指紋不符），寫入操作已降級為唯讀。請用控制台顯示的部署指紋重新簽發。"
 }

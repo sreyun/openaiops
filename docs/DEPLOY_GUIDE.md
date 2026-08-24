@@ -54,8 +54,19 @@
 ## 三、备份与升级
 
 - **PostgreSQL**：定期 `pg_dump` 或流复制；备份包含审计、事件、工单与 RAG 向量。Web 管理员可在「个人信息 → 数据与备份」启用每日自动备份、下载与二次确认还原（需服务端 PATH 含 `pg_dump` / `pg_restore`，目录默认 `./backups` 或环境变量 `AIOPS_BACKUP_DIR`）。还原后建议重启服务端以刷新内存态。
-- **VictoriaMetrics**：按保留策略与存储容量规划；如需长期归档，配置远端对象存储。本迭代 Web 备份**不包含** VM / `./data` 录音目录，请继续用外部方案。
+- **VictoriaMetrics 与录像**：控制台「备份范围」里可开启 **包含时序数据** 与 **包含终端/桌面录像**（默认关闭，因为它们明显占盘）。开启后「整套备份」与每日计划会一并导出：时序走 VM 的 `/api/v1/export/native` 落成 `aiops-vm-*.native.gz`，录像打成 `aiops-rec-*.tar.gz`，与 PG 备份同目录、同台账、**按种类各留 N 份**。
+- **恢复演练**：`scripts/backup-verify.sh` 会起一次性 PostgreSQL / VictoriaMetrics 容器，把备份真的还原一遍并跑存活性查询，全程不碰生产。**"有备份"和"恢复得回来"是两件事**，交付与验收都以这份输出为准。
+
+  ```bash
+  BACKUP_DIR=/data/backups bash scripts/backup-verify.sh
+  ```
+
+- **各类备份怎么还原**：PostgreSQL 用备份列表里的「还原」（删库重建模式，还原前自动打保护性备份）；时序用 `gzip -dc aiops-vm-*.native.gz | curl --data-binary @- "$VM_URL/api/v1/import/native"`；录像 `tar -xzf aiops-rec-*.tar.gz` 解回录像目录。时序/录像备份**不能**走 PostgreSQL 还原流程，服务端会在删库之前拦住。
 - **配置**：`AIOPS_SECRET_KEY`、`AIOPS_RELAY_SECRET` 等密钥请纳入密钥管理，升级时保持不变以避免数据不可解密。
+- **平台自身可观测**：`GET /metrics` 输出 Prometheus 文本格式（在线率、告警数、VM 熔断与丢样、`pgFlush` 延迟、PG 连接池、授权余量、goroutine/内存）。用 `AIOPS_METRICS_TOKEN` 配 Bearer 令牌（也支持 `?token=`）；未配置时退回会话鉴权，**不会匿名开放**。推荐告警线见 `docs/CAPACITY.md` 第三节。
+- **一键诊断包**：`GET /api/v1/admin/support-bundle`（管理员）下载 zip，含版本、脱敏配置、迁移版本、PG/VM 连通性、最近活动日志与 goroutine 快照，可直接发给技术支持；**不含任何密钥与业务数据**。
+- **授权（商业交付）**：授权文件离线验签，超限/到期只降级不停服——采集、告警与 Agent 上报照常，被拦的是新主机注册与人发起的写操作。安装入口在控制台「授权与用量」。签发与状态机见 `docs/COMMERCIAL_DELIVERY.md`。
+- **容量规格**：报价与验收口径见 `docs/CAPACITY.md`（每台主机的内存下界是量出来的，PG/VM 给了公式与实测命令）。
 - **升级**：建议先在预发环境验证，再滚动升级服务端；采集端可分批灰度。
 - **升级命令（docker compose 部署，务必带 `pull`）**：
 

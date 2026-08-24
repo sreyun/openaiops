@@ -123,22 +123,41 @@ var (
 	pbPersistLast = map[int64]time.Time{}
 )
 
+// 去抖表按**执行实例 id** 建键，而 id 只增不减：一台跑了半年的服务端上，这张表会
+// 攒下每一次剧本执行的时间戳，永远不删。单条不大，但它是纯粹的只涨不落——
+// 超过阈值就把早已超过去抖窗口的键清掉（那些键留着也起不到任何去抖作用）。
+const pbPersistLastMax = 4096
+
+func pbPrunePersistLocked(now time.Time) {
+	if len(pbPersistLast) <= pbPersistLastMax {
+		return
+	}
+	for id, t := range pbPersistLast {
+		if now.Sub(t) >= playbookPersistMinGap {
+			delete(pbPersistLast, id)
+		}
+	}
+}
+
 func (s *Server) persistPlaybookExecutionDebounced(id int64, force bool) {
 	if s == nil || s.pg == nil || id == 0 {
 		return
 	}
+	now := time.Now()
 	if !force {
 		pbPersistMu.Lock()
 		last := pbPersistLast[id]
-		if time.Since(last) < playbookPersistMinGap {
+		if now.Sub(last) < playbookPersistMinGap {
 			pbPersistMu.Unlock()
 			return
 		}
-		pbPersistLast[id] = time.Now()
+		pbPrunePersistLocked(now)
+		pbPersistLast[id] = now
 		pbPersistMu.Unlock()
 	} else {
 		pbPersistMu.Lock()
-		pbPersistLast[id] = time.Now()
+		pbPrunePersistLocked(now)
+		pbPersistLast[id] = now
 		pbPersistMu.Unlock()
 	}
 	s.persistPlaybookExecution(id)

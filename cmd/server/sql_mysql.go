@@ -441,6 +441,7 @@ func mysqlFetchMetadataInSchema(c MySQLConnection, schema string, tables []strin
 			tm.TableRows = tr.Int64
 			tm.AvgRowLen = ar.Int64
 		}
+		noteRowsErr("mysqlFetchMetadataInSchema#1", rows)
 	}
 
 	// COLUMNS
@@ -464,6 +465,7 @@ func mysqlFetchMetadataInSchema(c MySQLConnection, schema string, tables []strin
 				Name: cname, DataType: dtype, Nullable: strings.EqualFold(nullable, "YES"),
 			})
 		}
+		noteRowsErr("mysqlFetchMetadataInSchema#2", rows)
 	}
 
 	// STATISTICS → indexes
@@ -498,6 +500,7 @@ func mysqlFetchMetadataInSchema(c MySQLConnection, schema string, tables []strin
 			}
 			b.cols = append(b.cols, cname)
 		}
+		noteRowsErr("mysqlFetchMetadataInSchema#3", rows)
 	}
 	for tk, idxs := range building {
 		tm := meta[tk]
@@ -592,6 +595,7 @@ func mysqlSchema(c MySQLConnection, database, table string) (map[string]any, err
 			}
 			dbs = append(dbs, name)
 		}
+		noteRowsErr("mysqlSchema#1", rows)
 		return map[string]any{"databases": dbs}, nil
 	}
 
@@ -614,6 +618,7 @@ func mysqlSchema(c MySQLConnection, database, table string) (map[string]any, err
 			}
 			tables = append(tables, name)
 		}
+		noteRowsErr("mysqlSchema#2", rows)
 		return map[string]any{"database": dbName, "tables": tables}, nil
 	}
 
@@ -649,6 +654,7 @@ func mysqlSchema(c MySQLConnection, database, table string) (map[string]any, err
 		}
 		columns = append(columns, m)
 	}
+	noteRowsErr("mysqlSchema#3", colRows)
 	idxRows, err := db.QueryContext(ctx, "SHOW INDEX FROM "+qualified)
 	if err != nil {
 		return nil, err
@@ -671,6 +677,7 @@ func mysqlSchema(c MySQLConnection, database, table string) (map[string]any, err
 		}
 		indexes = append(indexes, m)
 	}
+	noteRowsErr("mysqlSchema#4", idxRows)
 	var createSQL string
 	var tblName string
 	if err := db.QueryRowContext(ctx, "SHOW CREATE TABLE "+qualified).Scan(&tblName, &createSQL); err != nil {

@@ -535,4 +535,5 @@ WHERE par.relname = $1 AND c.relkind = 'r'`, parent)
 			slog.Info("dropped old partition", "table", name)
 		}
 	}
+	noteRowsErr("cleanupOldTSPartitions", rows)
 }

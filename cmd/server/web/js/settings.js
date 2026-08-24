@@ -2352,7 +2352,7 @@ function showSetNewPassword(token) {
       const j = await r.json().catch(() => ({}));
       if (r.ok) {
         body.innerHTML = `
-          <div class="mfa-desc" style="margin-bottom:14px;color:var(--ok);font-weight:600">✓ ${j.message || I18N.t("toast.password_reset2")}</div>
+          <div class="mfa-desc" style="margin-bottom:14px;color:var(--ok);font-weight:600">✓ ${esc(j.message || I18N.t("toast.password_reset2"))}</div>
           <div class="mfa-foot"><button class="btn primary" id="rcClose" type="button">${I18N.t("recover.back_to_login")}</button></div>`;
         $("rcClose").onclick = () => $("recoverMask").classList.remove("show");
         toast(j.message || I18N.t("toast.password_reset2"), "ok");
@@ -2406,8 +2406,12 @@ async function loadOpsAdmin() {
     if ($("bakRemoteAccessKey")) $("bakRemoteAccessKey").value = rem.access_key || "";
     if ($("bakRemoteSecretKey")) $("bakRemoteSecretKey").value = "";
     if ($("bakRemotePrefix")) $("bakRemotePrefix").value = rem.prefix || "";
+    if ($("bakIncludeVM")) $("bakIncludeVM").checked = !!bak.include_vm;
+    if ($("bakVMDays")) $("bakVMDays").value = bak.vm_days || 90;
+    if ($("bakIncludeRec")) $("bakIncludeRec").checked = !!bak.include_recordings;
   } catch (e) { /* non-admin or API missing */ }
   await loadBackupList();
+  await loadLicenseInfo();
   await loadStatusPageCfg();
   await loadTicketSlaCfg();
   await loadSecretRotateStatus();
@@ -2467,7 +2471,10 @@ async function saveBackupCfg() {
       access_key: ($("bakRemoteAccessKey") && $("bakRemoteAccessKey").value || "").trim(),
       secret_key: ($("bakRemoteSecretKey") && $("bakRemoteSecretKey").value || "").trim(),
       prefix: ($("bakRemotePrefix") && $("bakRemotePrefix").value || "").trim()
-    }
+    },
+    include_vm: !!($("bakIncludeVM") && $("bakIncludeVM").checked),
+    vm_days: parseInt(($("bakVMDays") && $("bakVMDays").value) || "90", 10) || 90,
+    include_recordings: !!($("bakIncludeRec") && $("bakIncludeRec").checked)
   };
   const r = await fetch(`${API}/admin/backup-config`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   const j = await r.json().catch(() => ({}));
@@ -2565,6 +2572,68 @@ async function createBackupNow() {
     else toast(j.error || "备份失败（请确认 pg_dump 在 PATH）", "err");
   });
 }
+/* ---------- 授权与计量 ---------- */
+// 经典版是默认出厂界面：授权必须能在这里装，不能只在 /v2 里有入口——
+// 没构建前端的二进制里 /v2 是 404，那时管理员将无处上传授权文件。
+async function loadLicenseInfo() {
+  const el = $("licInfo"); if (!el) return;
+  try {
+    const l = await fetch(`${API}/license`).then(r => r.json());
+    if (!l || typeof l !== "object") throw new Error("bad payload");
+    const stateText = {
+      active: "生效中", grace: "已过期（宽限期内）", expired: "已过期",
+      over_quota: "主机数超限", invalid: "授权文件无效", unlicensed: "未安装授权"
+    }[l.state] || l.state || "";
+    const cls = (l.state === "expired" || l.state === "invalid") ? "crit"
+      : (l.state === "active" ? "ok" : "warn");
+    const expires = l.expires_at ? fmtDateTime(l.expires_at) : "永久";
+    const daysNote = l.expires_at
+      ? (l.days_left >= 0 ? `剩余 ${l.days_left} 天` : `已过期 ${-l.days_left} 天`)
+      : "";
+    const quota = `${l.used_hosts || 0} / ${l.max_hosts ? l.max_hosts : "不限"}（历史峰值 ${l.peak_hosts || 0}）`;
+    el.innerHTML = `<div class="sre-row"><div class="sre-row-main">
+        <div class="sre-row-title"><span class="tag ${cls}">${esc(stateText)}</span>${l.enforced ? "" : ' <span class="tag">未强制</span>'} ${esc(l.customer || "")}</div>
+        <div class="sre-row-sub">有效期至 ${esc(expires)} ${esc(daysNote)} · 主机用量 ${esc(quota)}${l.error ? " · " + esc(l.error) : ""}</div>
+        <div class="sre-row-sub mono">部署指纹：${esc(l.install_id || "")}</div>
+      </div></div>`;
+  } catch (e) { el.innerHTML = `<div class="empty-line">授权状态加载失败（需管理员）</div>`; }
+}
+async function installLicense() {
+  const raw = ($("licText") && $("licText").value || "").trim();
+  if (!raw) { toast("请先粘贴授权文件内容", "err"); return; }
+  await withLoading("licInstallBtn", async () => {
+    const r = await fetch(`${API}/admin/license`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ license: raw })
+    });
+    const j = await r.json().catch(() => ({}));
+    if (r.ok) { toast("授权已安装", "ok"); if ($("licText")) $("licText").value = ""; await loadLicenseInfo(); }
+    else toast(j.error || "授权安装失败", "err");
+  });
+}
+async function removeLicenseNow() {
+  const conf = await requestAITextInput({
+    title: "确认移除授权", message: "强制授权的部署会立即降级为只读（采集与告警不受影响）。输入 REMOVE 确认：",
+    label: "确认文本", placeholder: "REMOVE", submitLabel: "确认移除",
+    singleLine: true, maxLength: 32, danger: true, requiredMessage: "请输入 REMOVE"
+  });
+  if (!conf || conf.trim().toUpperCase() !== "REMOVE") return;
+  const r = await fetch(`${API}/admin/license`, { method: "DELETE" });
+  const j = await r.json().catch(() => ({}));
+  if (r.ok) { toast("授权已移除", "ok"); await loadLicenseInfo(); }
+  else toast(j.error || "移除失败", "err");
+}
+async function createFullBackupNow() {
+  await withLoading("bakFullBtn", async () => {
+    const r = await fetch(`${API}/admin/backups/full`, { method: "POST" });
+    const j = await r.json().catch(() => ({}));
+    const errs = (j && j.errors) || {};
+    const failed = Object.keys(errs);
+    if (r.ok && !failed.length) toast("整套备份完成", "ok");
+    else if (r.ok) toast("部分备份失败（" + failed.join("、") + "）：" + (errs[failed[0]] || ""), "err");
+    else toast(j.error || "整套备份失败", "err");
+    await loadBackupList();
+  });
+}
 async function restoreBackup(id) {
   const conf = await requestAITextInput({
     title:"确认还原数据库",message:`还原会覆盖当前 PostgreSQL 数据。请输入 RESTORE 或备份 ID 确认：${id}`,
@@ -2583,6 +2652,10 @@ safeAddEventListener("retSaveBtn", "click", saveRetentionCfg);
 safeAddEventListener("cmdPolSaveBtn", "click", saveCmdPolicyCfg);
 safeAddEventListener("bakCfgSaveBtn", "click", saveBackupCfg);
 safeAddEventListener("bakNowBtn", "click", createBackupNow);
+safeAddEventListener("bakFullBtn", "click", createFullBackupNow);
+safeAddEventListener("licInstallBtn", "click", installLicense);
+safeAddEventListener("licRemoveBtn", "click", removeLicenseNow);
+safeAddEventListener("licRefreshBtn", "click", loadLicenseInfo);
 safeAddEventListener("statusPageSaveBtn", "click", saveStatusPageCfg);
 safeAddEventListener("ticketSlaSaveBtn", "click", saveTicketSlaCfg);
 safeAddEventListener("ticketSlaBreachBtn", "click", showTicketSlaBreaches);

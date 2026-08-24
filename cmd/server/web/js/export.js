@@ -51,6 +51,35 @@ const expSafeName = s => String(s || "export")
 
 const expStamp = () => new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
 
+/* ---------------------------- CSV ----------------------------
+ * xlsx 走 t="inlineStr"，单元格天然是字面量；CSV 没有这层保护——
+ * Excel / WPS / LibreOffice / Numbers 打开时，以 = + - @（以及解析前会被剥掉的
+ * 前导 Tab / CR）开头的格子按公式求值，`=cmd|'/c calc'!A1` 这类载荷会在打开
+ * 报表的人机器上落地。而这些格子里装的正是 Agent 与网络侧来的文本：主机名、
+ * 日志正文、告警内容、NetFlow 的反查域名与 WHOIS 组织名——全是外部可影响的。
+ *
+ * 判据与新版控制台 src/shared/export.ts 的 rowsToCSV、Android 的 HyperVExport
+ * 保持一致：只有纯数字（"-12"、"+3.5"）放行，否则数值列会被单引号毁掉。
+ */
+const expCsvNeutralize = s => {
+  const v = String(s == null ? "" : s);
+  if (!/^[=+\-@\t\r]/.test(v)) return v;
+  if (/^[+-]?\d+(\.\d+)?$/.test(v)) return v;
+  return "'" + v;
+};
+
+/** 一格 CSV：先中和公式，再按 RFC 4180 加引号。所有导出都必须走这里。 */
+const expCsvCell = s => `"${expCsvNeutralize(s).replace(/"/g, '""')}"`;
+
+/** 表头 + 数据行 → CSV 文本（CRLF 行尾，Excel 最省事）。 */
+const expRowsToCsv = (head, rows) =>
+  [head.map(expCsvCell).join(",")]
+    .concat(rows.map(r => r.map(expCsvCell).join(",")))
+    .join("\r\n");
+
+/** UTF-8 BOM：不带 BOM 的中文 CSV 在 Excel 里必然乱码。 */
+const EXP_CSV_BOM = "\uFEFF";
+
 /* ============================ 最小 ZIP（STORE） ============================ */
 
 function expCrc32(u8) {

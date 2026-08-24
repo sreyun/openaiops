@@ -197,6 +197,7 @@ func pgExplain(c MySQLConnection, sqlText string) (map[string]any, error) {
 				lines = append(lines, line)
 			}
 		}
+		noteRowsErr("pgExplain", rs)
 		planText = strings.Join(lines, "\n")
 	}
 
@@ -504,6 +505,7 @@ ORDER BY nspname`)
 				dbs = append(dbs, name)
 			}
 		}
+		noteRowsErr("pgSchema#1", rs)
 		return map[string]any{"driver": "postgres", "databases": dbs, "schemas": dbs}, nil
 	}
 
@@ -528,6 +530,7 @@ ORDER BY c.relname`, schema)
 				tables = append(tables, name)
 			}
 		}
+		noteRowsErr("pgSchema#2", rs)
 		return map[string]any{"driver": "postgres", "database": schema, "schema": schema, "tables": tables}, nil
 	}
 
@@ -560,6 +563,7 @@ ORDER BY a.attnum`, schema, table)
 			"Default": def, "Comment": comment,
 		})
 	}
+	noteRowsErr("pgSchema#3", rs)
 	idxRows, err := db.QueryContext(ctx, `
 SELECT i.relname, ix.indisunique, array_to_string(array_agg(a.attname ORDER BY x.n), ',')
 FROM pg_index ix
@@ -581,6 +585,7 @@ ORDER BY i.relname`, schema, table)
 				indexes = append(indexes, map[string]any{"Key_name": name, "Non_unique": map[bool]int{true: 0, false: 1}[unique], "Columns": cols})
 			}
 		}
+		noteRowsErr("pgSchema#4", idxRows)
 	}
 	return map[string]any{
 		"driver": "postgres", "database": schema, "schema": schema, "table": table,
@@ -620,6 +625,7 @@ LIMIT 50`)
 				})
 			}
 		}
+		noteRowsErr("pgSchemaHealth#1", rs)
 		rs.Close()
 	}
 
@@ -647,6 +653,7 @@ LIMIT 30`)
 				})
 			}
 		}
+		noteRowsErr("pgSchemaHealth#2", rs2)
 		rs2.Close()
 	}
 
@@ -675,6 +682,7 @@ LIMIT 40`)
 				})
 			}
 		}
+		noteRowsErr("pgSchemaHealth#3", rs3)
 		rs3.Close()
 	}
 
@@ -697,6 +705,7 @@ LIMIT 30`)
 				})
 			}
 		}
+		noteRowsErr("pgSchemaHealth#4", rs4)
 		rs4.Close()
 	}
 	return out, nil

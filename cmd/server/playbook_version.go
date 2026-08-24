@@ -77,6 +77,7 @@ WHERE playbook_id=$1 ORDER BY rev DESC LIMIT $2`, id, limit)
 		_ = json.Unmarshal(raw, &r.Snapshot)
 		out = append(out, r)
 	}
+	noteRowsErr("listPlaybookRevisions", rows)
 	return out
 }
 

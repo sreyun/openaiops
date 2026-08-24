@@ -100,5 +100,6 @@ FROM ai_tool_audit ORDER BY ts DESC LIMIT $1`, limit)
 			out = append(out, e)
 		}
 	}
+	noteRowsErr("listAIToolAudit", rows)
 	return out
 }

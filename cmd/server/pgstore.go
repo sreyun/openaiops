@@ -1122,6 +1122,7 @@ func (p *pgStore) listTermRecordings(limit int) []termSessionInfo {
 			out = append(out, info)
 		}
 	}
+	noteRowsErr("listTermRecordings", rows)
 	return out
 }
 
@@ -1595,6 +1596,7 @@ func (p *pgStore) searchMemoryByKind(emb []float64, preferKind string, limit int
 					seen[key] = true
 				}
 			}
+			noteRowsErr("searchMemoryByKind", rows2)
 		}
 	}
 	return out, rows.Err()
@@ -2215,6 +2217,7 @@ func (p *pgStore) memoryKindStats() map[string]int {
 			out[k] = n
 		}
 	}
+	noteRowsErr("memoryKindStats", rows)
 	return out
 }
 
@@ -2237,6 +2240,7 @@ func (p *pgStore) memoriesForDistill(sinceTs int64, limit int) []memoryHit {
 			out = append(out, m)
 		}
 	}
+	noteRowsErr("memoriesForDistill", rows)
 	return out
 }
 
@@ -2315,6 +2319,7 @@ func (p *pgStore) capMemoriesByKind(maxPerKind int) {
 			totalDeleted += n
 		}
 	}
+	noteRowsErr("capMemoriesByKind", rows)
 	if totalDeleted > 0 {
 		slog.Info("记忆容量裁剪完成", "删除总数", totalDeleted, "上限", maxPerKind)
 	}
@@ -2731,6 +2736,7 @@ const (
 // changes every cycle — the aggregated-log blob and the metric-carrying half of
 // the hosts rows — so the 15s flush does not rewrite them every time.
 func (s *Server) pgFlush(ps *pgStore, heavy bool) {
+	defer observePGFlush(time.Now(), heavy) // 刷写延迟是 PG 撑不撑得住最早的信号，见 metrics_prom.go
 	if err := ps.saveIncidents(s.incidents.Export()); err != nil {
 		slog.Warn("PG 同步事件失败", "err", err)
 	}
@@ -3379,6 +3385,7 @@ func (p *pgStore) getFlowIPHistory(hostID, dimension, ip string, from, to int64)
 			"flows": flows, "peers": peers, "avg_packet_bytes": avg,
 		})
 	}
+	noteRowsErr("getFlowIPHistory", rows)
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
@@ -4056,6 +4063,7 @@ WHERE p.relname = 'flow_records' AND c.relkind = 'r'`)
 			slog.Info("dropped old flow partition", "table", name)
 		}
 	}
+	noteRowsErr("cleanupOldFlowPartitions", rows)
 }
 
 func quoteIdent(name string) string {

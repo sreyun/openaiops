@@ -141,6 +141,7 @@ GROUP BY 1 ORDER BY COUNT(*) DESC LIMIT 40`, sinceTs)
 		}
 		out[model] = aiModelAgg{Count: cnt, Fail: fl, Tokens: tokens, ApproxTokens: approxTokens, Cost: costF, AvgMs: avg}
 	}
+	noteRowsErr("aiCallByModelFromPG", rows)
 	return out
 }
 
@@ -185,6 +186,7 @@ GROUP BY 1 ORDER BY SUM(cost_estimate) DESC NULLS LAST LIMIT 40`, sinceTs)
 		}
 		out[task] = aiTaskCostAgg{Count: cnt, Fail: fl, Cost: costF, Tokens: tokens, AvgMs: avg}
 	}
+	noteRowsErr("aiCallByTaskCostFromPG", rows)
 	return out
 }
 
@@ -226,5 +228,6 @@ GROUP BY 1 ORDER BY COUNT(*) DESC`, sinceTs)
 		}
 		out[r] = aiRouteReasonAgg{Count: cnt, Fail: fl, Cost: costF, AvgMs: avg}
 	}
+	noteRowsErr("aiCallByRouteReasonFromPG", rows)
 	return out
 }

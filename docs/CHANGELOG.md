@@ -13,13 +13,31 @@
 
 ## [Unreleased]
 
+### 商业化交付（对外售卖前的三块短板）
+
+- **授权与计量层**：Ed25519 签名的离线授权文件（客户内网不需要联网回调），锁「最大主机数 + 到期日 + 部署指纹」。
+  超限与过期**只降级不停服**——采集、告警与 Agent 上报在任何状态下都照常运行，被拦的只有新主机注册与人发起的写操作，
+  登录 / 改密 / 上传授权、以及 Prometheus remote_write 等所有数据摄入通道始终放行
+  （拦摄入等于授权一过期就开始丢客户数据，补不回来）。默认不强制（开源自建不受影响），商业镜像用 `-X main.licenseEnforceDefault=1`
+  或 `AIOPS_LICENSE_ENFORCE=1` 打开。签发工具 `cmd/licensetool`（不交付给客户），控制台两版都有「授权与用量」入口。
+- **备份补齐另一半**：原来只有 `pg_dump`，时序曲线与终端/桌面录像都不在备份里。新增 VictoriaMetrics 原生导出与录像打包，
+  可在「备份范围」里开启，「整套备份」一次做完三件；保留策略改为**按种类各留 N 份**（否则新做的时序备份会被一串 PG 备份挤掉）。
+  配套 `scripts/backup-verify.sh`：起一次性 PG/VM 容器真还原一遍并跑存活性查询，不碰生产——"有备份"和"恢复得回来"是两件事。
+- **平台自身可观测**：新增 `GET /metrics`（Prometheus 文本格式）——在线率、告警面、VM 熔断与丢样、`pgFlush` 延迟、
+  PG 连接池、授权余量、goroutine/内存。用 `AIOPS_METRICS_TOKEN` 做 Bearer 鉴权，未配置时退回会话鉴权，不匿名开放。
+- **一键诊断包**：`GET /api/v1/admin/support-bundle` 打包版本、脱敏配置（与 `GET /api/v1/config` 同一份打码口径）、
+  迁移版本、PG/VM 连通性、最近活动日志、goroutine 快照与一份 `/metrics` 快照；不含任何密钥与业务数据。
+- **持续门禁**：新增 `.github/workflows/ci.yml`，push/PR 即跑 vet + 全量测试 + 前端 `npm run check` + 交叉编译，
+  并**带 postgres 服务真跑 PG 集成套件**（此前在 CI 里永远 skip）。供应链侧加 govulncheck 与 CycloneDX SBOM，
+  SBOM 随 Release 一起发布。
+
 ### 文档
 
 - **README 语种扩展**：新增繁中 / Deutsch / Français / Español / Português (Brasil) / Русский 入口页；深度文档仍以简中与 English 为准。
-
-### 变更
-
-（无）
+- **容量规格书** `docs/CAPACITY.md`：三档规格表、每台主机内存占用的实测公式（4.17 MB 下界）、PG/VM 容量算法与实测命令、
+  超限时的现象与对应指标、验收流程、可用性口径（单实例 + RTO/RPO，明确不承诺双活）。
+- **商业交付手册** `docs/COMMERCIAL_DELIVERY.md`：授权状态机与签发流程、交付前检查清单、售后先要诊断包、
+  以及"还没做、别承诺的事"（无选主 / 无多租户 / 迁移 forward-only）。
 
 ---
 

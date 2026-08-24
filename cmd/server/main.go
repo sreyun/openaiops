@@ -106,7 +106,7 @@ func listMissingAgentDist(dir string) []string {
 // 而不是任何一个 handler 里。
 func (s *Server) httpHandler() http.Handler {
 	return requestIDMiddleware(securityHeadersMiddleware(s.corsMiddleware(s.csrfOriginMiddleware(
-		gzipMiddleware(bodyLimitMiddleware(s.apiRateLimitMiddleware(s.authMiddleware(s.Routes()))))))))
+		gzipMiddleware(bodyLimitMiddleware(s.apiRateLimitMiddleware(s.authMiddleware(s.licenseGateMiddleware(s.Routes())))))))))
 }
 
 func (s *Server) corsMiddleware(next http.Handler) http.Handler {
@@ -307,7 +307,8 @@ func gzipMiddleware(next http.Handler) http.Handler {
 			strings.Contains(r.URL.Path, "/agent/desktop/") ||
 			strings.Contains(r.URL.Path, "/forward") || // port forwarding streams must not be buffered
 			strings.HasPrefix(r.URL.Path, "/proxy/") || // HTTP proxy tunnels must not be buffered
-			strings.HasPrefix(r.URL.Path, "/dl/") { // 二进制/zip 已是压缩态，再 gzip 无益且会破坏 Range 断点续传
+			strings.HasPrefix(r.URL.Path, "/dl/") || // 二进制/zip 已是压缩态，再 gzip 无益且会破坏 Range 断点续传
+			r.URL.Path == "/api/v1/admin/support-bundle" { // 诊断包本身就是 zip
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -437,6 +438,7 @@ func main() {
 	// 平台自身故障归口：把包级 panic 钩子接到这台 Server（见 self_fault.go）。
 	// 必须在拉起任何常驻循环之前装配，否则最早那几次 panic 会漏掉。
 	server.bindPlatformFaultSinks()
+	server.loadLicense() // 授权与计量：部署指纹 + 授权文件（kv_state 优先，其次 AIOPS_LICENSE_FILE）
 
 	go superviseLoop("alert-notifier", func() { notifier.Run(10 * time.Second) })                         // periodic alert evaluation + dedup push
 	go superviseLoop("checks", func() { server.checks.Run(5 * time.Second) })                             // custom HTTP/TCP synthetic checks
