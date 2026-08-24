@@ -528,3 +528,58 @@ func TestFimVolumeQuotaRespectsSmallLimit(t *testing.T) {
 		t.Fatalf("应当因为上限被截断：%+v", stats)
 	}
 }
+
+func TestFimOrderRootsForScanPrefersInProgressAndFewerCycles(t *testing.T) {
+	prev := map[string]fimRootState{
+		fimMatchKey("/early"): {Cycles: 3},
+		fimMatchKey("/late"):  {Next: "/late/x", Cycles: 0},
+		fimMatchKey("/mid"):   {Cycles: 1},
+	}
+	got := fimOrderRootsForScan([]string{"/early", "/mid", "/late"}, prev)
+	want := []string{"/late", "/mid", "/early"}
+	if len(got) != 3 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Fatalf("order=%v want %v", got, want)
+	}
+}
+
+// When an earlier same-volume root's size is an exact multiple of the shared
+// quota, finishing it used to leave files==quota with limitHit still false, so
+// the later root's WalkDir started and immediately SkipAll'd on its first entry.
+// The next scan reset the earlier root's cursor to "" (cycle restart), so it
+// consumed the entire quota again and the later root never advanced — baseline
+// permanently missing those paths (Windows C:\Users vs C:\ is this shape).
+// Inner `files >= quota` alone does not fix this; ordering + outer break required.
+func TestCollectFIMEarlierRootExactQuotaMustNotStarveLaterRoot(t *testing.T) {
+	root := t.TempDir()
+	early := filepath.Join(root, "early")
+	for i := 0; i < 16; i++ {
+		writeFile(t, filepath.Join(early, "f"+strconv.Itoa(i)+".txt"), "x\n")
+	}
+	for i := 0; i < 10; i++ {
+		writeFile(t, filepath.Join(root, "late", "g"+strconv.Itoa(i)+".txt"), "y\n")
+	}
+
+	opts := fimTestOpts(t, root)
+	opts.Roots = []string{early, root}
+	opts.MaxFiles = 8
+
+	late0 := fimNormPath(filepath.Join(root, "late", "g0.txt"))
+	late9 := fimNormPath(filepath.Join(root, "late", "g9.txt"))
+	var covered0, covered9 bool
+	for i := 0; i < 50; i++ {
+		collectFIMChanges(opts)
+		base, _ := fimLoadBaseline(fimBaselinePath())
+		if _, ok := base[late0]; ok {
+			covered0 = true
+		}
+		if _, ok := base[late9]; ok {
+			covered9 = true
+		}
+		if covered0 && covered9 {
+			t.Logf("both late files covered after %d scans", i+1)
+			return
+		}
+	}
+	st := fimLoadScanState()
+	t.Fatalf("later root starved (g0=%v g9=%v); cursors=%+v", covered0, covered9, st.Roots)
+}
