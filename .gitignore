@@ -77,11 +77,8 @@ fix-summary.html
 *_UPGRADE.md
 *_EVAL_AND_HARDENING.md
 
-# 产品官网：跟踪源码，忽略本地 SQLite 数据
-# website/
-website/data/
-website/*.db
-website/*.db-*
+# 产品官网（禁止提交到开源仓库）
+website/
 
 # 已废弃的独立前端工程（勿再纳入主仓；控制台仅经典版 cmd/server/web）
 frontend/

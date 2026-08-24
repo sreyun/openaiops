@@ -315,8 +315,6 @@ Browser / mobile* ──REST/WS──► Go server ──► PostgreSQL
 - Windows lock-screen desktop needs a **service-installed** agent  
 - Mobile packages are external to this repo  
 
-Optional paid services (deploy consulting, SSO, private mobile signing, etc.) sit on top of the AGPL-3.0 core — open an Issue to discuss.
-
 ---
 
 ## Contributing
