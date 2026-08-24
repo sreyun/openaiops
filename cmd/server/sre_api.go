@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -303,10 +304,42 @@ func (s *Server) effectiveCategory(hostID string) string {
 	return ""
 }
 
+// slowDegradeLast 是每台主机上一次跑趋势检测的时刻（包级变量：不往 Server 结构体上
+// 加字段，见仓库里的历史教训）。键是主机 ID，条目数因此被授权主机数天然限住。
+var (
+	slowDegradeMu   sync.Mutex
+	slowDegradeLast = map[string]int64{}
+)
+
+// slowDegradeMinInterval 是同一台主机两次趋势检测之间的最小间隔。
+//
+// 这个函数挂在每一次 Agent 上报之后，而它每次都要：把最多 240 条采样整份复制出来
+// （shared.Sample 是个大结构体，一次约 70 KB）、按三个指标各建一份 [][2]float64、
+// 再跑三次外推。500 台 × 30 秒一报 ≈ 每秒 17 遍，光这一处每秒就要扔掉一兆多的垃圾。
+//
+// 而它检测的东西按定义就是**慢**的：连涨三点是 90 秒的窗，外推看的是几小时到七天之后。
+// 每 5 分钟看一次和每 30 秒看一次，结论不会有任何差别（重复告警本来也由
+// incidents.raise 的去重键挡着），代价却差一个数量级。
+const slowDegradeMinInterval = 5 * 60
+
+// shouldRunSlowDegradation 做每主机限频，返回 true 表示这一轮该跑。
+func shouldRunSlowDegradation(hostID string, now int64) bool {
+	slowDegradeMu.Lock()
+	defer slowDegradeMu.Unlock()
+	if now-slowDegradeLast[hostID] < slowDegradeMinInterval {
+		return false
+	}
+	slowDegradeLast[hostID] = now
+	return true
+}
+
 // checkSlowDegradation detects slow resource degradation: if CPU/memory/disk
 // show an upward trend over the last 3 samples AND are approaching warning
 // thresholds (>85% of threshold), raise a warning incident with AI analysis.
 func (s *Server) checkSlowDegradation(hostID string) {
+	if !shouldRunSlowDegradation(hostID, time.Now().Unix()) {
+		return
+	}
 	samples, ok := s.store.GetSamples(hostID)
 	if !ok || len(samples) < 3 {
 		return

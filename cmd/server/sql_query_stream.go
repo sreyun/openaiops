@@ -169,6 +169,16 @@ func prepareSQLRead(ctx context.Context, c MySQLConnection, req sqlReadRequest, 
 			return nil, fmt.Errorf("设置语句超时失败：%w", err)
 		}
 		if schema != "" {
+			// 先确认这个 schema 真的存在，再去设 search_path。
+			//
+			// set_config('search_path', '不存在的名字') **不会报错**——PostgreSQL 照单全收，
+			// 于是错误一路推迟到用户那句 SELECT，最后以 `relation "xxx" does not exist` 的形式
+			// 冒出来。用户看到的是"我的表没了"，真相是"schema 选错了"，两者长得毫无关系。
+			// 这里提前拦一次，并把可选的 schema 列出来，让人一眼知道该选哪个。
+			if err := pgEnsureSchemaExists(ctx, conn, schema); err != nil {
+				sess.close()
+				return nil, err
+			}
 			if _, err := conn.ExecContext(ctx, `SELECT set_config('search_path', $1, false)`, schema); err != nil {
 				sess.close()
 				return nil, fmt.Errorf("设置 search_path 失败：%w", err)
@@ -220,6 +230,45 @@ func prepareSQLRead(ctx context.Context, c MySQLConnection, req sqlReadRequest, 
 		}
 	}
 	return sess, nil
+}
+
+// pgEnsureSchemaExists 在设 search_path 之前确认 schema 存在，不存在则给出可选清单。
+//
+// 为什么值得单独查一次：PostgreSQL 允许把 search_path 设成任何字符串，包括根本不存在的
+// schema。错误因此不会出现在"设置"这一步，而是变成后面每一句 SELECT 的
+// `relation "xxx" does not exist`——排查方向完全被带偏。多这一次 pg_namespace 查询
+// （毫秒级、走系统目录）换来的是一句能直接照做的报错。
+func pgEnsureSchemaExists(ctx context.Context, conn *sql.Conn, schema string) error {
+	var exists bool
+	if err := conn.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname = $1)`, schema).Scan(&exists); err != nil {
+		// 目录查不动就别拦路：把判断交回给真正的查询，至少不会平白多一条失败。
+		return nil
+	}
+	if exists {
+		return nil
+	}
+	var avail []string
+	if rows, err := conn.QueryContext(ctx,
+		`SELECT nspname FROM pg_namespace
+		 WHERE nspname NOT IN ('pg_catalog','information_schema','pg_toast')
+		   AND nspname NOT LIKE 'pg_temp_%' AND nspname NOT LIKE 'pg_toast_temp_%'
+		 ORDER BY nspname LIMIT 30`); err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var n string
+			if rows.Scan(&n) == nil {
+				avail = append(avail, n)
+			}
+		}
+		noteRowsErr("pgEnsureSchemaExists", rows)
+	}
+	if len(avail) == 0 {
+		return fmt.Errorf("schema %q 在当前数据库里不存在", schema)
+	}
+	return fmt.Errorf("schema %q 在当前数据库里不存在；可选：%s"+
+		"（注意 PostgreSQL 这里选的是 schema，不是库名——库由连接配置决定）",
+		schema, strings.Join(avail, "、"))
 }
 
 // sqlCellValue 把一个数据库值转成可以直接进 JSON / CSV 的形式，并截断超长文本。

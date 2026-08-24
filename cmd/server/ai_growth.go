@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,43 @@ type opsPatternHit struct {
 type aiGrowthHub struct {
 	mu       sync.Mutex
 	patterns map[string]*opsPatternHit // actor|fingerprint → hit
+}
+
+// 运维路径指纹是自由文本（由诊断步骤拼出来），键的取值空间没有上限，而这张表
+// 原本只增不减：跑上几个月，一个个几百字节的 Steps 就在内存里一直堆着，
+// 且**永远不会有人发现**——它不出现在任何指标或页面上。
+//
+// 两条界限一起用：太久没再出现的直接丢（重复运维路径的意义就在"最近还在重复"，
+// 半个月前只出现过一次的那条早就没有参考价值了），以及一个硬上限兜底，
+// 防止短时间内涌入大量互不相同的指纹。
+const (
+	opsPatternTTLSec  = 14 * 24 * 3600
+	opsPatternMaxKeys = 5000
+)
+
+// pruneLocked 丢掉过期条目；仍然超限时按最后出现时间从旧到新继续丢。
+// 调用方必须已持有 h.mu。
+func (h *aiGrowthHub) pruneLocked(now int64) {
+	for k, v := range h.patterns {
+		if v == nil || now-v.Last > opsPatternTTLSec {
+			delete(h.patterns, k)
+		}
+	}
+	if len(h.patterns) <= opsPatternMaxKeys {
+		return
+	}
+	type kv struct {
+		key  string
+		last int64
+	}
+	all := make([]kv, 0, len(h.patterns))
+	for k, v := range h.patterns {
+		all = append(all, kv{k, v.Last})
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].last < all[j].last })
+	for _, e := range all[:len(all)-opsPatternMaxKeys] {
+		delete(h.patterns, e.key)
+	}
 }
 
 func newAIGrowthHub() *aiGrowthHub {
@@ -115,15 +153,18 @@ func (s *Server) trackOpsPattern(actor, fingerprint, stepsSummary string) (propo
 		return false, "", "", ""
 	}
 	key := actor + "|" + fingerprint
+	now := time.Now().Unix()
 	growthHub.mu.Lock()
 	defer growthHub.mu.Unlock()
 	h := growthHub.patterns[key]
 	if h == nil {
+		// 只在**新增键**时清理：命中已有键不会让表变大，没必要每次都扫一遍。
+		growthHub.pruneLocked(now)
 		h = &opsPatternHit{Key: fingerprint, Steps: stepsSummary}
 		growthHub.patterns[key] = h
 	}
 	h.Count++
-	h.Last = time.Now().Unix()
+	h.Last = now
 	if stepsSummary != "" {
 		h.Steps = stepsSummary
 	}

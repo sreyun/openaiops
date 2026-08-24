@@ -364,6 +364,30 @@ function deskLooksPermissionError(msg) {
     || s.includes("not authorized");
 }
 
+/**
+ * 「这台机器上就是没法抓屏」——环境/能力缺失，重连三十次也一样。
+ *
+ * Linux 上没装 ffmpeg/grim，或者 Agent 跑在纯 SSH 无头会话里，都属于这一类：
+ * Agent 每开一次会话就回同一条几行长的处置指引，而重连机制会一路把它试满
+ * MAX_RETRY 次——白等一分多钟，屏幕上的说明也一直在被同一句话覆盖重写。
+ * 判成终态之后：第一条说明就停下，用户看到的是"去装个包"，而不是"还在重连"。
+ */
+function deskLooksCapabilityError(msg) {
+  const s = String(msg || "").toLowerCase();
+  return s.includes("no usable screen capture tool")
+    || s.includes("抓屏失败")
+    || s.includes("抓屏不可用")
+    || s.includes("cannot open display")
+    || s.includes("no display")
+    || s.includes("headless")
+    || s.includes("无头");
+}
+
+/** 不该重连的错误：权限类 + 能力缺失类。 */
+function deskErrorIsTerminal(msg) {
+  return deskLooksPermissionError(msg) || deskLooksCapabilityError(msg);
+}
+
 function setDesktopStatus(msg, isErr) {
   const el = $("deskStatus");
   if (!el) return;
@@ -656,7 +680,7 @@ function connectDesktopWS(id, name) {
     }
     // Auto-reconnect with backoff — but never spin on Screen Recording / fatal
     // permission errors (each attempt can re-trigger macOS TCC dialogs).
-    if (DESK_NO_RETRY || (prev === "error" && deskLooksPermissionError(DESK_META && DESK_META.lastError))) {
+    if (DESK_NO_RETRY || (prev === "error" && deskErrorIsTerminal(DESK_META && DESK_META.lastError))) {
       DESK_NO_RETRY = true;
       setDesktopStatus(I18N.t("desktop.disconnected"), true);
       setDeskDot("error");
@@ -885,7 +909,7 @@ function connectDesktopWS(id, name) {
             if (!isWarn) {
               setDeskDot("error");
               DESK_PHASE = "error";
-              if (deskLooksPermissionError(j.error)) {
+              if (deskErrorIsTerminal(j.error)) {
                 DESK_NO_RETRY = true;
                 DESK_INTENTIONAL_CLOSE = true; // stop WS retry storm / TCC spam
               }
@@ -900,7 +924,7 @@ function connectDesktopWS(id, name) {
           DESK_PHASE = "error";
           setDesktopStatus(msg, true);
           setDeskDot("error");
-          if (deskLooksPermissionError(msg)) {
+          if (deskErrorIsTerminal(msg)) {
             DESK_NO_RETRY = true;
             DESK_INTENTIONAL_CLOSE = true;
           }

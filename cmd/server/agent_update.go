@@ -1430,6 +1430,18 @@ func (s *Server) maybeAutoUpdateHost(hostID string) {
 	if s == nil || s.cfg == nil || s.agentUpdates == nil || hostID == "" {
 		return
 	}
+	// 总开关关掉时**在这里就返回**，别再往下走。
+	//
+	// 这个函数挂在每一次 Agent 上报之后（handleReport 里的 go maybeAutoUpdateHost），
+	// 是全平台最高频的路径：500 台 × 30 秒一报 ≈ 每秒 17 次。开关关着的时候，下面这串
+	// 每次都会白跑一遍 GetHost + decideAutoUpdate + recordSkip("disabled")；而
+	// recordSkip 的淘汰上限正好也是 500，于是机群一满，**每一次上报都要 O(500) 扫一遍
+	// 整张表**去找最老的一条——为一个没开的功能。
+	// 顺带还把「最近未升级的主机与原因」表塞满 500 行"总开关未开启"，真正需要人处理的
+	// 原因（缺产物、下载基址没配）反而被挤了出去。
+	if !s.cfg.Get().AgentAutoUpdate {
+		return
+	}
 	h, ok := s.store.GetHost(hostID)
 	if !ok || h == nil {
 		return

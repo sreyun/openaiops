@@ -97,17 +97,32 @@ function syncSQLDbSelect(connId, prefer) {
   const sel = $("sqlDbSel");
   if (!sel) return;
   const dbs = (SQL_SCHEMA && Array.isArray(SQL_SCHEMA.databases)) ? SQL_SCHEMA.databases.slice() : [];
-  const cur = prefer != null ? String(prefer).trim()
-    : (SQL_SCHEMA.database || (sqlConnById(connId) && sqlConnById(connId).database) || "");
-  if (cur && dbs.indexOf(cur) < 0) dbs.unshift(cur);
+  const conn = sqlConnById(connId);
+  const isPg = !!(conn && String(conn.driver || "") === "postgres");
+  const connDb = (conn && conn.database) || "";
+  // 候选只能来自服务端真的列出来的那批。
+  //
+  // 这里原来会把「连接配置里的库名」unshift 进列表再选中它。对 PostgreSQL 是错的：
+  // 这个下拉框列的是 **schema**（服务端查的是 pg_namespace），而连接配置里的
+  // database 是**库名**。于是每个 PG 连接一打开就默认选中一个不存在的 schema，
+  // 运行时 search_path 被设成它，任何一句 SELECT 都报 relation ... does not exist。
+  // 同一条规则在新版控制台是 frontend/src/shared/sql-schema.ts（有单测钉着）。
+  const wanted = prefer != null ? String(prefer).trim() : "";
+  let cur = [wanted, SQL_SCHEMA.database || "", connDb].filter(Boolean).find(x => dbs.indexOf(x) >= 0) || "";
+  if (!cur && isPg && dbs.indexOf("public") >= 0) cur = "public";
+  if (!cur && dbs.length === 1) cur = dbs[0];
   if (!dbs.length) {
-    // 连接自带默认库时仍展示，便于 EXPLAIN
-    if (cur) {
-      sel.innerHTML = `<option value="${esc(cur)}">${esc(cur)}</option>`;
-      sel.value = cur;
+    // 服务端一个都没列出来（多半是权限不足）。MySQL 下库=schema，用连接自带的库名
+    // 兜底仍然是对的，EXPLAIN 也还能用；PostgreSQL 下拿库名当 schema 只会把
+    // search_path 设错，宁可留空让人自己选。
+    const fallbackDb = isPg ? "" : (wanted || connDb);
+    if (fallbackDb) {
+      sel.innerHTML = `<option value="${esc(fallbackDb)}">${esc(fallbackDb)}</option>`;
+      sel.value = fallbackDb;
       sel.disabled = false;
-      SQL_SCHEMA.database = cur;
+      SQL_SCHEMA.database = fallbackDb;
     } else {
+      SQL_SCHEMA.database = "";
       renderSQLDbSelectEmpty(sqlT("sql.db_none", "暂无库（选择连接后自动加载）"));
     }
     return;
@@ -115,13 +130,10 @@ function syncSQLDbSelect(connId, prefer) {
   sel.disabled = false;
   sel.innerHTML = `<option value="">${esc(sqlT("sql.db_pick", "选择数据库 / Schema"))}</option>` +
     dbs.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join("");
-  if (cur && dbs.indexOf(cur) >= 0) {
-    sel.value = cur;
-    SQL_SCHEMA.database = cur;
-  } else if (dbs.length === 1) {
-    sel.value = dbs[0];
-    SQL_SCHEMA.database = dbs[0];
-  }
+  sel.value = cur;
+  // cur 为空 = 有多个候选且没有任何线索。这时必须把上一次的选择也一并清掉，
+  // 否则界面显示"请选择"、实际却仍拿着上一个连接的库名去跑查询。
+  SQL_SCHEMA.database = cur;
   if (!sel.dataset.sqlDbBound) {
     sel.dataset.sqlDbBound = "1";
     sel.addEventListener("change", () => {
