@@ -7,7 +7,7 @@
 
 [![Version](https://img.shields.io/badge/Version-v0.19.67-blue)](https://github.com/sreyun/aiops-monitor/releases/tag/v0.19.67)
 [![Go](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white)](https://go.dev)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%203.0-blue.svg)](LICENSE)
 [![Platforms](https://img.shields.io/badge/Platforms-Linux%20%7C%20Windows%20%7C%20macOS%20%7C%20Android%20%7C%20HarmonyOS-lightgrey)]()
 [![Stars](https://img.shields.io/github/stars/sreyun/aiops-monitor?style=social)](https://github.com/sreyun/aiops-monitor)
 
@@ -32,7 +32,7 @@ AIOps 把高频路径收敛为 **一个可自托管的平台**：
 | **数据** | PostgreSQL + VictoriaMetrics，**永久自持** | SaaS 或分散多库 |
 | **远程** | Web 终端 / 桌面 / 端口转发，Agent **反向连接**免开入站 | 另购堡垒机或 VPN |
 | **闭环** | 告警 → 剧本/自愈 → 事件/SLO/工单 → AI 研判 | 工具之间靠人肉粘合 |
-| **许可** | **MIT**，无主机数阉割 | 按节点 / 模块收费 |
+| **许可** | **AGPL-3.0**，无主机数阉割 | 按节点 / 模块收费 |
 
 > 适合：自建机房、混合云、信创环境；需要「看得见、管得住、改得动、说得清」的运维与 SRE 团队。
 
@@ -178,7 +178,7 @@ flowchart LR
 
 ## 📄 许可证
 
-[MIT](LICENSE) · 无主机数限制、无功能阉割套路。`vendor/` 遵循各自许可证；移动端为独立分发包，源码不在本仓库。
+[AGPL-3.0](LICENSE) · 无主机数限制、无功能阉割套路。`vendor/` 遵循各自许可证；移动端为独立分发包，源码不在本仓库。
 
 ---
 

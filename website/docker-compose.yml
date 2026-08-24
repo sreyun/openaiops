@@ -1,0 +1,24 @@
+# 营销站独立部署（上传本目录到服务器后执行）
+#   docker compose up -d --build
+# 或本机无 Docker：双击 start.bat / bash start.sh
+#
+# 默认 BASE_REGISTRY 走华为云 SWR 同步的 docker.io 镜像；海外可在 .env 写：
+#   BASE_REGISTRY=docker.io
+services:
+  website:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BASE_REGISTRY: ${BASE_REGISTRY:-swr.cn-east-3.myhuaweicloud.com/sreyun/docker.io}
+    image: aiops-website:local
+    container_name: aiops-website
+    ports:
+      - "${WEBSITE_PORT:-8090}:8090"
+    environment:
+      - WEBSITE_ADMIN_PASSWORD=${WEBSITE_ADMIN_PASSWORD:-aiops2026}
+      - WEBSITE_DB=/app/data/website.db
+      - TZ=${TZ:-Asia/Shanghai}
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped

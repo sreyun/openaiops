@@ -2418,7 +2418,7 @@ window.DICT_TW = {
   "about.links": "相關連結",
   "about.website": "造訪官網 https://aiops.sreyun.com",
   "about.repo_github": "開源倉庫 github.com/sreyun/openaiops",
-  "about.copyright": "© 智慧維運 AIOps · 依 MIT 開源授權發佈",
+  "about.copyright": "© 智慧維運 AIOps · 依 AGPL-3.0 開源授權發佈",
   "profile.title": "個人資訊",
   "profile.username": "使用者名稱",
   "profile.display_name": "顯示名稱",

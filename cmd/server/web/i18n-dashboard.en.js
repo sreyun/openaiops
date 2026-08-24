@@ -2418,7 +2418,7 @@ window.DICT_EN = {
   "about.links": "Links",
   "about.website": "Visit https://aiops.sreyun.com",
   "about.repo_github": "Source code github.com/sreyun/openaiops",
-  "about.copyright": "© AIOps · Released under the MIT License",
+  "about.copyright": "© AIOps · Released under the AGPL-3.0 License",
   "profile.title": "Profile",
   "profile.username": "Username",
   "profile.display_name": "Display name",

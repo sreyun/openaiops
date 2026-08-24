@@ -2447,7 +2447,7 @@
   "about.links": "相关链接",
   "about.website": "访问官网 https://aiops.sreyun.com",
   "about.repo_github": "开源仓库 github.com/sreyun/openaiops",
-  "about.copyright": "© 智能运维 AIOps · 基于 MIT 开源协议发布",
+  "about.copyright": "© 智能运维 AIOps · 基于 AGPL-3.0 开源协议发布",
   /* --- 个人信息弹窗 --- */
   "profile.title": "个人信息",
   "profile.username": "用户名",

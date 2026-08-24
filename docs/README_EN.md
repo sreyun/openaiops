@@ -6,7 +6,7 @@
 
 [![Version](https://img.shields.io/badge/Version-v1.0.6-blue)](https://github.com/sreyun/aiops/releases/tag/v1.0.6)
 [![Go](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white)](https://go.dev)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%203.0-blue.svg)](LICENSE)
 [![Platforms](https://img.shields.io/badge/Platforms-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey)]()
 
 **[简体中文](README.md) · [繁體中文](README.zh-TW.md) · [English](README_EN.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Deutsch](README.de.md) · [Français](README.fr.md) · [Español](README.es.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md)**
@@ -52,7 +52,7 @@ That is the tip-of-the-spear path: a **reverse-connect ops console**. Everything
 |---|---|
 | **Reverse connect, less network change** | Agent dials out; terminal, desktop, and forwards share the same tunnel |
 | **Single-binary server + zero-dep agent** | One Go server; stdlib agent on Linux / Windows / macOS / Kylin |
-| **Your data stays yours** | PostgreSQL + VictoriaMetrics, MIT licensed, no feature gating |
+| **Your data stays yours** | PostgreSQL + VictoriaMetrics, AGPL-3.0 licensed, no feature gating |
 
 > This is not “another uptime probe” or “another dashboard”. It collapses the stack small teams usually glue together — monitoring + alerting + remote troubleshooting — into one self-hosted platform.  
 > The product can be broad; **the front door should stay narrow.**
@@ -315,7 +315,7 @@ Browser / mobile* ──REST/WS──► Go server ──► PostgreSQL
 - Windows lock-screen desktop needs a **service-installed** agent  
 - Mobile packages are external to this repo  
 
-Optional paid services (deploy consulting, SSO, private mobile signing, etc.) sit on top of the MIT core — open an Issue to discuss.
+Optional paid services (deploy consulting, SSO, private mobile signing, etc.) sit on top of the AGPL-3.0 core — open an Issue to discuss.
 
 ---
 
@@ -340,7 +340,7 @@ Please report security issues privately, not in public Issues.
 
 ## License
 
-**MIT** — see [LICENSE](LICENSE). No host caps, no feature gating, no forced telemetry.  
+**AGPL-3.0** — see [LICENSE](LICENSE). No host caps, no feature gating, no forced telemetry.  
 Third-party code under `vendor/` keeps its own licenses. Mobile clients are separate distributions.
 
 ---

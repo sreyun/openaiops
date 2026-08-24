@@ -1,0 +1,185 @@
+/* ============================================================
+   admin.css — 管理后台 + 联系表单样式
+   ============================================================ */
+
+/* ---------- 联系表单样式 ---------- */
+.contact-form-wrap {
+  max-width: 640px;
+  margin: 64px auto 0;
+  padding: 40px 32px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+}
+.contact-form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.form-group--full {
+  grid-column: 1 / -1;
+}
+.form-group label {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--txt2);
+}
+.form-input {
+  padding: 12px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--bg2);
+  color: var(--txt);
+  font-size: 15px;
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+.form-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.form-input::placeholder {
+  color: var(--muted);
+}
+.form-textarea {
+  resize: vertical;
+  min-height: 80px;
+  font-family: inherit;
+}
+@media (max-width: 600px) {
+  .contact-form-wrap {
+    padding: 28px 20px;
+    margin: 40px 16px 0;
+  }
+  .contact-form-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ---------- 管理后台 Tab 样式 ---------- */
+.admin-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 24px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0;
+}
+.admin-tab {
+  padding: 12px 20px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--muted);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: color var(--transition), border-color var(--transition);
+  margin-bottom: -1px;
+}
+.admin-tab:hover {
+  color: var(--text);
+}
+.admin-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.admin-tab-content {
+  display: none;
+}
+.admin-tab-content.active {
+  display: block;
+}
+
+/* 统计图表区域 */
+.analytics-chart {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 24px;
+  margin-bottom: 24px;
+}
+.chart-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 16px;
+}
+.chart-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  height: 120px;
+  padding-top: 8px;
+}
+.chart-bar-wrap {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  height: 100%;
+}
+.chart-bar {
+  width: 100%;
+  max-width: 40px;
+  background: var(--accent);
+  border-radius: 4px 4px 0 0;
+  min-height: 4px;
+  transition: height var(--transition);
+}
+.chart-bar-label {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.chart-bar-value {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* 页面列表 */
+.page-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.page-list-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.page-list-item:last-child {
+  border-bottom: none;
+}
+.page-list-name {
+  font-size: 14px;
+  color: var(--text);
+  font-weight: 500;
+}
+.page-list-count {
+  font-size: 14px;
+  color: var(--accent);
+  font-weight: 600;
+}
+.page-list-bar {
+  flex: 1;
+  margin: 0 16px;
+  height: 6px;
+  background: var(--bg2);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.page-list-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width var(--transition);
+}
