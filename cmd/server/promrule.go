@@ -188,7 +188,7 @@ func (m *promRuleManager) fire(r PromRule, s promSeries, cfg ServerConfig) {
 	}
 	m.store.AddLog(LogEntry{Kind: KindSystem, Level: lvl, Actor: "指标告警", Host: a.Hostname, Message: a.Message})
 	if cfg.AlertsEnabled {
-		m.notifier.pushChannels(cfg, a, true)
+		m.notifier.enqueuePush(cfg, a, true)
 		// 闭环：开 Incident → 触发 AI 研判 + 自学习，并对匹配主机跑自动修复（与阈值告警一致）。
 		if m.notifier.incidents != nil {
 			incID := m.notifier.incidents.OnAlertTransition(a, alertKey(a), true)
@@ -207,7 +207,7 @@ func (m *promRuleManager) resolve(r PromRule, labels map[string]string, cfg Serv
 	}
 	m.store.AddLog(LogEntry{Kind: KindSystem, Level: "info", Actor: "指标告警", Host: host, Message: a.Message})
 	if cfg.AlertsEnabled {
-		m.notifier.pushChannels(cfg, a, false)
+		m.notifier.enqueuePush(cfg, a, false)
 		// 闭环：按同一 alertKey 恢复对应 Incident（fire/resolve 的 HostID/Type/Scope 一致）。
 		if m.notifier.incidents != nil {
 			m.notifier.incidents.OnAlertTransition(a, alertKey(a), false)

@@ -201,7 +201,7 @@ func (s *Server) distAlert(taskID string, agg distAgg) {
 		return // 维护窗口内抑制分布式告警推送
 	}
 	if cfg := s.cfg.Get(); cfg.AlertsEnabled {
-		s.notifier.pushChannels(cfg, a, agg.Scope != "ok")
+		s.notifier.enqueuePush(cfg, a, agg.Scope != "ok")
 	}
 }
 

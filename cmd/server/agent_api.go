@@ -17,16 +17,33 @@ import (
 // Go's http.Server does NOT auto-decompress request bodies (unlike responses).
 // Since agent v5.1.0, the report payload may be gzip-compressed to save bandwidth.
 // Returns the original r.Body when no compression is used (backward-compatible).
+//
+// **返回的 reader 永远是有上限的**，这一条是安全边界不是优化：
+// 全局 bodyLimit 中间件管的是**压缩后**的字节数，而同构的指标 JSON 用 gzip 能压到
+// 1/50 以上——几 MB 的请求体足以解出几百 MB，而这些 Agent 端点全在 isPublicPath 里，
+// 指纹校验发生在**解码之后**。也就是说未鉴权的一方就能让服务端分配几百 MB 内存。
+// 补传端点当初单独补过这个限制，注册与上报两条却漏了；把上限收进这里，
+// 以后新增的 Agent 端点不会再有机会忘记。
 func decompressBody(r *http.Request) (io.ReadCloser, error) {
 	if r.Header.Get("Content-Encoding") != "gzip" {
-		return r.Body, nil
+		return limitedReadCloser{r: io.LimitReader(r.Body, agentIngestMaxBodyBytes), c: r.Body}, nil
 	}
 	gr, err := gzip.NewReader(r.Body)
 	if err != nil {
 		return nil, err
 	}
-	return gr, nil
+	return limitedReadCloser{r: io.LimitReader(gr, agentIngestMaxBodyBytes), c: gr}, nil
 }
+
+// limitedReadCloser 把 io.LimitReader 与原始 Closer 绑在一起：调用方的
+// `defer body.Close()` 必须仍然关到真正的 gzip reader 上。
+type limitedReadCloser struct {
+	r io.Reader
+	c io.Closer
+}
+
+func (l limitedReadCloser) Read(p []byte) (int, error) { return l.r.Read(p) }
+func (l limitedReadCloser) Close() error               { return l.c.Close() }
 
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	body, err := decompressBody(r)
@@ -243,6 +260,10 @@ const (
 	agentBackfillMaxPerReport = 240
 	// agentBackfillMaxBodyBytes 是**解压后**允许读取的最大字节数，见 handleAgentBackfill。
 	agentBackfillMaxBodyBytes = 8 << 20
+	// agentIngestMaxBodyBytes 是 decompressBody 对**解压后**字节数的统一上限。
+	// 单次实时上报实测 3~8 KB，补传一批（60 条）约 200 KB —— 8 MiB 留了 40 倍余量，
+	// 同时把 gzip 放大挡在内存分配之前。
+	agentIngestMaxBodyBytes = 8 << 20
 	// agentBackfillMaxAgeSec 是补传样本的最大回溯窗口，与 Agent 侧的缓冲上限
 	// （agentBackfillMaxAge = 7 天）对齐。两边必须一致：服务端收窄会让 Agent 辛苦攒下
 	// 的老数据在入口被静默丢掉，放宽则等于允许一台时钟错乱的主机往任意历史位置写点。

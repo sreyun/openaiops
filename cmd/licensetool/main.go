@@ -117,15 +117,11 @@ func runIssue(keyFile, out string, p licensePayload, expires string) {
 		// 到期日按当天 23:59:59 计，避免"写了 8-31 结果 8-31 当天就过期"。
 		p.ExpiresAt = t.Add(24*time.Hour - time.Second).Unix()
 	}
-	payload, err := json.Marshal(p)
+	token, err := buildToken(priv, p)
 	if err != nil {
 		fatal(err)
 	}
-	sig := ed25519.Sign(priv, payload)
-	token := tokenPrefix + "." +
-		base64.RawURLEncoding.EncodeToString(payload) + "." +
-		base64.RawURLEncoding.EncodeToString(sig)
-	text := "-----BEGIN AIOPS LICENSE-----\n" + wrap(token, 72) + "\n-----END AIOPS LICENSE-----\n"
+	text := renderLicenseFile(token)
 	if out == "" {
 		fmt.Print(text)
 	} else if err := os.WriteFile(out, []byte(text), 0o600); err != nil {
@@ -134,6 +130,27 @@ func runIssue(keyFile, out string, p licensePayload, expires string) {
 		fmt.Printf("已签发：%s\n客户=%s 主机上限=%d 到期=%s 部署=%s\n",
 			out, p.Customer, p.MaxHosts, dateStr(p.ExpiresAt), orDash(p.InstallID))
 	}
+}
+
+// buildToken 把载荷签成 `AIOPS-LIC1.<b64url(payload)>.<b64url(sig)>`。
+// 单独抽出来是为了能在测试里跑一遍「签发 → 服务端同款解析」的往返——
+// 这是唯一一处「发出去的文件客户到底能不能装上”的机器校验，
+// 而这类错误一旦发生，是在客户现场发现的。
+func buildToken(priv ed25519.PrivateKey, p licensePayload) (string, error) {
+	payload, err := json.Marshal(p)
+	if err != nil {
+		return "", err
+	}
+	sig := ed25519.Sign(priv, payload)
+	return tokenPrefix + "." +
+		base64.RawURLEncoding.EncodeToString(payload) + "." +
+		base64.RawURLEncoding.EncodeToString(sig), nil
+}
+
+// renderLicenseFile 包上 BEGIN/END 并按 72 列折行：授权文件常被邮件/微信转发，
+// 不折行的一长串在很多客户端里会被截断。
+func renderLicenseFile(token string) string {
+	return "-----BEGIN AIOPS LICENSE-----\n" + wrap(token, 72) + "\n-----END AIOPS LICENSE-----\n"
 }
 
 func runVerify(path string) {

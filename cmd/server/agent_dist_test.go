@@ -107,8 +107,13 @@ func TestBuildLegacyAgentUpdateCommand(t *testing.T) {
 			t.Fatalf("linux script missing %q", p)
 		}
 	}
-	if strings.Contains(sh, "systemctl restart") && strings.Contains(sh, "|| true\necho") {
-		// ensure we no longer mask restart failure with trailing || true before ok echo
+	// 重启失败必须能被察觉：`systemctl restart ... || true` 会把失败吞掉，脚本照样报成功，
+	// 于是控制台显示"已升级"而机器上跑的还是旧二进制。
+	// 这条原来写成一个空的 if（条件成立也什么都不做），等于这个检查从来没生效过。
+	for _, line := range strings.Split(sh, "\n") {
+		if strings.Contains(line, "systemctl restart") && strings.Contains(line, "|| true") {
+			t.Fatalf("重启失败被 `|| true` 吞掉了：%s", strings.TrimSpace(line))
+		}
 	}
 	darwin := buildLegacyAgentUpdateCommand("darwin", "http://x:8529", "aiops-agent-darwin-arm64", testPinSHA, false)
 	for _, p := range []string{"xattr", "system/com.aiops.agent", "gui/"} {

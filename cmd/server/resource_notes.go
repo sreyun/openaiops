@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 )
@@ -170,14 +169,4 @@ func (s *Server) handlePutResourceNote(w http.ResponseWriter, r *http.Request) {
 			return ""
 		}()})
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "key": key, "note": saved})
-}
-
-// resourceNoteKeys 返回已注解的键（稳定顺序，便于测试与排查）。
-func resourceNoteKeys(m map[string]ResourceNote) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }

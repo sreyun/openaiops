@@ -285,7 +285,7 @@ func (ar *apiRunner) txnTransition(t APITransaction, up bool, res txnResult) {
 	a := Alert{Level: lvl, Type: "api_txn", Scope: t.ID, Hostname: t.Name, Message: msg, Timestamp: time.Now().Unix()}
 	ar.store.AddLog(LogEntry{Kind: KindSystem, Level: a.Level, Actor: "合成事务", Host: t.Name, Message: msg})
 	if cfg := ar.cfg.Get(); cfg.AlertsEnabled {
-		ar.notifier.pushChannels(cfg, a, !up)
+		ar.notifier.enqueuePush(cfg, a, !up)
 	}
 }
 

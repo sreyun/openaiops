@@ -131,6 +131,7 @@ func (s *Server) supportMeta(ts time.Time) map[string]any {
 		"server_host":    hostname,
 		"hosts_total":    len(hosts),
 		"hosts_online":   online,
+		"v2_console":     v2ConsoleEmbedded(),
 	}
 }
 

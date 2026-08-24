@@ -650,11 +650,12 @@ func moduleJavaThreadDump(ctx context.Context, args map[string]string) ([]byte, 
 			note("%d 个线程处于 BLOCKED（占 %.0f%%）——存在锁竞争热点，结合上面的栈顶聚类定位持锁方", blocked, pct)
 		}
 	}
-	for _, kv := range sortedCounts(an.TopFrames) {
-		if kv.N >= 10 && float64(kv.N) >= float64(an.Total)*0.2 {
+	// 只看排名第一的栈顶：sortedCounts 已按线程数降序，第一名不过阈值时后面更不会过。
+	// 原来写成 for ... { if ...; break }，读起来像"遍历所有栈顶"，实际只跑一轮。
+	if top := sortedCounts(an.TopFrames); len(top) > 0 {
+		if kv := top[0]; kv.N >= 10 && float64(kv.N) >= float64(an.Total)*0.2 {
 			note("%d 个线程卡在同一栈顶 %s——这通常就是瓶颈所在（慢 SQL、外部调用无超时、锁等待）", kv.N, truncRunes(kv.Key, 120))
 		}
-		break
 	}
 	if an.Total > 800 {
 		note("线程总数 %d 偏高——线程本身占用栈内存（默认 1MB/线程），且会加剧上下文切换", an.Total)
@@ -732,7 +733,7 @@ func isThreadHeaderLine(line string) bool {
 	if !strings.HasPrefix(line, "\"") {
 		return false
 	}
-	if strings.Index(line[1:], "\"") < 0 {
+	if !strings.Contains(line[1:], "\"") {
 		return false
 	}
 	return strings.Contains(line, "tid=") || strings.Contains(line, "nid=") ||

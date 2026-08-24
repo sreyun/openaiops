@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
@@ -133,7 +134,13 @@ func (s pgTableStat) bloatRatio() float64 {
 }
 
 func (p *pgStore) tableStats() ([]pgTableStat, error) {
-	rows, err := p.db.Query(`
+	return p.tableStatsContext(context.Background())
+}
+
+// tableStatsContext 是带上下文的版本。/metrics 用它加超时：这条查询要扫
+// pg_class/pg_stats，PG 一旦卡住，没有上下文的查询会把抓取协程永久挂住。
+func (p *pgStore) tableStatsContext(ctx context.Context) ([]pgTableStat, error) {
+	rows, err := p.db.QueryContext(ctx, `
 		SELECT c.relname,
 		       pg_total_relation_size(c.oid),
 		       pg_table_size(c.oid),
@@ -176,8 +183,12 @@ func (p *pgStore) tableStats() ([]pgTableStat, error) {
 }
 
 func (p *pgStore) databaseSize() (int64, error) {
+	return p.databaseSizeContext(context.Background())
+}
+
+func (p *pgStore) databaseSizeContext(ctx context.Context) (int64, error) {
 	var n int64
-	err := p.db.QueryRow(`SELECT pg_database_size(current_database())`).Scan(&n)
+	err := p.db.QueryRowContext(ctx, `SELECT pg_database_size(current_database())`).Scan(&n)
 	return n, err
 }
 

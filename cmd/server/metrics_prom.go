@@ -187,6 +187,9 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		c("aiops_pg_wait_total", "Times a query waited for a free connection", float64(st.WaitCount))
 	}
 
+	// PG 存储：库体积、膨胀与「一次回收能拿回多少」。10 分钟缓存，见 metrics_pg_storage.go。
+	writePGStorageMetrics(&b, s.pgStorageMetrics(time.Now()))
+
 	// 授权余量：签发方与客户的 SRE 都需要在到期前看见它
 	lic := s.licenseStatus()
 	g("aiops_license_state", "License state (0=active 1=over_quota 2=grace 3=expired 4=invalid 5=unlicensed)",

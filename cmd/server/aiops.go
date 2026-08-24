@@ -9,7 +9,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -1168,15 +1167,6 @@ func streamChatFiltered(ctx context.Context, w http.ResponseWriter, cfg AIConfig
 	}
 	return reply, nil
 }
-
-// filterRegex 预编译正则，避免每次调用重复编译（P2-1 优化）。
-var (
-	reCodeFenceJSON = regexp.MustCompile("(?s)```[a-z]*\\s*\\{.*?```")
-	reCodeFenceAny  = regexp.MustCompile("(?s)```[^`]*```")
-	reToolCallJSON  = regexp.MustCompile("(?s)\\{\\s*\"tool_calls\".*?\\}\\s*$")
-	reAPIKey        = regexp.MustCompile("\\b(sk-[a-zA-Z0-9_-]{20,})\\b")
-	reSecretKV      = regexp.MustCompile("\\b(api_key|apikey|secret|password|token)\\s*[:=]\\s*['\"]?[^\\s'\"]+['\"]?")
-)
 
 // InspectionFinding is one item on an inspection report.
 type InspectionFinding struct {

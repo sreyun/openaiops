@@ -428,9 +428,8 @@ func sanitizeWebTarget(t *WebScanTarget, globalAllowPrivate bool) error {
 			return fmt.Errorf("Basic 鉴权需填写用户名")
 		}
 	case "bearer":
-		if isMaskedSecret(t.AuthPass) && strings.TrimSpace(t.AuthHeader) == "" {
-			// may be filled from existing secret on upsert
-		}
+		// 这里刻意不校验令牌是否为空：编辑已有目标时前端回填的是打码占位符，
+		// 真正的令牌在 upsert 时从库里的旧值补齐（见 upsert 路径的 isMaskedSecret 处理）。
 	case "form", "header_body":
 		if t.AuthLoginURL == "" {
 			return fmt.Errorf("表单/预认证需填写登录或预认证 URL")

@@ -953,8 +953,6 @@ func (cs *ConfigStore) AgentTokenRequired() bool {
 	return !cs.cfg.AllowAnonymousAgents
 }
 
-// TerminalEnabled reports whether the remote terminal feature is available
-// (default true; disabled only when terminal_disabled is set in config).
 // RequireTerminalPassword reports whether terminal secondary password is mandatory.
 // Default true when unset (pointer nil).
 func (cs *ConfigStore) RequireTerminalPassword() bool {
@@ -966,6 +964,8 @@ func (cs *ConfigStore) RequireTerminalPassword() bool {
 	return *cs.cfg.RequireTerminalPassword
 }
 
+// TerminalEnabled reports whether the remote terminal feature is available
+// (default true; disabled only when terminal_disabled is set in config).
 func (cs *ConfigStore) TerminalEnabled() bool {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()

@@ -487,5 +487,7 @@
   "log.backup_full": "创建整套备份（PG+时序+录像）：%s；失败 %d 项",
   "backup.full_hint": "PostgreSQL 用备份列表的「还原」；时序用 vmctl 或 curl 推回 /api/v1/import/native；录像解压回录像目录。完整步骤见 docs/DEPLOY_GUIDE.md「备份与恢复」。",
   "license.not_installed": "本部署尚未安装授权文件，写操作已降级为只读：采集、告警与 Agent 上报照常运行。请向供应商索取授权文件后，在控制台「授权与用量」上传。",
-  "license.read_only_invalid": "授权文件无效（签名或部署指纹不匹配），写操作已降级为只读。请用控制台显示的部署指纹重新签发。"
+  "license.read_only_invalid": "授权文件无效（签名或部署指纹不匹配），写操作已降级为只读。请用控制台显示的部署指纹重新签发。",
+  "ai.config_saved": "保存 AI 配置",
+  "log.forward_agent_offline": "端口转发失败：目标主机的 Agent 不在线"
 }

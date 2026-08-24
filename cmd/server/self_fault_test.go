@@ -39,7 +39,13 @@ func TestPlatformFaultRaisesIncidentAtThreshold(t *testing.T) {
 		t.Fatalf("未到阈值不应开事件，已开 %d 个", n)
 	}
 	srv.reportPlatformFault("vm", "queue_full", "warning", "", "VictoriaMetrics 写入队列已满", "")
-	waitFor(t, 3*time.Second, func() bool { return srv.incidents.OpenCount() == 1 })
+	// 开事件与回填 incident_id 是同一个后台协程里**先后两步**（raise → bindIncident）。
+	// 只等 OpenCount 就断言 IncidentID，等于赌那两步之间没有调度间隙——机器一忙就翻车。
+	// 直接等最终状态：回填完成即代表两步都结束了。
+	waitFor(t, 3*time.Second, func() bool {
+		list := srv.faults.snapshot(0)
+		return srv.incidents.OpenCount() == 1 && len(list) == 1 && list[0].IncidentID != 0
+	})
 
 	list := srv.faults.snapshot(0)
 	if len(list) != 1 || list[0].IncidentID == 0 {

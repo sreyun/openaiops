@@ -999,6 +999,27 @@ func (p *pgStore) saveKV(key string, raw []byte) error {
 	return nil
 }
 
+// saveKVIfAbsent 只在这个键还不存在时写入，返回是否真的写进去了。
+//
+// 存在的理由是部署指纹（install_id）：它一旦被覆盖，客户按旧指纹签发的授权立刻
+// 变成 install mismatch，而旧指纹已经没了、找不回来。用 DO NOTHING 让"已经有一条"
+// 这件事在数据库层面就赢，调用方只需要在没写进去时把库里那条读回来。
+func (p *pgStore) saveKVIfAbsent(key string, raw []byte) (bool, error) {
+	res, err := p.db.Exec(`INSERT INTO kv_state(k,data) VALUES($1,$2)
+		ON CONFLICT(k) DO NOTHING`, key, raw)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if n > 0 {
+		p.wc.remember("kv/"+key, raw)
+	}
+	return n > 0, nil
+}
+
 // saveKVIfChanged skips the UPDATE when the blob is byte-identical to what was
 // last written. 周期刷写里 sessions / alert_states / slo_burning / playbook_* 这些
 // 大多数时候纹丝不动，但每 15 秒都要被重写一遍——每次都是一个死元组加一份 WAL。

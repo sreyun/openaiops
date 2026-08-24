@@ -114,6 +114,7 @@ PG 里放的是关系数据与审计：主机、事件、工单、变更、审�
 | 写入延迟、退出时丢内存态 | `aiops_pg_flush_duration_seconds` 从几十毫秒涨到秒级 | 扩 PG、缩短保留期、跑 `-pg-reclaim` |
 | VM 查询失败、历史查不到 | `aiops_vm_breaker_state{breaker="read"}` = 2（开路） | 查 VM 存活与磁盘 |
 | 主机注册被拒 | `aiops_license_hosts_used` / `aiops_license_hosts_max` | 扩容授权 |
+| pg-data 一直涨、磁盘快满 | `aiops_pg_database_bytes` 增长而 `aiops_pg_reclaimable_bytes` 同步走高 | 维护窗口跑一次 `aiops-server -pg-reclaim`（要 ACCESS EXCLUSIVE 锁） |
 
 指标出口：`GET /metrics`（Prometheus 文本格式）。鉴权用 `AIOPS_METRICS_TOKEN`（Bearer 或 `?token=`），未配置时退回会话鉴权——**不会匿名开放**，因为里面有主机规模与授权信息。
 
@@ -126,7 +127,16 @@ aiops_pg_flush_duration_seconds > 2                         # PG 撑不住了
 aiops_vm_breaker_state > 0                                  # VM 熔断
 aiops_license_days_left < 30                                # 该续费了
 aiops_license_read_only == 1                                # 已降级为只读
+aiops_pg_reclaimable_bytes > 2e9                            # 膨胀已值得安排一次回收
+aiops_pg_metrics_error == 1                                 # 存储探针连不上 PG
 ```
+
+`aiops_pg_reclaimable_bytes` 是「现在跑一次 `-pg-reclaim` 预计能还给文件系统多少字节」。
+它此前**只有 CLI 看得见**（`aiops-server -pg-report`），于是磁盘从几百 MB 涨到几 GB 的
+整个过程在监控里一个信号都没有，第一次知道是 PG 写不进去的时候——而那时候
+`VACUUM FULL` 恰恰需要磁盘上还有空间来重写表。这条线要在交付时就配上。
+表级明细在 `aiops_pg_table_bytes{table=…}` / `aiops_pg_table_bloat_bytes{table=…}`
+（只导出体积最大的 15 张表，避免高基数）。
 
 ---
 

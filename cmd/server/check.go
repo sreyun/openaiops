@@ -171,14 +171,12 @@ func (cr *checkRunner) runSelfCheck() {
 	cr.status[selfCheckID] = CheckStatus{OK: ok, Message: msg, LatencyMs: lat, CheckedAt: nowUnix, StatusCode: code, CertDays: -1}
 	cr.recordHistory(selfCheckID, CheckPoint{Ts: nowUnix, OK: ok, LatencyMs: lat, StatusCode: code})
 	wasDown := cr.down[selfCheckID]
-	nowDown := wasDown
 	// Same debounce as runCheck: require 2 consecutive results before toggling state
 	const debounceThreshold = 2
 	if !ok {
 		cr.failCount[selfCheckID]++
 		cr.okCount[selfCheckID] = 0
 		if cr.failCount[selfCheckID] >= debounceThreshold && !wasDown {
-			nowDown = true
 			cr.down[selfCheckID] = true
 			cr.markDown(selfCheckID, true)
 		}
@@ -186,7 +184,6 @@ func (cr *checkRunner) runSelfCheck() {
 		cr.okCount[selfCheckID]++
 		cr.failCount[selfCheckID] = 0
 		if cr.okCount[selfCheckID] >= debounceThreshold && wasDown {
-			nowDown = false
 			cr.down[selfCheckID] = false
 			cr.markDown(selfCheckID, false)
 		}
@@ -196,12 +193,8 @@ func (cr *checkRunner) runSelfCheck() {
 	// 持久化自检结果到 VM
 	cr.vm.enqueueCheck(vmCheckSample{checkID: selfCheckID, name: SelfCheckName(), checkType: "http", ts: nowUnix, ok: ok, latencyMs: lat, statusCode: code, lossPct: -1})
 
-	if nowDown && !wasDown {
-		// Self health-check failures should not clutter the activity log
-		// They are still tracked in alerts and visible in the checks view
-	} else if !nowDown && wasDown {
-		// Recovery also doesn't need an activity log entry for internal checks
-	}
+	// 自检的上下线**刻意不写活动日志**：它每分钟都在跑，写进去会把真正的主机事件淹掉。
+	// 状态本身已经进了告警面，检查页也看得到（上面的 markDown 已经记过）。
 }
 
 // portFromAddr extracts the port portion from an addr like ":8529" or "0.0.0.0:8529".
@@ -356,7 +349,7 @@ func (cr *checkRunner) transition(c CustomCheck, up bool, msg string) {
 	}
 	cr.store.AddLog(LogEntry{Kind: KindSystem, Level: a.Level, Actor: Tz("check.custom_monitor"), Host: c.Name, Message: a.Message})
 	if cfg := cr.cfg.Get(); cfg.AlertsEnabled {
-		cr.notifier.pushChannels(cfg, a, !up)
+		cr.notifier.enqueuePush(cfg, a, !up)
 	}
 }
 

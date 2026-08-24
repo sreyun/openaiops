@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"text/template"
 	"time"
 )
@@ -46,7 +47,24 @@ type Notifier struct {
 	hv          *hypervStore    // set after server startup; feeds Hyper-V VM alerts
 	snmp        *snmpStore      // set after server startup; feeds SNMP device alerts
 	nf          *nfStore        // set after server startup; feeds NetFlow traffic-anomaly alerts
+
+	// 投递队列：把「评估」与「往外发」拆开，见 enqueuePush。
+	pushOnce sync.Once
+	pushQ    chan notifyJob
+	pushDrop atomic.Uint64
 }
+
+// notifyJob 是一次待投递的告警通知。cfg 随任务带走而不是投递时再读：
+// 这一轮该按哪套渠道配置发，在评估那一刻就定下来了。
+type notifyJob struct {
+	cfg    ServerConfig
+	alert  Alert
+	firing bool
+}
+
+// notifyPushQueue 是投递队列深度。渠道正常时它几乎恒为空；
+// 512 是「一次机房级故障（数百台同时离线）能整批装下」的量。
+const notifyPushQueue = 512
 
 // 抖动抑制阈值（tick 间隔 10s）：连续 2 次（~20s 持续）才触发/恢复，压制阈值边界抖动刷屏。
 const (
@@ -305,6 +323,42 @@ func (n *Notifier) reconcile(cur map[string]Alert) (fires, resolves []Alert) {
 	return fires, resolves
 }
 
+// enqueuePush 把「往外发」交给一条固定的投递协程，评估循环不再等网络。
+//
+// 为什么必须拆开：tick() 每 10 秒跑一轮，之前在同一个 goroutine 里**串行**地把
+// 每条告警推给飞书/钉钉/邮件/Webhook/短信。渠道健康时这没问题；渠道不健康时是灾难——
+// 一次机房级故障让 100 台主机同时离线，而同一个网络故障往往也让 webhook 连不上，
+// 于是 100 条 × 8 秒超时 = 13 分钟里**告警评估整个停摆**：新的危急告警发现不了，
+// 已恢复的也判不出来。偏偏这正是最需要告警的时刻。
+//
+// 投递仍然是单协程串行的，这一条是刻意的：飞书/钉钉自定义机器人有每分钟条数限制，
+// 并发打过去只会被对面限流，换来一批"发送失败"。这里要解决的是**评估被拖住**，
+// 不是把消息发得更快。
+//
+// 队列满 = 某条渠道已经堵了很久。丢弃并留一条平台故障记录，比无限堆积到 OOM 好：
+// 排在队尾的通知这时候早已过时，而 OOM 会把整个控制面一起带走。
+func (n *Notifier) enqueuePush(cfg ServerConfig, a Alert, firing bool) {
+	if n == nil {
+		return
+	}
+	n.pushOnce.Do(func() {
+		n.pushQ = make(chan notifyJob, notifyPushQueue)
+		go func() {
+			for j := range n.pushQ {
+				n.pushChannels(j.cfg, j.alert, j.firing)
+			}
+		}()
+	})
+	select {
+	case n.pushQ <- notifyJob{cfg: cfg, alert: a, firing: firing}:
+	default:
+		dropped := n.pushDrop.Add(1)
+		reportFault("notify", "push_queue_full", "critical", a.HostID,
+			fmt.Sprintf("告警投递队列已满（%d 条），本条通知被丢弃：%s；累计丢弃 %d 条——"+
+				"通常意味着某条通知渠道长时间发不出去，请检查渠道配置与网络", notifyPushQueue, a.Message, dropped), "")
+	}
+}
+
 func (n *Notifier) dispatch(cfg ServerConfig, a Alert, firing bool) {
 	// activity log: the machine-detected threshold transition (intervention)
 	verb, tlvl := Tz("notify.alert_fired"), a.Level
@@ -336,13 +390,22 @@ func (n *Notifier) dispatch(cfg ServerConfig, a Alert, firing bool) {
 		delete(n.recordIDs, key)
 		n.mu.Unlock()
 	}
-	n.pushChannels(cfg, a, firing)
+	n.enqueuePush(cfg, a, firing)
 }
 
 // pushChannels sends the alert text to every enabled bot channel and logs the
-// push result. Shared by threshold alerts and custom-check alerts.
+// push result.
+//
+// **只应由投递协程调用**（enqueuePush 里那一条）。安全扫描、API 拨测、SNMP、
+// 内容审计、检查项、Agent 升级、Prometheus 规则等十余处此前各自直接调它，于是每一处
+// 都会被一条发不出去的渠道按住自己的循环——检查项停跑、拨测停跑，症状各不相同，
+// 根因是同一个。它们现在统一走 enqueuePush。
 func (n *Notifier) pushChannels(cfg ServerConfig, a Alert, firing bool) {
 	// 告警治理：仅对「触发」通知做静默/抑制；「恢复」通知一律照发，避免规则造成"永远告警"错觉。
+	//
+	// 注意这里的 ActiveAlerts() 读的是**投递时刻**的活跃集合（本函数跑在投递协程上，
+	// 见 enqueuePush）。渠道正常时与评估时刻相差毫秒级；渠道堵住时读到的是更新的状态，
+	// 对"有更高级别告警时抑制低级别"这条语义只会更准，不会更差。
 	if firing {
 		if ok, rule := govSilenced(cfg.Governance, a, time.Now()); ok {
 			n.store.AddLog(LogEntry{Kind: KindSystem, Level: "info", Actor: Tz("notify.notification"), Host: a.Hostname, Message: "静默规则「" + rule + "」已抑制通知：" + a.Message})

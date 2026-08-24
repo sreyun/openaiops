@@ -479,5 +479,15 @@
   "log.backup_full": "建立整套備份（PG+時序+錄影）：%s；失敗 %d 項",
   "backup.full_hint": "PostgreSQL 用備份清單的「還原」；時序用 vmctl 或 curl 推回 /api/v1/import/native；錄影解壓回錄影目錄。完整步驟見 docs/DEPLOY_GUIDE.md「備份與還原」。",
   "license.not_installed": "本部署尚未安裝授權檔案，寫入操作已降級為唯讀：採集、告警與 Agent 回報照常運行。請向供應商索取授權檔案後，在控制台「授權與用量」上傳。",
-  "license.read_only_invalid": "授權檔案無效（簽章或部署指紋不符），寫入操作已降級為唯讀。請用控制台顯示的部署指紋重新簽發。"
+  "license.read_only_invalid": "授權檔案無效（簽章或部署指紋不符），寫入操作已降級為唯讀。請用控制台顯示的部署指紋重新簽發。",
+  "ai.config_saved": "儲存 AI 設定",
+  "log.forward_agent_offline": "連接埠轉發失敗：目標主機的 Agent 不在線",
+  "log.alert_ack": "確認告警：%s（%s）",
+  "log.alert_ack_scope": "確認告警：%s（%s/%s）",
+  "log.alert_clear": "清除告警狀態：%s（%s）",
+  "log.alert_silence": "靜音告警：%s（%s）",
+  "log.alert_silence_scope": "靜音告警：%s（%s/%s）",
+  "log.custom_webhook_failed": "自訂 Webhook 推送失敗：%s",
+  "notify.custom_webhook": "自訂 Webhook",
+  "notify.custom_webhook_failed": "自訂 Webhook 推送失敗"
 }

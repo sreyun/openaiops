@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -29,13 +30,31 @@ func TestWorkbenchQueryRejectsPlaceholders(t *testing.T) {
 	}
 }
 
-func TestMysqlWorkbenchQueryGuards(t *testing.T) {
-	_, err := mysqlWorkbenchQuery(MySQLConnection{Host: "127.0.0.1", Port: 1}, "db", "DELETE FROM t", 50, 2*time.Second)
-	if err == nil || !strings.Contains(err.Error(), "只读") && !strings.Contains(err.Error(), "允许") {
-		t.Fatalf("expected read-only guard, got %v", err)
+// 只读闸与库名校验现在统一由 prepareSQLRead 把关（两个驱动共用一条路径），
+// 原来 mysqlWorkbenchQuery/pgWorkbenchQuery 那两份重复实现已经没有调用方，随本次清理删除。
+// 这里直接盯住现役那条路径，别让覆盖率跟着死代码一起消失。
+func TestPrepareSQLReadGuards(t *testing.T) {
+	ctx := context.Background()
+	conn := MySQLConnection{Host: "127.0.0.1", Port: 1, Driver: "mysql"}
+
+	_, err := prepareSQLRead(ctx, conn, sqlReadRequest{SQL: "DELETE FROM t", Schema: "db"}, 50, 2*time.Second)
+	if err == nil || (!strings.Contains(err.Error(), "只读") && !strings.Contains(err.Error(), "允许")) {
+		t.Fatalf("写语句应被只读闸拦下，得到 %v", err)
 	}
-	_, err = mysqlWorkbenchQuery(MySQLConnection{Host: "127.0.0.1", Port: 1}, "bad-name!", "SELECT 1", 50, 2*time.Second)
+
+	_, err = prepareSQLRead(ctx, conn, sqlReadRequest{SQL: "SELECT 1", Schema: "bad-name!"}, 50, 2*time.Second)
 	if err == nil || !strings.Contains(err.Error(), "非法") {
-		t.Fatalf("expected bad schema, got %v", err)
+		t.Fatalf("非法库名应被拒绝，得到 %v", err)
+	}
+
+	_, err = prepareSQLRead(ctx, conn, sqlReadRequest{SQL: "SELECT * FROM t WHERE id = ?", Schema: "db"}, 50, 2*time.Second)
+	if err == nil || !strings.Contains(err.Error(), "占位符") {
+		t.Fatalf("未绑定占位符应被拒绝，得到 %v", err)
+	}
+
+	pg := MySQLConnection{Host: "127.0.0.1", Port: 1, Driver: "postgres"}
+	_, err = prepareSQLRead(ctx, pg, sqlReadRequest{SQL: "UPDATE t SET a=1", Schema: "public"}, 50, 2*time.Second)
+	if err == nil || (!strings.Contains(err.Error(), "只读") && !strings.Contains(err.Error(), "允许")) {
+		t.Fatalf("PostgreSQL 写语句应被拦下，得到 %v", err)
 	}
 }

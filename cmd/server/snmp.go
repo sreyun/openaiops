@@ -178,7 +178,7 @@ func (s *Server) handleAgentSNMPTrap(w http.ResponseWriter, r *http.Request) {
 				Timestamp: ev.Timestamp,
 			}
 			if cfg.AlertsEnabled {
-				s.notifier.pushChannels(cfg, a, true)
+				s.notifier.enqueuePush(cfg, a, true)
 			}
 			// critical trap 转 Incident，自动获相似历史召回 + 解决经验沉淀。
 			if sev == "critical" && s.incidents != nil {

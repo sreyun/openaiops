@@ -109,7 +109,7 @@ func (s *Server) notifyHostSecurityScanCompleted(scan *HostScanResult) {
 		Timestamp: now,
 	}
 	s.store.AddLog(LogEntry{Kind: KindSystem, Level: level, Actor: "主机安全", Host: hostLabel, Message: msg})
-	s.notifier.pushChannels(cfg, a, true)
+	s.notifier.enqueuePush(cfg, a, true)
 	var incidentID int64
 	if level == "critical" && s.incidents != nil {
 		incidentID = s.incidents.OnAlertTransition(a, alertKey(a), true)
@@ -181,7 +181,7 @@ func (s *Server) notifyWebSecurityScanCompleted(scan *WebScanResult) {
 		Timestamp: now,
 	}
 	s.store.AddLog(LogEntry{Kind: KindSystem, Level: level, Actor: "Web安全", Host: name, Message: msg})
-	s.notifier.pushChannels(cfg, a, true)
+	s.notifier.enqueuePush(cfg, a, true)
 	var incidentID int64
 	if level == "critical" && s.incidents != nil {
 		incidentID = s.incidents.OnAlertTransition(a, alertKey(a), true)
@@ -291,7 +291,7 @@ func (s *Server) notifySlowSQLReport(c MySQLConnection, rep *SlowSQLReport) {
 		Timestamp: now,
 	}
 	s.store.AddLog(LogEntry{Kind: KindSystem, Level: level, Actor: "慢SQL", Host: c.Name, Message: msg})
-	s.notifier.pushChannels(serverCfg, a, true)
+	s.notifier.enqueuePush(serverCfg, a, true)
 	if level == "critical" && s.incidents != nil {
 		incID := s.incidents.OnAlertTransition(a, alertKey(a), true)
 		if incID > 0 {

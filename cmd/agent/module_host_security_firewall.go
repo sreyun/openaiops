@@ -116,13 +116,10 @@ func collectLinuxFirewall() hostSecFirewall {
 		}
 	}
 	if have("systemctl") {
-		if out := strings.TrimSpace(cmdOut(4, "systemctl", "is-active", "nftables")); out != "" {
-			if out == "active" {
-				return hostSecFirewall{Status: "on", Engine: "nftables", Detail: "nftables active"}
-			}
-			if out == "inactive" || out == "failed" {
-				// continue — may still use iptables
-			}
+		// nftables 未启用不代表没有防火墙：很多发行版此时仍然在跑 iptables，
+		// 所以这里只认 active，其余状态一律往下继续探测，不提前下结论。
+		if out := strings.TrimSpace(cmdOut(4, "systemctl", "is-active", "nftables")); out == "active" {
+			return hostSecFirewall{Status: "on", Engine: "nftables", Detail: "nftables active"}
 		}
 		if out := strings.TrimSpace(cmdOut(4, "systemctl", "is-active", "firewalld")); out == "active" {
 			return hostSecFirewall{Status: "on", Engine: "firewalld", Detail: "firewalld active"}

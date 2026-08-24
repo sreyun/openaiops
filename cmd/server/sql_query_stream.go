@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -568,12 +567,4 @@ func sqlFriendlyError(err error, ctx context.Context) string {
 		return "查询已取消"
 	}
 	return msg
-}
-
-// parseIntDefault 供查询参数解析使用。
-func parseIntDefault(s string, def int) int {
-	if n, err := strconv.Atoi(strings.TrimSpace(s)); err == nil {
-		return n
-	}
-	return def
 }

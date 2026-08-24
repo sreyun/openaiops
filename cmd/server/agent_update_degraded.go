@@ -163,7 +163,7 @@ func (s *Server) markHostUpdateDegraded(job *agentUpdateJob, hostID, ver, verdic
 		})
 	}
 	if s.notifier != nil {
-		s.notifier.pushChannels(s.cfg.Get(), Alert{
+		s.notifier.enqueuePush(s.cfg.Get(), Alert{
 			HostID:    hostID,
 			Hostname:  hostLabel,
 			Level:     "warning",

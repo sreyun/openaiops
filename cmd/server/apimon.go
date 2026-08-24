@@ -472,7 +472,7 @@ func (ar *apiRunner) transition(sys APISystem, ep APIEndpoint, up bool, msg stri
 		return // 维护窗口内：记录状态变化但抑制告警推送（探测继续，仅静音通知）
 	}
 	if cfg := ar.cfg.Get(); cfg.AlertsEnabled {
-		ar.notifier.pushChannels(cfg, a, !up)
+		ar.notifier.enqueuePush(cfg, a, !up)
 	}
 }
 

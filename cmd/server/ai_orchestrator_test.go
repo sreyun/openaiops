@@ -84,9 +84,8 @@ func TestAssistTaskPolicy_Golden(t *testing.T) {
 			if c.wantTimeout && p.Timeout <= 0 {
 				t.Errorf("expected Timeout > 0")
 			}
-			if !c.wantTimeout && p.Timeout != 0 && c.task != "dashboard_prompt_optimize" {
-				// 仅标注 wantTimeout 的任务强制；其它允许 0
-			}
+			// 只有标了 wantTimeout 的任务强制要求 Timeout > 0；其余任务给不给都算合法，
+			// 所以这里没有对应的反向断言（原来写成一个空的 if，读起来像漏了断言）。
 			if p.RememberSource != "assist:"+c.task {
 				t.Errorf("RememberSource=%q", p.RememberSource)
 			}

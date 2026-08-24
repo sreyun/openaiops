@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"crypto/subtle"
 	"encoding/json"
 	"io"
@@ -126,16 +125,25 @@ func (s *Server) handlePromRemoteWrite(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "VictoriaMetrics 未启用"})
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 32<<20)) // 32MB 上限
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "读取请求体失败"})
+	// 直接把请求体**流式**转给 VM，不再先 io.ReadAll 到内存。
+	//
+	// 这条端点既免限流（apiRateLimitSkip）又是高频写入：原来每个并发请求都可能
+	// 在堆上按住 32 MB，几个推送方同时刷一批就足以把一台 2 GB 的控制面推到 OOM，
+	// 而这些字节我们一个也不解析——纯粹是搬运。
+	const promWriteMaxBytes = 32 << 20
+	if r.ContentLength > promWriteMaxBytes {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "remote_write 请求体超过 32MB"})
 		return
 	}
-	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(vmc.URL, "/")+"/api/v1/write", bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(vmc.URL, "/")+"/api/v1/write",
+		io.LimitReader(r.Body, promWriteMaxBytes))
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	// 已知长度时原样带上，避免无谓地转成 chunked（部分反代对 chunked 上传更挑剔）；
+	// 上游本来就是 chunked（-1）时保持 chunked。
+	req.ContentLength = r.ContentLength
 	// 透传 remote_write 关键头，VM 据此解 snappy + protobuf
 	req.Header.Set("Content-Type", r.Header.Get("Content-Type"))
 	req.Header.Set("Content-Encoding", r.Header.Get("Content-Encoding"))

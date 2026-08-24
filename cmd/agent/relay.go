@@ -149,24 +149,49 @@ func runRelay(listenAddr, upstream, relaySecret, installToken string) {
 //   - X-AIOps-Client-Host：上游若还有一层 nginx，`proxy_set_header X-Forwarded-Host`
 //     会把上一条覆盖掉，这条自定义头 nginx 不会碰，是这种两层代理下唯一活得下来的线索。
 //     它只参与来源校验，不参与安装地址生成（那条链有自己的端口补回逻辑，别互相干扰）。
+//
+// 实现上用 Rewrite 而不是 Director（Go 1.26 起 Director 已废弃）。语义逐条对齐了旧实现，
+// 别"顺手简化"掉其中任何一条——每一条都对应过一次现场故障：
+//
+//   - SetURL 会把 Out.Host 改成上游 Host，这正是上面说的那件必须做的事；
+//   - X-Forwarded-For 保留入站链再追加本跳。Director 时代 ReverseProxy 自动这么做，
+//     Rewrite 模式下不调 SetXForwarded 就一条都不设；
+//   - **入站已有的 X-Forwarded-Host / -Proto / Forwarded 必须原样带过去**。Rewrite 模式
+//     会在调用回调前把这四个头从 Out 上删干净（这是它的安全默认），可中继前面再套一层
+//     nginx 时，入站那几条才是浏览器眼中的地址与协议：覆盖成中继自己的，来源校验就换错了
+//     对象（表现："界面正常，一按保存就失败"），HTTPS 也会被判成 HTTP。
 func newRelayProxy(target *url.URL, flush time.Duration) *httputil.ReverseProxy {
-	p := httputil.NewSingleHostReverseProxy(target)
-	p.FlushInterval = flush
-	p.Transport = relayTransport
-	orig := p.Director
-	p.Director = func(r *http.Request) {
-		clientHost := strings.TrimSpace(r.Host)
-		orig(r)
-		r.Host = target.Host
-		if clientHost == "" {
-			return
-		}
-		if r.Header.Get("X-Forwarded-Host") == "" {
-			r.Header.Set("X-Forwarded-Host", clientHost)
-		}
-		r.Header.Set("X-AIOps-Client-Host", clientHost)
+	return &httputil.ReverseProxy{
+		FlushInterval: flush,
+		Transport:     relayTransport,
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			clientHost := strings.TrimSpace(pr.In.Host)
+			priorFor := pr.In.Header.Get("X-Forwarded-For")
+			priorHost := pr.In.Header.Get("X-Forwarded-Host")
+			priorProto := pr.In.Header.Get("X-Forwarded-Proto")
+			priorFwd := pr.In.Header.Get("Forwarded")
+
+			pr.SetURL(target) // 路由到上游，并把 Out 的 Host 换成上游 Host
+			pr.Out.Host = target.Host
+			pr.SetXForwarded() // X-Forwarded-For / -Host / -Proto
+
+			if priorFor != "" { // 追加而不是覆盖，保住上游看到的完整链路
+				pr.Out.Header.Set("X-Forwarded-For", priorFor+", "+pr.Out.Header.Get("X-Forwarded-For"))
+			}
+			if priorHost != "" {
+				pr.Out.Header.Set("X-Forwarded-Host", priorHost)
+			}
+			if priorProto != "" {
+				pr.Out.Header.Set("X-Forwarded-Proto", priorProto)
+			}
+			if priorFwd != "" {
+				pr.Out.Header.Set("Forwarded", priorFwd)
+			}
+			if clientHost != "" {
+				pr.Out.Header.Set("X-AIOps-Client-Host", clientHost)
+			}
+		},
 	}
-	return p
 }
 
 // relayInstallHints 生成**能直接粘贴**的内网安装命令：真实网卡地址 + token。

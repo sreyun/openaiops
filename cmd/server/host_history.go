@@ -38,10 +38,6 @@ var hostHistoryMetricNames = []string{
 // Series without a path label (scalars) still match a negative path regex.
 const ephemeralDiskPathRE = `.*(overlay2|/docker/|/kubelet/pods|containerd).*`
 
-func hostHistoryNameRE() string {
-	return hostHistoryNameREOf(nil)
-}
-
 func hostHistoryNameREOf(names []string) string {
 	if len(names) == 0 {
 		names = hostHistoryMetricNames

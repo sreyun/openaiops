@@ -57,6 +57,10 @@ AIOPS_LICENSE_PRIVKEY=<私钥 base64> ./licensetool -issue \
 AIOPS_LICENSE_PUBKEY=<公钥 base64> ./licensetool -verify license.txt
 ```
 
+`-expires` 按**签发机器的本地时区**折算成当天 23:59:59。签发方与客户不在同一时区时，
+控制台上显示的到期日可能与合同上的日期差一天（方向取决于时差）。按 UTC+8 签发、
+交付国内客户时不会有这个问题；跨时区交付前先在合同里写清楚以哪一方的日期为准。
+
 客户拿到 `license.txt` 后：控制台 →「设置 → 授权」（Vue 版）或「个人信息 → 数据与备份 → 授权与用量」（经典版）粘贴安装。也可以挂载文件并设 `AIOPS_LICENSE_FILE=/etc/aiops/license.txt`，首次启动会自动导入并落库。
 
 ### 1.4 相关开关
@@ -73,6 +77,7 @@ AIOPS_LICENSE_PUBKEY=<公钥 base64> ./licensetool -verify license.txt
 - **历史峰值**单独记录并持久化——续费谈判要的是"这一年最多接过多少台"，只看当下的数字会被客户在续费前一天下线一批机器抹平
 - 到期前 30 天起，每天写一条系统日志（`log.license_expiring`），巡检看得见
 - Prometheus：`aiops_license_days_left` / `aiops_license_hosts_used` / `aiops_license_hosts_max` / `aiops_license_read_only`
+- 部署指纹（`install_id`）随 PostgreSQL 持久化。**读不到就不会重新生成**：启动时 PG 短暂不可用只会记一条 error 并沿用库里那条，不会把客户已绑定的指纹覆盖掉（覆盖=授权立刻 install mismatch，且旧指纹找不回来）
 
 ---
 
@@ -85,7 +90,7 @@ AIOPS_LICENSE_PUBKEY=<公钥 base64> ./licensetool -verify license.txt
 - [ ] **授权**：授权文件已安装，控制台「授权与用量」显示 `active`，主机上限与合同一致
 - [ ] **备份**：每日备份已开启；**「备份范围」里的时序与录像按合同勾选**（默认只备 PostgreSQL）
 - [ ] **恢复演练**：`scripts/backup-verify.sh` 跑通并留档（不跑这一条，RTO 就是编的）
-- [ ] **指标出口**：`AIOPS_METRICS_TOKEN` 已设置，客户 Prometheus 已抓到 `/metrics`，第三节告警线已配
+- [ ] **指标出口**：`AIOPS_METRICS_TOKEN` 已设置，客户 Prometheus 已抓到 `/metrics`，`docs/CAPACITY.md` 第三节的告警线已配（含 `aiops_pg_reclaimable_bytes`——磁盘被膨胀吃满是最常见的一类现场事故）
 - [ ] **保留期**：审计/告警/运行历史保留期按客户合规要求设置
 - [ ] **升级纪律**：告知 `docker compose pull` 必须带（只 `up -d` 不会换镜像）
 - [ ] **账号**：默认口令已改；管理员/操作员/只读三档角色按客户组织划好；主机级 RBAC 按需配置
@@ -108,6 +113,7 @@ curl -b cookie.txt -o support.zip https://<面板>/api/v1/admin/support-bundle
 
 | 文件 | 用途 |
 |---|---|
+| `README.txt` | 包内文件清单与生成时间 |
 | `meta.json` | 版本、运行时长、部署指纹、Go/OS/CPU、主机与在线数 |
 | `config.sanitized.json` | 平台配置，密钥/令牌/DSN 已按与 `GET /api/v1/config` 完全相同的口径打码 |
 | `license.json` | 授权状态与用量 |
@@ -133,6 +139,8 @@ curl -b cookie.txt -o support.zip https://<面板>/api/v1/admin/support-bundle
 | 数据库回滚 | `schema_migrate.go` 是 forward-only，没有 down | 升级前自动备份；回滚 = 换镜像 + 还原备份 |
 | 双活 / 异地多活 | 不支持 | 跨机房**冷备/切换** |
 | 授权在线核验 | 刻意不做 | 强调"离线验签、不回调、不采集客户数据" |
+| 界面全英文 / 全繁体 | **只做了一半**：服务端 `Tz/Tr` 三语齐（491 键，有测试卡着），Vue 版 `/v2` 由 `check:hardcoded-copy` 卡着；但**默认出厂的经典控制台**源码里还有约 2700 条写死的简体中文（`node scripts/check-classic-i18n-coverage.mjs` 可随时复核） | 只承诺"中文为主，英文/繁体覆盖主干功能"。别在合同里写"完整多语言界面" |
+| API 错误文案多语言 | `/api/v1` 里约 580 条错误串是写死的简体中文（`fmt.Errorf` 与 `writeJSON` 的 `"error"`），不走 i18n 表 | 同上；英文客户会在弹窗里看到中文原因 |
 
 ---
 
@@ -143,8 +151,11 @@ curl -b cookie.txt -o support.zip https://<面板>/api/v1/admin/support-bundle
 | `cmd/server/license.go` | 授权状态机、准入、只读降级中间件、HTTP 接口 |
 | `cmd/server/license_test.go` | 状态机与准入的回归测试（判定错一次就是事故） |
 | `cmd/licensetool/` | 签发方工具（不交付给客户） |
+| `cmd/licensetool/main_test.go` | 签发往返 / 防篡改 / 换行转发容错的回归测试 |
 | `cmd/server/metrics_prom.go` | `/metrics` 指标出口 |
+| `cmd/server/metrics_pg_storage.go` | PG 体积/膨胀/可回收量指标（10 分钟缓存） |
 | `cmd/server/support_bundle.go` | 诊断包 |
 | `cmd/server/backup_full.go` | 时序 + 录像备份 |
 | `scripts/backup-verify.sh` | 恢复演练 |
+| `scripts/check-classic-i18n-coverage.mjs` | 经典控制台 i18n 覆盖度量（只报数，不拦门禁） |
 | `docs/CAPACITY.md` | 容量规格书 |

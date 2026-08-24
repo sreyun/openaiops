@@ -65,6 +65,9 @@ var (
 	licPeakHosts int             // 计量：历史峰值主机数
 	licPeakTS    int64           //
 	licRemindDay string          // 到期提醒去重（按天）
+	// licMeterLoaded 表示历史峰值已经从 PG 成功读回来了。没读到就不许回写——
+	// 否则一次读失败会把库里的峰值改写成当前值（见 loadLicense 里的说明）。
+	licMeterLoaded bool
 )
 
 type licensePayload struct {
@@ -206,40 +209,34 @@ func (s *Server) loadLicense() {
 	licMu.Unlock()
 
 	if s.pg != nil {
-		if raw, err := s.pg.loadKV(licenseInstallKV); err == nil && len(raw) > 0 {
-			var v struct {
-				ID string `json:"id"`
-			}
-			if json.Unmarshal(raw, &v) == nil && v.ID != "" {
-				licMu.Lock()
-				licInstallID = v.ID
-				licMu.Unlock()
-			}
+		s.loadInstallID()
+		// 计量同理不能"读失败就当没有"：历史峰值是续费谈判的依据，若读不到就从 0 重新
+		// 起算，第一次 licenseObserve 就会把库里那个 500 台的峰值改写成今天的 100 台——
+		// 数字被悄悄改小，而且没人会发现。读失败时**只在内存里跟踪、不落库**，
+		// 等下次启动读成功再恢复持久化。
+		if raw, err := s.loadKVRetry(licenseMeterKV); err != nil {
+			slog.Error("读取授权计量失败：本次启动不会改写已持久化的历史峰值", "err", err)
 		} else {
-			licMu.RLock()
-			id := licInstallID
-			licMu.RUnlock()
-			blob, _ := json.Marshal(map[string]any{"id": id, "created": time.Now().Unix()})
-			if err := s.pg.saveKV(licenseInstallKV, blob); err != nil {
-				slog.Warn("部署指纹落库失败", "err", err)
-			}
-		}
-		if raw, err := s.pg.loadKV(licenseMeterKV); err == nil && len(raw) > 0 {
-			var m struct {
-				Peak int   `json:"peak_hosts"`
-				TS   int64 `json:"peak_ts"`
-			}
-			if json.Unmarshal(raw, &m) == nil {
-				licMu.Lock()
-				licPeakHosts, licPeakTS = m.Peak, m.TS
-				licMu.Unlock()
+			licMu.Lock()
+			licMeterLoaded = true
+			licMu.Unlock()
+			if len(raw) > 0 {
+				var m struct {
+					Peak int   `json:"peak_hosts"`
+					TS   int64 `json:"peak_ts"`
+				}
+				if json.Unmarshal(raw, &m) == nil {
+					licMu.Lock()
+					licPeakHosts, licPeakTS = m.Peak, m.TS
+					licMu.Unlock()
+				}
 			}
 		}
 	}
 
 	stored := ""
 	if s.pg != nil {
-		if raw, err := s.pg.loadKV(licenseKVKey); err == nil && len(raw) > 0 {
+		if raw, err := s.loadKVRetry(licenseKVKey); err == nil && len(raw) > 0 {
 			var v struct {
 				License string `json:"license"`
 			}
@@ -265,6 +262,72 @@ func (s *Server) loadLicense() {
 		return
 	}
 	s.applyLicense(stored, fromFile)
+}
+
+// loadKVRetry 给授权层的两次 kv 读加一层重试。
+//
+// 启动时 PG 抖一下的代价在这里特别大：读不到就会被当成"这是一套全新部署"。
+// 主循环连 PG 已经重试过 10 次，走到这里再失败属于异常，短重试足够覆盖
+// 主备切换那几秒。
+func (s *Server) loadKVRetry(key string) ([]byte, error) {
+	var lastErr error
+	for i := 0; i < 3; i++ {
+		raw, err := s.pg.loadKV(key)
+		if err == nil {
+			return raw, nil
+		}
+		lastErr = err
+		if i < 2 {
+			time.Sleep(2 * time.Second)
+		}
+	}
+	return nil, lastErr
+}
+
+// loadInstallID 装配部署指纹，并且**只在确认库里没有时**才写入新的。
+//
+// 这里曾经把"读失败"和"没有这条记录"合并成同一个 else 分支：PG 在启动那一刻抖一下，
+// 就会生成一个新指纹并 UPSERT 覆盖掉库里原来那条——客户按旧指纹签发的授权从此
+// install mismatch，平台降级只读，而旧指纹已经被写没了，连重新签发都无从谈起。
+// 一次瞬时读错误不该有这种破坏力，所以：读失败 → 什么都不写；确认没有 → 用
+// INSERT ... DO NOTHING 写，写不进去说明别的进程刚写过，把它读回来用。
+func (s *Server) loadInstallID() {
+	raw, err := s.loadKVRetry(licenseInstallKV)
+	if err != nil {
+		slog.Error("读取部署指纹失败：本次启动不会改动已持久化的指纹（授权可能暂时判为未授权，恢复 PostgreSQL 后重启即可）", "err", err)
+		return
+	}
+	adopt := func(b []byte) bool {
+		var v struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal(b, &v) != nil || v.ID == "" {
+			return false
+		}
+		licMu.Lock()
+		licInstallID = v.ID
+		licMu.Unlock()
+		return true
+	}
+	if len(raw) > 0 && adopt(raw) {
+		return
+	}
+	licMu.RLock()
+	id := licInstallID
+	licMu.RUnlock()
+	blob, _ := json.Marshal(map[string]any{"id": id, "created": time.Now().Unix()})
+	inserted, err := s.pg.saveKVIfAbsent(licenseInstallKV, blob)
+	if err != nil {
+		slog.Warn("部署指纹落库失败", "err", err)
+		return
+	}
+	if inserted {
+		return
+	}
+	// 没写进去 = 库里已经有一条（并发启动，或上面那条 JSON 解析不出来）。以库里的为准。
+	if cur, err := s.pg.loadKV(licenseInstallKV); err == nil && len(cur) > 0 {
+		adopt(cur)
+	}
 }
 
 // applyLicense 验签后写入内存状态；fromFile=true 时顺带落库，
@@ -333,8 +396,9 @@ func (s *Server) licenseObserve(used int) {
 		changed = true
 	}
 	peak, ts := licPeakHosts, licPeakTS
+	persist := licMeterLoaded
 	licMu.Unlock()
-	if changed && s.pg != nil {
+	if changed && persist && s.pg != nil {
 		blob, _ := json.Marshal(map[string]any{"peak_hosts": peak, "peak_ts": ts})
 		if err := s.pg.saveKV(licenseMeterKV, blob); err != nil {
 			slog.Warn("授权计量落库失败", "err", err)

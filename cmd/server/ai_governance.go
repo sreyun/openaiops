@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -140,32 +141,41 @@ func (h *aiGovHub) listTools(limit int) []aiToolAuditEntry {
 	return out
 }
 
-// redactAIText masks emails/phones/tokens in AI prompts/responses when enabled.
+// AI 出网脱敏的模式表。
+//
+// 这些正则的**目的不是做完整 DLP**，而是把"一旦泄漏就直接出事"的那几类挡在出网请求
+// 之外：密钥、口令、邮箱、手机号、长摘要。顺序有讲究——先按 key=value 整体替换值，
+// 再扫裸露的密钥前缀，否则 `api_key=sk-xxx` 会被后一条先啃掉一半。
+var (
+	// key=value / key: value 形式的凭据。值可能带引号，也可能裸奔到下一个分隔符。
+	reRedactSecretKV = regexp.MustCompile(`(?i)\b(api[_-]?key|secret[_-]?key|secret|password|passwd|pwd|token|access[_-]?key|private[_-]?key|authorization)\b(\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;"'&]+)`)
+	// 裸露的密钥字面量：OpenAI/Anthropic 风格 sk-、GitHub ghp_、AWS AKIA、Slack xox*。
+	reRedactAPIKey = regexp.MustCompile(`\b(?:sk|rk|pk)-[A-Za-z0-9_\-]{16,}\b|\bgh[pousr]_[A-Za-z0-9]{20,}\b|\bAKIA[0-9A-Z]{16}\b|\bxox[baprs]-[A-Za-z0-9-]{10,}\b`)
+	reRedactEmail  = regexp.MustCompile(`\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b`)
+	// 中国大陆手机号（可带 +86 / 86 前缀）。函数注释一直写着"脱敏手机号"，实现里却
+	// 从来没有这一条——写进合规说明的能力必须真的存在。
+	reRedactPhoneCN = regexp.MustCompile(`(?:\+?86[- ]?)?\b1[3-9]\d{9}\b`)
+	// 长十六进制串：会话令牌、哈希、指纹。24 位以下留着——主机短 ID 与端口号还要给
+	// 模型当上下文用，全抹掉等于把问题本身也抹掉了。
+	reRedactLongHex = regexp.MustCompile(`\b[0-9a-fA-F]{24,}\b`)
+)
+
+// redactAIText 在「AI 设置 → 敏感字段脱敏」打开时，对送往模型的提示词与回显文本做脱敏。
+//
+// 旧实现把整段文本里的每一个 `@` 换成 `[at]`（于是 `image@sha256:`、Java 注解、
+// `user@host` 形式的命令全被改坏），并把任何超过 12 位的十六进制串打星；
+// 而函数注释承诺的"邮箱/手机号/令牌"里，手机号一条都没做，最该挡的
+// `sk-…` 密钥与 `password=…` 也没有。这是写进交付说明的合规能力，
+// 说到的必须做到，没做的不能写在注释里。
 func redactAIText(s string, enabled bool) string {
 	if !enabled || s == "" {
 		return s
 	}
-	// Lightweight patterns — full DLP is out of scope; enough for governance demo.
-	out := s
-	out = strings.ReplaceAll(out, "@", "[at]")
-	if len(out) > 8 {
-		// mask long hex/base64-looking secrets
-		var b strings.Builder
-		run := 0
-		for _, r := range out {
-			if (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F') {
-				run++
-				if run > 12 {
-					b.WriteByte('*')
-					continue
-				}
-			} else {
-				run = 0
-			}
-			b.WriteRune(r)
-		}
-		out = b.String()
-	}
+	out := reRedactSecretKV.ReplaceAllString(s, "${1}${2}***")
+	out = reRedactAPIKey.ReplaceAllString(out, "***")
+	out = reRedactEmail.ReplaceAllString(out, "***@***")
+	out = reRedactPhoneCN.ReplaceAllString(out, "***")
+	out = reRedactLongHex.ReplaceAllString(out, "***")
 	return out
 }
 

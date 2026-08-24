@@ -185,7 +185,7 @@ func (s *Server) persistContentAuditReport(rep shared.ContentAuditReport) {
 		}
 		s.store.AddLog(LogEntry{Kind: KindSystem, Level: lvl, Actor: "内容审计DLP", Host: hostname, Message: a.Message})
 		if cfg.AlertsEnabled && shouldAlertContent(a.HostID+"|"+a.Scope+"|"+labels[i]+"|"+ev.PolicyDecision, ev.Ts) {
-			s.notifier.pushChannels(cfg, a, true)
+			s.notifier.enqueuePush(cfg, a, true)
 			if lvl == "critical" && s.incidents != nil {
 				s.incidents.OnAlertTransition(a, alertKey(a), true) // 密钥外泄 / 策略拦截转 Incident
 			}

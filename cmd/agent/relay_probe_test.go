@@ -317,3 +317,46 @@ func TestRelayProxyPreservesClientHostForOriginCheck(t *testing.T) {
 		t.Errorf("X-AIOps-Client-Host 应是中继地址，实际 %q", aiops)
 	}
 }
+
+// 中继前面再套一层 nginx 时，入站的 X-Forwarded-Host / -Proto / Forwarded 才是
+// **浏览器眼中的**地址与协议。Rewrite 模式默认会把这几个头从出站请求上删掉
+// （那是它给不受信任来源准备的安全默认），中继这一跳必须把它们原样带过去：
+// 覆盖成中继自己的，来源校验就换错了对象（"界面正常，一按保存就失败"），
+// HTTPS 也会被上游判成 HTTP。
+func TestRelayProxyKeepsUpstreamForwardedHeaders(t *testing.T) {
+	var xfh, xfp, fwd, xff string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		xfh = r.Header.Get("X-Forwarded-Host")
+		xfp = r.Header.Get("X-Forwarded-Proto")
+		fwd = r.Header.Get("Forwarded")
+		xff = r.Header.Get("X-Forwarded-For")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer up.Close()
+	target, err := url.Parse(up.URL)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "http://192.168.30.114:8529/api/v1/hosts/folder/batch", nil)
+	req.Host = "192.168.30.114:8529"
+	req.Header.Set("X-Forwarded-Host", "panel.example.com")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("Forwarded", "host=panel.example.com;proto=https")
+	req.Header.Set("X-Forwarded-For", "203.0.113.7")
+	newRelayProxy(target, 0).ServeHTTP(httptest.NewRecorder(), req)
+
+	if xfh != "panel.example.com" {
+		t.Errorf("X-Forwarded-Host 应保留入站值，实际 %q", xfh)
+	}
+	if xfp != "https" {
+		t.Errorf("X-Forwarded-Proto 应保留入站值，实际 %q", xfp)
+	}
+	if fwd != "host=panel.example.com;proto=https" {
+		t.Errorf("Forwarded 应保留入站值，实际 %q", fwd)
+	}
+	if !strings.HasPrefix(xff, "203.0.113.7,") {
+		t.Errorf("X-Forwarded-For 应在入站链后追加本跳，实际 %q", xff)
+	}
+	// 自定义头仍然带的是中继地址：两层代理下它是唯一活得下来的线索。
+}

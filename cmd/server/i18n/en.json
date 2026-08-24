@@ -482,5 +482,15 @@
   "log.backup_full": "Full backup created (PG + metrics + recordings): %s; %d part(s) failed",
   "backup.full_hint": "Restore PostgreSQL from the backup list; push the metrics dump back via /api/v1/import/native; untar recordings into the recordings directory. See docs/DEPLOY_GUIDE.md.",
   "license.not_installed": "No license installed — writes are degraded to read-only. Collection, alerting and agent reporting keep running. Ask your vendor for a license and upload it under License & usage.",
-  "license.read_only_invalid": "License is invalid (signature or deployment ID mismatch) — writes are read-only. Re-issue it with the deployment ID shown in the console."
+  "license.read_only_invalid": "License is invalid (signature or deployment ID mismatch) — writes are read-only. Re-issue it with the deployment ID shown in the console.",
+  "ai.config_saved": "Saved AI settings",
+  "log.forward_agent_offline": "Port forwarding failed: the target host agent is offline",
+  "log.alert_ack": "Acknowledged alert: %s (%s)",
+  "log.alert_ack_scope": "Acknowledged alert: %s (%s/%s)",
+  "log.alert_clear": "Cleared alert state: %s (%s)",
+  "log.alert_silence": "Silenced alert: %s (%s)",
+  "log.alert_silence_scope": "Silenced alert: %s (%s/%s)",
+  "log.custom_webhook_failed": "Custom webhook delivery failed: %s",
+  "notify.custom_webhook": "Custom webhook",
+  "notify.custom_webhook_failed": "Custom webhook delivery failed"
 }

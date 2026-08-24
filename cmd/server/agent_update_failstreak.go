@@ -219,7 +219,7 @@ func (s *Server) noteAgentUpdateFailure(hostID, fromVer, msg string) {
 		})
 	}
 	if s.notifier != nil {
-		s.notifier.pushChannels(s.cfg.Get(), Alert{
+		s.notifier.enqueuePush(s.cfg.Get(), Alert{
 			HostID:    hostID,
 			Hostname:  hostLabel,
 			Level:     "warning",
