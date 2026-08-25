@@ -6,7 +6,7 @@
 
 [![Version](https://img.shields.io/badge/Version-v1.0.6-blue)](https://github.com/sreyun/aiops/releases/tag/v1.0.6)
 [![Go](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white)](https://go.dev)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](../LICENSE)
 [![Platforms](https://img.shields.io/badge/Platforms-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey)]()
 
 **[简体中文](README.md) · [繁體中文](README.zh-TW.md) · [English](README_EN.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Deutsch](README.de.md) · [Français](README.fr.md) · [Español](README.es.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md)**
@@ -45,7 +45,7 @@ open http://localhost:8529
 |---|---|
 | **逆接続でネットワーク変更が少ない** | Agent が Server へ外向き接続。ターミナル / デスクトップ / 転送も同じトンネル |
 | **単一バイナリ + 依存ゼロ Agent** | サーバーは Go 1 本。Agent は標準ライブラリ収集（Linux / Windows / macOS / Kylin） |
-| **データは自前** | PostgreSQL + VictoriaMetrics、MIT、機能制限なし |
+| **データは自前** | PostgreSQL + VictoriaMetrics、完全セルフホスト、強制テレメトリなし |
 
 > 「死活監視だけ」「ダッシュボードだけ」の小ツールではありません。中小チームがよく継ぎ接ぎする監視 + アラート + 遠隔切り分けを一つのプラットフォームに収束します。  
 > 機能は広くてよい——**入口の説明は狭く保つ。**
@@ -250,7 +250,11 @@ Issue / PR / ドキュメント歓迎。モジュールが多いので、**尖�
 
 ## ライセンス
 
-**MIT** — [LICENSE](LICENSE)。ホスト数制限・機能制限・強制テレメトリなし。  
+**AGPL-3.0** — [LICENSE](../LICENSE)。社内での自己ホスト利用は無償・ホスト数無制限。
+クローズドソースでの配布、自社製品への組み込み、改変版のネットワークサービス提供（AGPL 第13条）には**商用ライセンス**が必要です：[LICENSING.md](../LICENSING.md)。
+
+> `v1.1.119` 以前のバージョンは MIT のまま有効です（遡及しません）。  
+
 `vendor/` は各ライセンスに従います。モバイルクライアントは別配布です。
 
 ---

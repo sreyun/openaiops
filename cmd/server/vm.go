@@ -79,11 +79,12 @@ type vmWriter struct {
 	historyCache *vmHistoryCache
 	// diag 记录读写两个方向最近一次的结果，供 /api/v1/vm/diagnostics 回答
 	// 「到底写进去没有 / 读得到吗」。见 vm_diag.go。
-	diag     vmDiag
-	dropped  atomic.Uint64
-	stopCh   chan struct{}
-	stopped  chan struct{}
-	stopOnce sync.Once
+	diag         vmDiag
+	dropped      atomic.Uint64
+	checkDropped atomic.Uint64 // 拨测结果因 checkCh 满而丢弃的累计数
+	stopCh       chan struct{}
+	stopped      chan struct{}
+	stopOnce     sync.Once
 	// rawCh carries pre-formatted Prometheus text lines (hardware / SNMP / NetFlow /
 	// Hyper-V / exporter scrape) through the SAME batch+retry pipeline as host
 	// samples. 这些指标此前是「每次调用起一个 goroutine 发一个请求、失败就算了」：
@@ -138,6 +139,12 @@ func (v *vmWriter) enqueueCheck(cs vmCheckSample) {
 	select {
 	case v.checkCh <- cs:
 	default:
+		// 与主机样本同款：丢了要有数。原来这里静默 default，1 万个检查一轮就能
+		// 把 4096 的缓冲打满，趋势图上的洞没有任何指标能解释。
+		n := v.checkDropped.Add(1)
+		if n == 1 || n%500 == 0 {
+			slog.Warn("VictoriaMetrics 拨测写入队列已满，结果被丢弃（趋势曲线会出现空洞）", "dropped", n, "check", cs.checkID)
+		}
 	}
 }
 

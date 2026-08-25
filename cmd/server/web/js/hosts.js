@@ -510,6 +510,63 @@ function persistHostTreeCollapsed() {
   try { localStorage.setItem("aiops_host_tree_collapsed", JSON.stringify([...HOST_TREE_COLLAPSED])); } catch (e) {}
 }
 
+/* ---------- 收藏：与新控制台（Vue）共用同一个 localStorage 键，两边收藏同一份 ---------- */
+function loadHostTreeFavs() {
+  try {
+    const arr = JSON.parse(localStorage.getItem("aiops_host_tree_favs") || "[]");
+    return Array.isArray(arr) ? arr.filter(x => typeof x === "string") : [];
+  } catch (e) { return []; }
+}
+let HOST_TREE_FAVS = loadHostTreeFavs();
+// 搜索行是否展开：由工具栏放大镜图标触发，有筛选词时强制保持展开。
+let HOST_TREE_SEARCH_OPEN = false;
+
+function persistHostTreeFavs() {
+  try { localStorage.setItem("aiops_host_tree_favs", JSON.stringify(HOST_TREE_FAVS)); } catch (e) {}
+}
+
+function toggleHostFav(id) {
+  if (!id) return;
+  const i = HOST_TREE_FAVS.indexOf(id);
+  if (i >= 0) HOST_TREE_FAVS.splice(i, 1);
+  else HOST_TREE_FAVS.push(id);
+  persistHostTreeFavs();
+  renderHostTree();
+}
+
+/** 分组的祖先链（不含自身）：收藏跳转时全部展开，目标才不会被藏起来。 */
+function hostFolderAncestorIds(id) {
+  const trail = [];
+  const walk = (list, acc) => {
+    for (const n of list || []) {
+      if (n.id === id) { trail.push.apply(trail, acc); return true; }
+      if (walk(n.children || [], acc.concat(n.id))) return true;
+    }
+    return false;
+  };
+  walk(HOST_FOLDERS.folders || [], []);
+  return trail;
+}
+
+/** 收藏固定区：钉在树顶，只保留仍然存在的分组；分组被删后自然掉出去。 */
+function hostFavsHTML() {
+  if (HOST_TREE_MODE !== "folder" || !HOST_TREE_FAVS.length) return "";
+  const flat = flattenHostFolders(HOST_FOLDERS.folders || []);
+  const rows = HOST_TREE_FAVS.map(id => flat.find(f => f.id === id)).filter(Boolean).map(f => {
+    const cnt = (HOST_FOLDERS.counts && HOST_FOLDERS.counts[f.id]) || { total: 0 };
+    return `<div class="htx-fav-row${CUR_FOLDER === f.id ? " selected" : ""}" data-fav-sel="${esc(f.id)}" role="button" tabindex="0" title="${esc(f.path)}">
+      <span class="htx-fav-name">${esc(f.name)}</span>
+      <span class="htx-count">${cnt.total || 0}</span>
+      <button type="button" class="htx-act htx-fav-del" data-fav-del="${esc(f.id)}" title="${esc(I18N.t("section.fav_remove", "取消收藏"))}">✕</button>
+    </div>`;
+  }).join("");
+  if (!rows) return "";
+  return `<div class="htx-favs" role="group" aria-label="${esc(I18N.t("section.fav_title", "收藏"))}">
+    <div class="htx-favs-head"><span class="htx-favs-star" aria-hidden="true">★</span>${esc(I18N.t("section.fav_title", "收藏"))}</div>
+    ${rows}
+  </div>`;
+}
+
 function hostFolderMatchSet(folderId) {
   if (!folderId) return null;
   if (folderId === "__ungrouped__") return new Set(["__ungrouped__"]);
@@ -736,6 +793,7 @@ function hostTreeNodeHTML(n, depth, q) {
   if (q && !folderMatchesTreeQ(n, q)) return "";
   const cnt = (HOST_FOLDERS.counts && HOST_FOLDERS.counts[n.id]) || { total: 0, online: 0 };
   const sel = HOST_TREE_MODE === "folder" && CUR_FOLDER === n.id;
+  const fav = HOST_TREE_FAVS.indexOf(n.id) >= 0;
   const hasKids = (n.children || []).length > 0;
   const collapsed = !q && HOST_TREE_COLLAPSED.has(n.id);
   let kids = "";
@@ -743,12 +801,13 @@ function hostTreeNodeHTML(n, depth, q) {
     kids = `<div class="htx-children" role="group">${(n.children || []).map(c => hostTreeNodeHTML(c, depth + 1, q)).join("")}</div>`;
   }
   return `<div class="htx-folder" data-depth="${depth}">
-    <div class="htx-node${sel ? " selected" : ""}${hasKids ? " has-kids" : " is-leaf"}" data-folder-sel="${esc(n.id)}" data-ctx-folder="${esc(n.id)}" role="treeitem" aria-selected="${sel ? "true" : "false"}" tabindex="0">
+    <div class="htx-node${sel ? " selected" : ""}${fav ? " has-fav" : ""}${hasKids ? " has-kids" : " is-leaf"}" data-folder-sel="${esc(n.id)}" data-ctx-folder="${esc(n.id)}" role="treeitem" aria-selected="${sel ? "true" : "false"}" tabindex="0">
       ${hostTreeCaretHTML(n.id, hasKids, collapsed)}
       <span class="htx-ico htx-ico-folder" aria-hidden="true"></span>
       <span class="htx-name" title="${esc(n.name)}">${esc(n.name)}</span>
       <span class="htx-count" title="${cnt.online || 0}/${cnt.total || 0}">${cnt.total || 0}</span>
       <span class="htx-acts">
+        <button type="button" class="htx-act htx-fav${fav ? " on" : ""}" data-fav-tog="${esc(n.id)}" title="${esc(I18N.t(fav ? "section.fav_remove" : "section.fav_add", fav ? "取消收藏" : "收藏分组"))}">${fav ? "★" : "☆"}</button>
         <button type="button" class="htx-act htx-add" data-folder-add="${esc(n.id)}" title="${I18N.t("section.folder_add_child")}">+</button>
         <button type="button" class="htx-act" data-folder-ren="${esc(n.id)}" title="${I18N.t("section.folder_rename")}">✎</button>
         <button type="button" class="htx-act danger" data-folder-del="${esc(n.id)}" title="${I18N.t("section.folder_delete")}">✕</button>
@@ -851,21 +910,26 @@ function hostTreeHTML() {
   const mode = HOST_TREE_MODE === "type" ? "type" : "folder";
   const q = (HOST_TREE_Q || "").trim().toLowerCase();
   const body = mode === "type" ? hostTypeTreeHTML(q) : hostAssetTreeHTML(q);
+  // 搜索行不再常驻：由工具栏放大镜触发，有筛选词时强制保持展开（否则筛选在暗处生效，用户一脸茫然）。
+  const searchOpen = HOST_TREE_SEARCH_OPEN || !!q;
   return `<div class="htx-tabs">
       <button type="button" class="htx-tab${mode === "folder" ? " active" : ""}" data-tree-mode="folder">${I18N.t("section.asset_tree")}</button>
       <button type="button" class="htx-tab${mode === "type" ? " active" : ""}" data-tree-mode="type">${I18N.t("section.type_tree")}</button>
       <span class="htx-tab-tools">
+        <button type="button" class="htx-tool-btn${searchOpen ? " active" : ""}" data-tree-search-toggle title="${esc(I18N.t(mode === "type" ? "section.type_search_ph" : "section.folder_search_ph"))}" aria-expanded="${searchOpen ? "true" : "false"}">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.3" y2="16.3"/></svg>
+        </button>
         <button type="button" class="htx-tool-btn" data-folder-refresh title="${I18N.t("section.host_refresh")}">
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
         </button>
         ${mode === "folder" ? `<button type="button" class="htx-tool-btn htx-add-root" data-folder-add="" title="${I18N.t("section.folder_add_root")}">+</button>` : ""}
       </span>
     </div>
-    <div class="htx-tree-search">
+    ${searchOpen ? `<div class="htx-tree-search">
       <input type="search" id="hostTreeSearch" class="htx-tree-q" value="${esc(HOST_TREE_Q || "")}"
         placeholder="${esc(mode === "type" ? I18N.t("section.type_search_ph") : I18N.t("section.folder_search_ph"))}" autocomplete="off">
-    </div>
-    <div class="htx-scroll">${body}</div>`;
+    </div>` : ""}
+    <div class="htx-scroll">${hostFavsHTML()}${body}</div>`;
 }
 
 function renderHostTree() {
@@ -1159,6 +1223,9 @@ async function hostFolderDelete(id) {
     // Clear selection if the current folder is the deleted node or under it.
     const match = hostFolderMatchSet(id);
     if (CUR_FOLDER === id || (match && match.has(CUR_FOLDER))) setCurFolder("");
+    // 指向被删分组（含子分组）的收藏一并清掉，否则固定区里留着幽灵行。
+    HOST_TREE_FAVS = HOST_TREE_FAVS.filter(x => x !== id && !(match && match.has(x)));
+    persistHostTreeFavs();
     toast(I18N.t("toast.folder_deleted"), "ok");
     await loadHostFolders();
     await afterHostFolderChange();
@@ -1191,6 +1258,12 @@ function bindHostTreeOnce() {
     e.preventDefault();
     showHostTreeCtx(e.clientX, e.clientY, node.getAttribute("data-ctx-folder") || "");
   });
+  // 收藏行是 role=button 的 div：Enter 触发跳转，键盘用户才进得去。
+  tree.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    const fav = e.target.closest && e.target.closest("[data-fav-sel]");
+    if (fav) { e.preventDefault(); fav.click(); }
+  });
   tree.addEventListener("click", async (e) => {
     const modeBtn = e.target.closest("[data-tree-mode]");
     if (modeBtn) {
@@ -1202,6 +1275,36 @@ function bindHostTreeOnce() {
     if (e.target.closest("[data-folder-refresh]")) {
       e.stopPropagation();
       if (typeof refresh === "function") refresh();
+      return;
+    }
+    if (e.target.closest("[data-tree-search-toggle]")) {
+      e.stopPropagation();
+      const open = HOST_TREE_SEARCH_OPEN || !!(HOST_TREE_Q || "").trim();
+      HOST_TREE_SEARCH_OPEN = !open;
+      // 收起时顺手清掉筛选词：回到完整树，避免"搜索行不见了但树还被过滤着"
+      if (!HOST_TREE_SEARCH_OPEN && HOST_TREE_Q) HOST_TREE_Q = "";
+      renderHostTree();
+      if (HOST_TREE_SEARCH_OPEN) {
+        const inp = tree.querySelector("#hostTreeSearch");
+        if (inp) inp.focus();
+      }
+      return;
+    }
+    const favTog = e.target.closest("[data-fav-tog]");
+    if (favTog) { e.stopPropagation(); toggleHostFav(favTog.getAttribute("data-fav-tog") || ""); return; }
+    const favDel = e.target.closest("[data-fav-del]");
+    if (favDel) { e.stopPropagation(); toggleHostFav(favDel.getAttribute("data-fav-del") || ""); return; }
+    const favSel = e.target.closest("[data-fav-sel]");
+    if (favSel) {
+      // 收藏跳转：选中分组并把祖先链全部展开，目标一眼可见
+      const id = favSel.getAttribute("data-fav-sel") || "";
+      HOST_TREE_Q = "";
+      HOST_TREE_SEARCH_OPEN = false;
+      HOST_TREE_COLLAPSED.delete("__all__");
+      hostFolderAncestorIds(id).forEach(a => HOST_TREE_COLLAPSED.delete(a));
+      persistHostTreeCollapsed();
+      setCurFolder(id);
+      renderHosts(LAST_HOSTS);
       return;
     }
     const add = e.target.closest("[data-folder-add]");

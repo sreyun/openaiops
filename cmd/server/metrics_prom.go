@@ -161,6 +161,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		writeMetricLine(&b, "aiops_vm_breaker_state", float64(breakerStateCode(s.vm.writeBreaker().state())), "breaker", "write")
 		writeMetricLine(&b, "aiops_vm_breaker_state", float64(breakerStateCode(s.vm.queryBreaker().state())), "breaker", "read")
 		c("aiops_vm_dropped_samples_total", "Samples dropped because the ingest queue was full", float64(s.vm.dropped.Load()))
+		c("aiops_vm_dropped_check_samples_total", "Check results dropped because the check ingest queue was full", float64(s.vm.checkDropped.Load()))
 		fmt.Fprintf(&b, "# HELP aiops_vm_queue_depth Pending samples per ingest queue\n# TYPE aiops_vm_queue_depth gauge\n")
 		writeMetricLine(&b, "aiops_vm_queue_depth", float64(len(s.vm.ch)), "queue", "host")
 		writeMetricLine(&b, "aiops_vm_queue_depth", float64(len(s.vm.checkCh)), "queue", "check")
@@ -188,7 +189,8 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// PG 存储：库体积、膨胀与「一次回收能拿回多少」。10 分钟缓存，见 metrics_pg_storage.go。
-	writePGStorageMetrics(&b, s.pgStorageMetrics(time.Now()))
+	probeNow := time.Now()
+	writePGStorageMetrics(&b, s.pgStorageMetrics(probeNow), probeNow)
 
 	// 授权余量：签发方与客户的 SRE 都需要在到期前看见它
 	lic := s.licenseStatus()

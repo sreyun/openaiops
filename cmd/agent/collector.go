@@ -46,3 +46,10 @@ func rate(cur, prev uint64, elapsed float64) float64 {
 	}
 	return float64(cur-prev) / elapsed
 }
+
+// maxProcessNames 是每次上报携带的去重进程名上限（三个平台共用）。
+//
+// 原来是 256 且**静默截断**：跑容器的宿主机上不同进程名轻易超过 256 个，被截掉的
+// 那些名字对应的进程监控就会全部误报「进程未运行」。名字只是去重后的短字符串，
+// 1024 个也不过十几 KB；服务端只在 Latest 上保留一份，历史环不存。
+const maxProcessNames = 1024

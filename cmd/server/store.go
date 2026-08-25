@@ -73,6 +73,12 @@ type Host struct {
 	hist5m   []shared.Sample // RAM cache (30d of 5-min aggregates) — not persisted
 	last1mTs int64           // timestamp of last 1-min aggregation
 	last5mTs int64           // timestamp of last 5-min aggregation
+	// procBase1h 是最近 1 小时（最多 60 个 1 分钟点）的平均进程数，在 1m 层每次追加时
+	// 顺手算好。告警评估 Evaluate 原来是每次调用都把整条 1m 环（2880 点）加一遍——
+	// 它被 WebSocket 推送每 3 秒 × 每个连接、通知器每 10 秒、/alerts、/summary、
+	// /metrics 各自调用，500 台就是每秒几百万次加法；而且是在 store.mu 之外读 hist1m，
+	// 与 UpsertAuthenticated 的 append/重切片竞争。注释写的本来就是「1h 基线」。
+	procBase1h float64
 }
 
 // storedEvent decorates a plugin event with the host it came from.
@@ -378,6 +384,7 @@ func (s *Store) UpsertAuthenticated(r shared.Report, fingerprint string) (*Host,
 				h.hist1m = h.hist1m[len(h.hist1m)-hist1mMax:]
 			}
 			h.last1mTs = now
+			h.procBase1h = procBaseline(h.hist1m, 60)
 		}
 	}
 
@@ -963,4 +970,26 @@ func (s *Store) ImportAlertHistory(records []AlertRecord) {
 			s.alertSeq = r.ID
 		}
 	}
+}
+
+// procBaseline 取 1m 层最近 window 个点的平均进程数；没有数据时为 0。
+func procBaseline(hist1m []shared.Sample, window int) float64 {
+	if len(hist1m) == 0 {
+		return 0
+	}
+	if window > 0 && len(hist1m) > window {
+		hist1m = hist1m[len(hist1m)-window:]
+	}
+	var sum float64
+	for i := range hist1m {
+		sum += float64(hist1m[i].ProcCount)
+	}
+	return sum / float64(len(hist1m))
+}
+
+// EventCount 返回事件环里的条数。只为拿个数而调用 RecentEvents 会白白复制整个环。
+func (s *Store) EventCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.events)
 }

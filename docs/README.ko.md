@@ -6,7 +6,7 @@
 
 [![Version](https://img.shields.io/badge/Version-v1.0.6-blue)](https://github.com/sreyun/aiops/releases/tag/v1.0.6)
 [![Go](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white)](https://go.dev)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](../LICENSE)
 [![Platforms](https://img.shields.io/badge/Platforms-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey)]()
 
 **[简体中文](README.md) · [繁體中文](README.zh-TW.md) · [English](README_EN.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Deutsch](README.de.md) · [Français](README.fr.md) · [Español](README.es.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md)**
@@ -45,7 +45,7 @@ open http://localhost:8529
 |---|---|
 | **역방향 연결, 네트워크 변경 최소** | Agent가 Server로 아웃바운드. 터미널 / 데스크톱 / 포워딩도 같은 터널 |
 | **단일 바이너리 + 의존성 없는 Agent** | 서버는 Go 하나. Agent는 표준 라이브러리 수집（Linux / Windows / macOS / Kylin） |
-| **데이터는 당신 것** | PostgreSQL + VictoriaMetrics, MIT, 기능 제한 없음 |
+| **데이터는 당신 것** | PostgreSQL + VictoriaMetrics, 완전 셀프 호스팅, 강제 텔레메트리 없음 |
 
 > 「생존 체크만」「대시보드만」하는 작은 도구가 아닙니다. 중소팀이 흔히 이어 붙이는 모니터링 + 알림 + 원격 장애 처리를 하나의 플랫폼으로 모읍니다.  
 > 기능은 넓어도 됩니다——**입구 설명은 좁게 유지하세요.**
@@ -250,7 +250,11 @@ Issue / PR / 문서 환영. 모듈이 많으므로 **핵심 경로 관련 변경
 
 ## 라이선스
 
-**MIT** — [LICENSE](LICENSE). 호스트 수 제한·기능 제한·강제 텔레메트리 없음.  
+**AGPL-3.0** — [LICENSE](../LICENSE). 사내 자체 호스팅 사용은 무료이며 호스트 수 제한이 없습니다.
+비공개 배포, 자사 제품 내장, 수정본의 네트워크 서비스 제공(AGPL 13조)에는 **상용 라이선스**가 필요합니다: [LICENSING.md](../LICENSING.md).
+
+> `v1.1.119` 이하 버전은 계속 MIT 입니다(소급 적용되지 않음).  
+
 `vendor/`는 각 라이선스를 따릅니다. 모바일 클라이언트는 별도 배포입니다.
 
 ---

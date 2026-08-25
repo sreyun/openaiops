@@ -388,7 +388,10 @@ func (i *linuxInput) MouseMove(x, y int) error {
 	ax, ay := i.originX+x, i.originY+y
 	switch i.mouseTool {
 	case "xdotool":
-		return i.runXdo("mousemove", "--sync", strconv.Itoa(ax), strconv.Itoa(ay))
+		// 不加 --sync：它会**等 X 服务器确认指针已经移到位**才返回，每个事件多一次
+		// 往返。移动本来就是"最后一个位置说了算"的量，等它到位没有意义，
+		// 而在拖动时这一等就是几十毫秒 × 每秒几十次。
+		return i.runXdo("mousemove", strconv.Itoa(ax), strconv.Itoa(ay))
 	case "ydotool":
 		return exec.Command("ydotool", "mousemove", "--absolute", "-x", strconv.Itoa(ax), "-y", strconv.Itoa(ay)).Run()
 	default:

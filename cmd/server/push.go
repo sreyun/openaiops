@@ -60,8 +60,44 @@ func (s *Server) handlePushWS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// pushPush sends the current summary + alerts to a single client.
-func (s *Server) pushPush(c *pushClient) {
+// pushSnapshot 是一轮推送的全部产物：摘要与告警的 JSON 字节、主机名册签名。
+//
+// 它在所有 WebSocket 客户端之间**共享**。原来 pushPush 对每个连接各算一遍：
+// ListHosts（复制全部主机）+ Evaluate（遍历全部主机）+ 四个附加评估器 + 名册签名排序，
+// 每 3 秒一次——10 个打开的控制台就是十倍的工作量，5000 台时每个控制台每 3 秒都要
+// 让服务端复制 5000 台主机再评估一遍。现在同一秒内的所有客户端拿同一份快照。
+type pushSnapshot struct {
+	at          time.Time
+	totalHosts  int
+	onlineHosts int
+	summaryJSON []byte
+	alertsJSON  []byte
+	rosterSig   string
+}
+
+// 状态是包级变量而不是 Server 字段：往 handlers.go 的 Server 结构体加字段会打断
+// 开源镜像仓的发版构建（见 CLAUDE.md）。
+var (
+	pushSnapMu   sync.Mutex
+	pushSnapLast *pushSnapshot
+)
+
+// pushSnapshotTTL 略小于推送周期（3 s），让同一轮 tick 上的客户端复用一份快照，
+// 同时保证任何客户端拿到的数据都不超过一个周期的陈旧度。
+const pushSnapshotTTL = 2 * time.Second
+
+func (s *Server) currentPushSnapshot() *pushSnapshot {
+	pushSnapMu.Lock()
+	defer pushSnapMu.Unlock()
+	if pushSnapLast != nil && time.Since(pushSnapLast.at) < pushSnapshotTTL {
+		return pushSnapLast
+	}
+	snap := s.buildPushSnapshot()
+	pushSnapLast = snap
+	return snap
+}
+
+func (s *Server) buildPushSnapshot() *pushSnapshot {
 	hosts := s.store.ListHosts()
 	now := time.Now().Unix()
 	th := s.cfg.Thresholds()
@@ -94,27 +130,31 @@ func (s *Server) pushPush(c *pushClient) {
 			"offline_hosts":    len(hosts) - online,
 			"critical_alerts":  crit,
 			"warning_alerts":   warn,
-			"plugin_events":    len(s.store.RecentEvents()),
+			"plugin_events":    s.store.EventCount(),
 			"server_time_unix": now,
 			"version":          appVersion,
 			"terminal_enabled": s.cfg.TerminalEnabled(),
 			"desktop_enabled":  s.cfg.TerminalEnabled(),
 		},
 	}
-	if data, err := json.Marshal(summary); err == nil {
-		_ = c.ws.WriteText(data)
+	snap := &pushSnapshot{at: time.Now(), totalHosts: len(hosts), onlineHosts: online, rosterSig: hostRosterSig(hosts)}
+	snap.summaryJSON, _ = json.Marshal(summary)
+	snap.alertsJSON, _ = json.Marshal(map[string]any{"type": "alerts", "data": alerts})
+	return snap
+}
+
+// pushPush sends the current summary + alerts to a single client.
+func (s *Server) pushPush(c *pushClient) {
+	snap := s.currentPushSnapshot()
+	if len(snap.summaryJSON) > 0 {
+		_ = c.ws.WriteText(snap.summaryJSON)
 	}
-	// Also push alerts
-	alertsMsg := map[string]any{
-		"type": "alerts",
-		"data": alerts,
-	}
-	if data, err := json.Marshal(alertsMsg); err == nil {
-		_ = c.ws.WriteText(data)
+	if len(snap.alertsJSON) > 0 {
+		_ = c.ws.WriteText(snap.alertsJSON)
 	}
 	// Notify browsers when the host roster changes so host/type trees refresh
 	// without waiting for the manual tree refresh button or the next REST poll.
-	sig := hostRosterSig(hosts)
+	sig := snap.rosterSig
 	if c.lastRosterSig == "" {
 		c.lastRosterSig = sig // seed; avoid a redundant fetch right after connect
 	} else if sig != c.lastRosterSig {
@@ -122,8 +162,8 @@ func (s *Server) pushPush(c *pushClient) {
 		chg := map[string]any{
 			"type": "hosts_changed",
 			"data": map[string]any{
-				"total_hosts":  len(hosts),
-				"online_hosts": online,
+				"total_hosts":  snap.totalHosts,
+				"online_hosts": snap.onlineHosts,
 				"sig":          sig,
 			},
 		}

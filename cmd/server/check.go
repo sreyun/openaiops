@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptrace"
@@ -34,7 +35,20 @@ const selfCheckID = "__self_health__"
 
 // checkHistMax bounds the per-check time-series ring kept for the "history
 // curve" view (≈24h at the default 30s interval; longer at bigger intervals).
-const checkHistMax = 2880
+//
+// 它直接决定进程内存：一个 CheckPoint 约 80 B，2880 点就是每个检查 230 KB——
+// 500 个拨测 + 1 万个进程监控就是 2.4 GB，而且只有删检查才释放。持久历史在
+// VictoriaMetrics 里，这一层只是趋势图的实时叠加与 VM 不可用时的回看，
+// 大规模部署可用 AIOPS_CHECK_HIST_MAX 下调（例如 360 ≈ 3 小时）。
+var checkHistMax = envIntDefault("AIOPS_CHECK_HIST_MAX", 2880)
+
+// checkWorkers 是网络类拨测（http/tcp/udp/ping/dns）的并发上限。
+//
+// 原来 sweep 在 ticker 协程里**逐个同步**执行：一个非高级模式的 HTTP 探测最坏
+// 5 s × 2 次重试 + 0.5 s，ping 是 fork 一个进程等 8 s——500 个探测里只要有一成
+// 不通，一轮就要跑四五分钟，IntervalSec 形同虚设，排在后面的（包括毫秒级的进程
+// 检查）全被队首堵死。同一文件夹里的 apimon 早就给自己开了 16 路。
+var checkWorkers = envIntDefault("AIOPS_CHECK_WORKERS", 32)
 
 // CheckPoint is one sampled result kept for a check's trend chart.
 type CheckPoint struct {
@@ -70,6 +84,8 @@ type checkRunner struct {
 	history   map[string][]CheckPoint // check id -> bounded time-series for the trend view
 	failCount map[string]int          // consecutive failures (debounce: require 2 before marking down)
 	okCount   map[string]int          // consecutive successes (debounce: require 2 before marking up)
+	inflight  map[string]bool         // 正在执行中的检查：慢探测跨过了自己的间隔也不会被重复派发
+	sem       chan struct{}           // 网络类探测的并发闸（容量 = checkWorkers）
 	vm        *vmWriter               // 持久化拨测结果到 VictoriaMetrics（可选；重启后仍可查历史趋势）
 }
 
@@ -90,6 +106,8 @@ func newCheckRunner(cfg *ConfigStore, store *Store, notifier *Notifier, selfAddr
 		history:   map[string][]CheckPoint{},
 		failCount: map[string]int{},
 		okCount:   map[string]int{},
+		inflight:  map[string]bool{},
+		sem:       make(chan struct{}, max(1, checkWorkers)),
 	}
 }
 
@@ -205,9 +223,16 @@ func portFromAddr(addr string) string {
 	return "8529"
 }
 
+// sweep 派发所有到期的检查。
+//
+// 进程检查（只查内存里的进程名表，微秒级）就地执行；网络类探测经 sem 限流后各自
+// 起协程，sweep 本身不等它们结束——下一轮 tick 照常派发其它到期项，正在跑的那些由
+// inflight 挡住不会重复派发。派发时 sem 满了 sweep 会在这里等，这是刻意的背压：
+// 池子都占满说明探测目标普遍不通，再堆更多协程只会把超时排成更长的队。
 func (cr *checkRunner) sweep() {
 	now := time.Now()
-	for _, c := range cr.cfg.Checks() {
+	checks := cr.cfg.Checks()
+	for _, c := range checks {
 		if !c.Enabled {
 			continue
 		}
@@ -217,22 +242,45 @@ func (cr *checkRunner) sweep() {
 		}
 		cr.mu.Lock()
 		last := cr.lastRun[c.ID]
-		due := last.IsZero() || now.Sub(last) >= time.Duration(iv)*time.Second
+		due := !cr.inflight[c.ID] && (last.IsZero() || now.Sub(last) >= time.Duration(iv)*time.Second)
 		if due {
 			cr.lastRun[c.ID] = now
+			cr.inflight[c.ID] = true
 		}
 		cr.mu.Unlock()
-		if due {
-			cr.runCheck(c)
+		if !due {
+			continue
 		}
+		if c.Type == "process" {
+			cr.runCheck(c)
+			cr.clearInflight(c.ID)
+			continue
+		}
+		cr.sem <- struct{}{}
+		go func(c CustomCheck) {
+			defer func() {
+				<-cr.sem
+				cr.clearInflight(c.ID)
+				if r := recover(); r != nil {
+					slog.Warn("拨测执行异常已恢复", "check", c.ID, "type", c.Type, "panic", r)
+				}
+			}()
+			cr.runCheck(c)
+		}(c)
 	}
-	cr.gc()
+	cr.gc(checks)
+}
+
+func (cr *checkRunner) clearInflight(id string) {
+	cr.mu.Lock()
+	delete(cr.inflight, id)
+	cr.mu.Unlock()
 }
 
 // gc drops runtime state for checks that no longer exist.
-func (cr *checkRunner) gc() {
+func (cr *checkRunner) gc(checks []CustomCheck) {
 	live := map[string]bool{}
-	for _, c := range cr.cfg.Checks() {
+	for _, c := range checks {
 		live[c.ID] = true
 	}
 	cr.mu.Lock()
@@ -245,6 +293,7 @@ func (cr *checkRunner) gc() {
 			delete(cr.history, id)
 			delete(cr.failCount, id)
 			delete(cr.okCount, id)
+			delete(cr.inflight, id)
 		}
 	}
 	cr.mu.Unlock()
@@ -835,9 +884,12 @@ func (cr *checkRunner) probeProcess(target string) (bool, string) {
 	if !ok || len(procNames) == 0 {
 		return false, Tz("check.no_process_data", shortID(hostID))
 	}
+	// substring match, case-insensitive: "nginx" matches "nginx.exe"。
+	// 用零分配的折叠匹配：原来每个名字都 strings.ToLower 一次，1 万个进程监控 ×
+	// 256 个名字 = 每轮 sweep 二百多万次小分配，全在 5 秒之内。
+	needle := strings.ToLower(procName)
 	for _, p := range procNames {
-		// substring match, case-insensitive: "nginx" matches "nginx.exe"
-		if strings.Contains(strings.ToLower(p), strings.ToLower(procName)) {
+		if containsSubstrFold(p, needle) {
 			return true, Tz("check.process_running", procName, p)
 		}
 	}
@@ -860,45 +912,63 @@ func SelfCheckName() string { return Tz("check.self_name") }
 // DownAlerts returns the currently-failing checks as alerts for the /alerts view.
 // It also generates threshold-based alerts for probe metrics (ping loss/latency,
 // TCP timeout, HTTP response/status, process failures) when thresholds are configured.
+// checkState 是 DownAlerts 用的一份最小快照：状态 + 是否宕 + 宕起时间 + 连续失败数。
+type checkState struct {
+	st    CheckStatus
+	down  bool
+	since int64
+	fails int
+}
+
+// stateSnapshot 在锁内拷一份，锁外算阈值。
+//
+// 原来 DownAlerts 从头到尾持有 cr.mu 遍历全部检查并逐条调 Tz 拼文案——它被 /alerts、
+// /summary、/metrics 抓取、WebSocket 推送快照各自调用，1 万个检查时每次都把 runCheck
+// 的状态写入堵在外面十几毫秒。快照只是 map 复制，微秒到毫秒级。
+func (cr *checkRunner) stateSnapshot() map[string]checkState {
+	cr.mu.Lock()
+	defer cr.mu.Unlock()
+	out := make(map[string]checkState, len(cr.status))
+	for id, st := range cr.status {
+		out[id] = checkState{st: st, down: cr.down[id], since: cr.downSince[id], fails: cr.failCount[id]}
+	}
+	return out
+}
+
 func (cr *checkRunner) DownAlerts() []Alert {
 	var out []Alert
 	th := cr.cfg.Thresholds()
+	snap := cr.stateSnapshot()
 
 	// Self health-check
-	cr.mu.Lock()
-	if cr.down[selfCheckID] {
-		st := cr.status[selfCheckID]
+	if self := snap[selfCheckID]; self.down {
 		out = append(out, Alert{
 			Level: "critical", Type: "check", Scope: selfCheckID, Hostname: SelfCheckName(),
-			Since:   cr.downSince[selfCheckID],
-			Message: Tz("check.self_failed", st.Message), Timestamp: st.CheckedAt,
+			Since:   self.since,
+			Message: Tz("check.self_failed", self.st.Message), Timestamp: self.st.CheckedAt,
 		})
 	}
-	cr.mu.Unlock()
 
-	checks := cr.cfg.Checks()
-	cr.mu.Lock()
-	defer cr.mu.Unlock()
-	for _, c := range checks {
+	now := time.Now().Unix()
+	for _, c := range cr.cfg.Checks() {
 		if !c.Enabled {
 			continue
 		}
-		st := cr.status[c.ID]
-		now := time.Now().Unix()
+		cs := snap[c.ID]
+		st := cs.st
 
 		// Existing boolean down/up alert
-		if cr.down[c.ID] {
+		if cs.down {
 			lvl := c.Level
 			if lvl == "" {
 				lvl = "critical"
 			}
 			out = append(out, Alert{
 				Level: lvl, Type: "check", Scope: c.ID, Hostname: c.Name,
-				Since:   cr.downSince[c.ID],
+				Since:   cs.since,
 				Message: Tz("check.custom_failed", c.Name, st.Message), Timestamp: st.CheckedAt,
 			})
 		}
-
 		// ---- Threshold-based probe alerts (generated alongside down/up alerts) ----
 		switch c.Type {
 		case "ping":
@@ -975,13 +1045,13 @@ func (cr *checkRunner) DownAlerts() []Alert {
 			// HTTP 非 2xx 状态码
 			if st.StatusCode > 0 && st.StatusCode >= 400 && th.CheckHTTPStatusWarn > 0 {
 				// Use failCount as proxy for non-2xx count (incremented on each failure)
-				fc := float64(cr.failCount[c.ID])
+				fc := float64(cs.fails)
 				if fc > 0 {
 					lv := classify(fc, float64(th.CheckHTTPStatusWarn), float64(th.CheckHTTPStatusCrit))
 					if lv != "" {
 						out = append(out, Alert{
 							Level: lv, Type: "check", Scope: c.ID + "/http_status", Hostname: c.Name,
-							Message: Tz("alert.check_http_status", st.StatusCode, cr.failCount[c.ID]),
+							Message: Tz("alert.check_http_status", st.StatusCode, cs.fails),
 							Value:   fc, Timestamp: now,
 						})
 					}
@@ -990,13 +1060,13 @@ func (cr *checkRunner) DownAlerts() []Alert {
 		case "process":
 			// 进程存活失败次数
 			if !st.OK && th.CheckProcFailWarn > 0 {
-				fc := float64(cr.failCount[c.ID])
+				fc := float64(cs.fails)
 				if fc > 0 {
 					lv := classify(fc, float64(th.CheckProcFailWarn), float64(th.CheckProcFailCrit))
 					if lv != "" {
 						out = append(out, Alert{
 							Level: lv, Type: "check", Scope: c.ID + "/proc_fail", Hostname: c.Name,
-							Message: Tz("alert.check_proc_fail", cr.failCount[c.ID]),
+							Message: Tz("alert.check_proc_fail", cs.fails),
 							Value:   fc, Timestamp: now,
 						})
 					}

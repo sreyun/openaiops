@@ -10,7 +10,7 @@ import (
 // configExampleYAML is the full commented agent config reference.
 // Kept in sync with repo-root config.example.yaml (see go:generate).
 //
-//go:generate cp ../../config.example.yaml config_example.yaml
+//go:generate go run copy_example.go
 //go:embed config_example.yaml
 var configExampleYAML []byte
 

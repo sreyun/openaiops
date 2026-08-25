@@ -20,7 +20,10 @@ func TestHostListRenderCacheKeyIncludesFolder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read hosts.js: %v", err)
 	}
-	src := string(raw)
+	// 下面几处断言里带着 `\n`。Windows 检出（git core.autocrlf=true，仓库里又没有
+	// .gitattributes）拿到的是 CRLF，`;\n` 永远匹配不上——于是 go-gate 在 Linux CI 上
+	// 全绿、在 Windows 上必红。断言看的是 JS 的结构，跟行尾用哪种字节无关，先归一化。
+	src := strings.ReplaceAll(string(raw), "\r\n", "\n")
 
 	sig := regexp.MustCompile(`const folderSig = ([^;]+);`).FindStringSubmatch(src)
 	if sig == nil {

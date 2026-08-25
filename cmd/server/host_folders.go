@@ -345,6 +345,15 @@ func sanitizeFolderTreeNames(nodes []HostFolderNode) []HostFolderNode {
 // tree has never been initialized (nil HostFolders). Also places any host that
 // still has a category but no folder assignment into a matching L1 folder.
 func (cs *ConfigStore) ensureHostFoldersMigrated(hosts []*Host) bool {
+	// 快路径：已迁移且每台主机都有归属时只拿读锁看一眼就走。
+	//
+	// 这个函数挂在 GET /api/v1/hosts 和 GET /host-folders 上，每个控制台每 5 秒各打一次；
+	// 原来无条件拿**写锁**再遍历全部主机，等于让最热的两个只读接口去串行化整个配置
+	// 存储的所有读取——5000 台 × 十几个控制台时，Thresholds()/Checks()/VMConfig() 这些
+	// 上报路径上的读锁全排在它后面。
+	if cs.hostFoldersSettled(hosts) {
+		return false
+	}
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 	dirty := false
@@ -1092,4 +1101,23 @@ func (cs *ConfigStore) decorateAlertGroups(alerts []Alert) []Alert {
 		}
 	}
 	return alerts
+}
+
+// hostFoldersSettled 在读锁下判断 ensureHostFoldersMigrated 是否已无事可做：三张表都已
+// 初始化，且每台主机都有非空的文件夹归属（含显式的 __ungrouped__）。
+func (cs *ConfigStore) hostFoldersSettled(hosts []*Host) bool {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	if cs.cfg.Categories == nil || cs.cfg.HostFolderAssign == nil || cs.cfg.HostFolders == nil {
+		return false
+	}
+	for _, h := range hosts {
+		if h == nil {
+			continue
+		}
+		if fid, ok := cs.cfg.HostFolderAssign[h.ID]; !ok || fid == "" {
+			return false
+		}
+	}
+	return true
 }

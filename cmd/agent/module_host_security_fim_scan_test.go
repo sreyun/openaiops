@@ -246,24 +246,34 @@ func TestFimChangeReasonPrefersContent(t *testing.T) {
 // 一起报 "walked 0 files"——测试本身没错，是被挂载类型挡掉了。产品侧的隐患更值得修：
 // 运维在配置里点名一个目录（比如挂在 ramdisk 上的应用目录），扫描器一个文件都不走，
 // 界面上只有一句"0 个文件"，没有任何线索指向"因为它是 tmpfs"。
+// 断言用的排除目录从 fimDefaultExcludes() 里取，而不是写死 /var/log、/proc：
+// Windows 分支返回的是 WinSxS、$Recycle.Bin 这一套，压根不含 POSIX 伪文件系统
+// （那边也确实不该含）。写死之后这条测试在 Linux 上绿、在 Windows 上必红，
+// 而它要守的策略本身是跨平台的。
 func TestFimExplicitRootOverridesAutoExcludes(t *testing.T) {
-	// /var/log 在 fimDefaultExcludes() 里；点名它就该扫。
-	e := newFIMExcluder(nil, []string{"/var/log/myapp"})
-	if e.skipPath("/var/log/myapp/app.log") {
-		t.Error("点名 /var/log/myapp 之后，它下面的文件不该被默认排除项挡掉")
+	defs := fimDefaultExcludes()
+	if len(defs) == 0 {
+		t.Skip("本平台没有默认排除项，这条策略无从验证")
+	}
+	base := fimMatchKey(fimNormPath(defs[0]))
+
+	// base 在 fimDefaultExcludes() 里；点名它下面的子树就该扫。
+	e := newFIMExcluder(nil, []string{base + "/myapp"})
+	if e.skipPath(base + "/myapp/app.log") {
+		t.Errorf("点名 %s/myapp 之后，它下面的文件不该被默认排除项挡掉", base)
 	}
 	// 没点名的兄弟目录仍然排除。
-	if !e.skipPath("/var/log/other/sys.log") {
-		t.Error("/var/log 的其余部分仍应被默认排除项挡住")
+	if !e.skipPath(base + "/other/sys.log") {
+		t.Errorf("%s 的其余部分仍应被默认排除项挡住", base)
 	}
 	// 运维自己写的排除项永远生效——那是他明确要排除的。
-	e = newFIMExcluder([]string{"/var/log/myapp/noisy"}, []string{"/var/log/myapp"})
-	if !e.skipPath("/var/log/myapp/noisy/x.log") {
+	e = newFIMExcluder([]string{base + "/myapp/noisy"}, []string{base + "/myapp"})
+	if !e.skipPath(base + "/myapp/noisy/x.log") {
 		t.Error("显式 Excludes 必须压过点名根目录")
 	}
-	// root 是 "/" 等于整盘扫，不该把 /proc、/sys 一起拖进来。
+	// root 是 "/" 等于整盘扫，不该把默认排除项一起拖进来。
 	e = newFIMExcluder(nil, []string{"/"})
-	if !e.skipPath("/proc/1/maps") {
+	if !e.skipPath(base + "/anything") {
 		t.Error("整盘扫时默认排除项必须仍然生效")
 	}
 }

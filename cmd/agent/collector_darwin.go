@@ -468,7 +468,7 @@ func darwinProcNames() []string {
 		}
 		seen[name] = true
 		names = append(names, name)
-		if len(names) >= 256 {
+		if len(names) >= maxProcessNames {
 			break
 		}
 	}

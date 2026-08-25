@@ -6,7 +6,7 @@
 
 [![Version](https://img.shields.io/badge/Version-v1.0.6-blue)](https://github.com/sreyun/aiops/releases/tag/v1.0.6)
 [![Go](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white)](https://go.dev)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](../LICENSE)
 [![Platforms](https://img.shields.io/badge/Platforms-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey)]()
 
 **[简体中文](README.md) · [繁體中文](README.zh-TW.md) · [English](README_EN.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Deutsch](README.de.md) · [Français](README.fr.md) · [Español](README.es.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md)**
@@ -47,7 +47,7 @@ open http://localhost:8529
 |---|---|
 | **Reverse connect** | Агент выходит наружу; терминал, desktop и forwards — в одном туннеле |
 | **Один бинарник + agent без зависимостей** | Один Go-сервер; stdlib-агент на Linux/Windows/macOS/Kylin |
-| **Данные у вас** | PostgreSQL + VictoriaMetrics, MIT, без feature gates |
+| **Данные у вас** | PostgreSQL + VictoriaMetrics, полностью self-hosted, без принудительной телеметрии |
 
 > Платформа может быть широкой — **входная дверь остаётся узкой.**
 
@@ -133,7 +133,7 @@ Classic UI: `/` · Vue: `/v2/`
                               Go-агент
 ```
 
-Оба хранилища обязательны. Лицензия **MIT**: [LICENSE](LICENSE).  
+Оба хранилища обязательны. Лицензия **AGPL-3.0**: [LICENSE](../LICENSE) — бесплатно и без ограничения по числу хостов для внутреннего self-hosted использования; для закрытого распространения, встраивания или предоставления как сетевой сервис нужна **коммерческая лицензия**: [LICENSING.md](../LICENSING.md).  
 Контрибуции приветствуются на основном пути. Репозиторий: <https://github.com/sreyun/aiops>
 
 ---

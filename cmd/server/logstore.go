@@ -282,8 +282,8 @@ func (ls *logStore) recentErrors(since int64, limit int) []StoredLog {
 
 // errorCount counts error lines since a timestamp (for AI/UI).
 func (ls *logStore) errorCount(since int64) int {
-	ls.mu.Lock()
-	defer ls.mu.Unlock()
+	ls.mu.RLock()
+	defer ls.mu.RUnlock()
 	n := 0
 	for _, l := range ls.logs {
 		if l.Ts >= since && l.Level == "error" {
@@ -294,8 +294,8 @@ func (ls *logStore) errorCount(since int64) int {
 }
 
 func (ls *logStore) count() int {
-	ls.mu.Lock()
-	defer ls.mu.Unlock()
+	ls.mu.RLock()
+	defer ls.mu.RUnlock()
 	return len(ls.logs)
 }
 

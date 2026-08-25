@@ -52,6 +52,28 @@ func (s *Server) handleGetChecks(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, m)
 	}
+	// 带 limit 走服务端分页（1 万个进程监控的现场，控制台只要当前页）：
+	// X-Total-Count 是筛选后的总数，X-List-Total / X-List-Down 是全量与异常数（角标用）。
+	if q, ok := parseChecksQuery(r); ok {
+		down := 0
+		for _, m := range out {
+			if checkRowState(m) == "down" {
+				down++
+			}
+		}
+		filtered := make([]map[string]any, 0, len(out))
+		for _, m := range out {
+			if checkRowMatches(m, q) {
+				filtered = append(filtered, m)
+			}
+		}
+		setTotalHeader(w, len(filtered))
+		w.Header().Set("X-List-Total", strconv.Itoa(len(out)))
+		w.Header().Set("X-List-Down", strconv.Itoa(down))
+		start, end := pageBounds(len(filtered), q.page)
+		writeJSON(w, http.StatusOK, filtered[start:end])
+		return
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 

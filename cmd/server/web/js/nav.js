@@ -823,7 +823,7 @@ function onAuditSearchInput(e) { LOG_SEARCH = (e && e.target && e.target.value) 
 safeAddEventListener("auditSearch", "input", onAuditSearchInput);
 safeAddEventListener("auditSearch", "search", onAuditSearchInput);
 // 监控 / 编排 / 转发 搜索框（复用标准 .search）
-function onCheckSearchInput(e) { CHECK_SEARCH = (e && e.target && e.target.value) || ""; renderChecks(LAST_CHECKS); }
+function onCheckSearchInput(e) { CHECK_SEARCH = (e && e.target && e.target.value) || ""; CHECK_PAGE = 1; renderChecks(LAST_CHECKS); }
 safeAddEventListener("checkSearch", "input", onCheckSearchInput);
 safeAddEventListener("checkSearch", "search", onCheckSearchInput);
 function onPlaybookSearchInput(e) { PB_SEARCH = (e && e.target && e.target.value) || ""; renderPlaybooks(LAST_PLAYBOOKS); }
@@ -839,7 +839,7 @@ safeAddEventListener("alertFilter", "click", e => {
   filterAlertsByType(b.dataset.atype);
 });
 // 告警搜索
-function onAlertSearchInput(e) { ALERT_SEARCH = (e && e.target && e.target.value) || ""; renderAlerts(LAST_ALERTS); }
+function onAlertSearchInput(e) { ALERT_SEARCH = (e && e.target && e.target.value) || ""; ALERT_PAGE = 1; renderAlerts(LAST_ALERTS); }
 safeAddEventListener("alertSearch", "input", onAlertSearchInput);
 safeAddEventListener("alertSearch", "search", onAlertSearchInput);
 
@@ -869,6 +869,7 @@ safeAddEventListener("logPager", "click", e => {
 // 监控类型筛选
 function filterChecks(type) {
   CHECK_TYPE = type;
+  CHECK_PAGE = 1;
   renderChecks(LAST_CHECKS);
 }
 // 弹窗关闭：点遮罩空白处 或 右上角 ✕
@@ -942,6 +943,22 @@ safeAddEventListener("pager", "click", e => {
   else if (pg === "next") HOST_PAGE++;
   else HOST_PAGE = parseInt(pg);
   renderHosts(LAST_HOSTS);
+});
+// 告警面 / 拨测面的分页器（与主机列表同款委托，无内联脚本）
+function pagerStep(cur, pg) {
+  if (pg === "prev") return cur - 1;
+  if (pg === "next") return cur + 1;
+  return parseInt(pg) || 1;
+}
+safeAddEventListener("alertsPager", "click", e => {
+  const b = e.target.closest("button[data-pg]"); if (!b) return;
+  ALERT_PAGE = pagerStep(ALERT_PAGE, b.dataset.pg);
+  renderAlerts(LAST_ALERTS);
+});
+safeAddEventListener("checksPager", "click", e => {
+  const b = e.target.closest("button[data-pg]"); if (!b) return;
+  CHECK_PAGE = pagerStep(CHECK_PAGE, b.dataset.pg);
+  renderChecks(LAST_CHECKS);
 });
 // 自定义监控
 safeAddEventListener("addCheckBtn", "click", () => openCheckModal(null));
@@ -1387,6 +1404,7 @@ document.addEventListener("keydown", e => {
 /* ---------- Alert filter helpers ---------- */
 function filterAlertsByType(type) {
   ALERT_TYPE = type;
+  ALERT_PAGE = 1;
   document.querySelectorAll("#alertFilter .chip-btn").forEach(b => b.classList.toggle("active", b.dataset.atype === type));
   renderAlerts(LAST_ALERTS);
 }

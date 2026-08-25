@@ -535,7 +535,7 @@ func readProcInfo() procInfo {
 			continue
 		}
 		count++
-		if len(names) < 256 {
+		if len(names) < maxProcessNames {
 			name := readProcNameDegraded(e.Name())
 			if name == "restricted" {
 				restricted = true

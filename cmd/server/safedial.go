@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -25,6 +26,12 @@ import (
 //
 // 拦截点用 net.Dialer.Control：在 DNS 解析之后、真正 connect 之前对**实际 IP**
 // 校验，天然覆盖 30x 重定向与 DNS rebinding（每次真实连接都会过一遍）。
+//
+// 但 Control 只看**这条 TCP 连接连的是谁**。配了 HTTP_PROXY 的部署（企业内网
+// 与国内环境相当常见）里，连接连的是代理，目标地址是写在请求行 / CONNECT 里
+// 交给代理去连的——Control 看到的是代理那个完全合法的 IP，整套 IP 校验等于
+// 被绕过：代理会替攻击者把 169.254.169.254 取回来。所以走代理时必须在
+// Proxy 钩子里对**请求 URL 里的目标**再校验一次，见 guardedProxy。
 // ============================================================================
 
 // cloudMetadataIPs 是各云厂商的实例元数据端点（拿到即等于拿到实例 IAM 凭据）。
@@ -65,6 +72,59 @@ func ssrfBlockedIP(ip net.IP, strict bool) (bool, string) {
 	return false, ""
 }
 
+// cloudMetadataHosts 是各云厂商元数据端点的**域名**形态。
+// 走代理时 DNS 由代理解析，本地拿不到目标 IP（proxy-only 部署里本地根本解析不了
+// 外部域名，硬去 LookupIP 只会给每个出站请求加一次可能超时的查询）。这几个名字
+// 是公开且固定的，直接按名字挡掉，成本为零。
+var cloudMetadataHosts = []string{
+	"metadata.google.internal",
+	"metadata.goog",
+	"metadata.tencentyun.com",
+	"instance-data",
+	"instance-data.ec2.internal",
+}
+
+// ssrfBlockedTarget 校验**请求 URL 里的目标主机**（而不是这条连接连的对端）。
+// 只在走代理时用得上：不走代理时目标 IP 会经过 ssrfDialControl，那条路更严。
+//
+// 已知边界：目标是域名且不在上面这张表里时，本地无法判定它解析到哪——走代理的
+// 部署里域名由代理解析。这一段的信任边界因此落在代理运维方，不在这里。
+func ssrfBlockedTarget(host string, strict bool) (bool, string) {
+	h := strings.ToLower(strings.TrimSpace(strings.Trim(host, "[]")))
+	if h == "" {
+		return true, "目标主机为空"
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		return ssrfBlockedIP(ip, strict)
+	}
+	for _, m := range cloudMetadataHosts {
+		if h == m {
+			return true, "云实例元数据域名"
+		}
+	}
+	return false, ""
+}
+
+// guardedProxy 包一层 http.ProxyFromEnvironment：确认这次请求真的要走代理时，
+// 才对目标主机补一次校验。没配代理的部署走的还是原路，不多付任何代价。
+func guardedProxy(req *http.Request) (*url.URL, error) {
+	proxy, err := http.ProxyFromEnvironment(req)
+	return guardedProxyDecision(proxy, err, req.URL, ssrfStrict.Load())
+}
+
+// guardedProxyDecision 是 guardedProxy 的纯判定部分。拆出来是为了能直接测：
+// http.ProxyFromEnvironment 只在进程内读一次环境变量（内部 sync.Once），
+// 测试里 t.Setenv 改不动它，没法靠环境变量覆盖"走代理"这条路。
+func guardedProxyDecision(proxy *url.URL, err error, target *url.URL, strict bool) (*url.URL, error) {
+	if err != nil || proxy == nil || target == nil {
+		return proxy, err
+	}
+	if blocked, why := ssrfBlockedTarget(target.Hostname(), strict); blocked {
+		return nil, fmt.Errorf("SSRF 保护：拒绝经代理连接 %s（%s）", target.Hostname(), why)
+	}
+	return proxy, nil
+}
+
 // ssrfDialControl 是 net.Dialer.Control 钩子：连接前对实际 IP 做 SSRF 校验。
 func ssrfDialControl(network, address string, _ syscall.RawConn) error {
 	host, _, err := net.SplitHostPort(address)
@@ -97,7 +157,7 @@ func ssrfDialControl(network, address string, _ syscall.RawConn) error {
 var guardedTransport = sync.OnceValue(func() *http.Transport {
 	d := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second, Control: ssrfDialControl}
 	return &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
+		Proxy:                 guardedProxy,
 		DialContext:           d.DialContext,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          128,

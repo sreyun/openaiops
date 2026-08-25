@@ -307,9 +307,15 @@ function renderAlerts(alerts) {
   });
   const empty = `<div class="empty-line">✅ ${I18N.t("empty.no_alerts")}</div>`;
   const filterEmpty = `<div class="empty-line">${I18N.t("empty.no_alerts_filtered")}</div>`;
-  // 告警页与概览迷你列表共用差量更新，避免全量 innerHTML 闪烁
-  diffUpdateList($("alerts"), filtered, row, alertKey, n ? filterEmpty : empty);
+  // 告警页与概览迷你列表共用差量更新，避免全量 innerHTML 闪烁。
+  // 只画当前页：生产环境的告警面是上万条，全量进 DOM 就是把标签页冻住。
+  ALERT_PAGE = clampPageNo(ALERT_PAGE, filtered.length, ALERT_PAGE_SIZE);
+  const alertPages = Math.max(1, Math.ceil(filtered.length / ALERT_PAGE_SIZE));
+  const pageAlerts = filtered.slice((ALERT_PAGE - 1) * ALERT_PAGE_SIZE, ALERT_PAGE * ALERT_PAGE_SIZE);
+  diffUpdateList($("alerts"), pageAlerts, row, alertKey, n ? filterEmpty : empty);
   refreshAlertRowTimes($("alerts"), now);
+  const alertsPager = $("alertsPager");
+  if (alertsPager) alertsPager.innerHTML = filtered.length ? pagerHTML(ALERT_PAGE, alertPages, filtered.length, I18N.t("section.pager_items", "条")) : "";
   // 概览页告警列表：差量更新，避免全量 innerHTML 重建导致闪烁
   diffUpdateList($("ovAlerts"), alerts.slice(0, 6), row, alertKey, empty);
   // 轻量级更新“已持续”相对时间文本（仅 textContent，不重建 DOM）

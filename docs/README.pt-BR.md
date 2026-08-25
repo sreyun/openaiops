@@ -6,7 +6,7 @@
 
 [![Version](https://img.shields.io/badge/Version-v1.0.6-blue)](https://github.com/sreyun/aiops/releases/tag/v1.0.6)
 [![Go](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white)](https://go.dev)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](../LICENSE)
 [![Platforms](https://img.shields.io/badge/Platforms-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey)]()
 
 **[简体中文](README.md) · [繁體中文](README.zh-TW.md) · [English](README_EN.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Deutsch](README.de.md) · [Français](README.fr.md) · [Español](README.es.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md)**
@@ -47,7 +47,7 @@ Esse é o caminho principal: **console ops com reverse-connect**. O restante se 
 |---|---|
 | **Reverse connect** | O agent sai; terminal, desktop e forwards compartilham o túnel |
 | **Binário único + agent sem deps** | Um servidor Go; agent stdlib em Linux/Windows/macOS/Kylin |
-| **Seus dados com você** | PostgreSQL + VictoriaMetrics, MIT, sem gates |
+| **Seus dados com você** | PostgreSQL + VictoriaMetrics, totalmente auto-hospedado, sem telemetria forçada |
 
 > O produto pode ser amplo — **a porta de entrada permanece estreita.**
 
@@ -133,7 +133,7 @@ Navegador/mobile* ──REST/WS──► Servidor Go ──► PostgreSQL + Vict
                               Agent Go
 ```
 
-Os dois stores são obrigatórios. Licença **MIT**: [LICENSE](LICENSE).  
+Os dois stores são obrigatórios. Licença **AGPL-3.0**: [LICENSE](../LICENSE) — gratuita e sem limite de hosts para uso interno auto-hospedado; **licença comercial** é necessária para distribuição proprietária, integração ou oferta como serviço de rede: [LICENSING.md](../LICENSING.md).  
 Contribuições bem-vindas no caminho principal. Repo: <https://github.com/sreyun/aiops>
 
 ---

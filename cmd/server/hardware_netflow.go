@@ -147,10 +147,45 @@ func (s *Server) handleAgentNetFlow(w http.ResponseWriter, r *http.Request) {
 // handleHardwareHealth returns the latest hardware snapshot for a host.
 func (s *Server) handleHardwareHealth(w http.ResponseWriter, r *http.Request) {
 	hostID := r.URL.Query().Get("host")
+
+	// 不带 host = 批量模式：一次取回调用者有权看见的全部快照。
+	//
+	// 这条分支是为了根治控制台硬件页的一次规模事故：它原来「先取全部主机，再对每一台
+	// 各发一个 /hardware/health」——500 台现场就是 500 个并发请求，浏览器每域名 6 条
+	// 连接排队、服务端跑 500 次 handler、API 限流开始回 429，而其中约 470 个请求
+	// 落在根本没有 BMC 数据的虚拟机上，纯属浪费。
+	//
+	// **RBAC 不因为改成批量就放宽**：仍然逐行过 userCanAccessHost，
+	// 只是把"逐台请求"换成了"一次请求 + 服务端过滤"。
 	if hostID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "host required"})
+		if s.pg == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"snapshots": []any{}})
+			return
+		}
+		u, ok := s.currentUser(r)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		all, err := s.pg.getAllHardwareSnapshots()
+		if err != nil {
+			slog.Warn("查询全部硬件快照失败", "err", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
+			return
+		}
+		can := s.hostAccessFor(u)
+		out := make([]map[string]any, 0, len(all))
+		for _, row := range all {
+			hid, _ := row["host_id"].(string)
+			if hid == "" || !can(hid) {
+				continue
+			}
+			out = append(out, row)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"snapshots": out})
 		return
 	}
+
 	if !s.requireHostAccess(w, r, hostID) {
 		return
 	}

@@ -298,6 +298,10 @@ func (a *Agent) runDesktopSession(server, sid, lang string) {
 		inp = &noopDeskInput{}
 		viewOnly = true
 	}
+	// 注入统一走输入泵：从读循环上摘下来 + 合并被作废的鼠标移动。
+	// 见 desktop_input_pump.go —— 非 Windows 平台每个事件都要 fork 一个外部命令，
+	// 直接跑在读循环上会把拖动和点击一起堵死。
+	inp = newDeskInputPump(inp)
 	defer inp.Close()
 
 	slog.Info("远程桌面会话开始", "session", sid)

@@ -1431,6 +1431,7 @@ svg.sparkline{width:100%; height:46px; display:block}
 .htx-tree-q:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-soft)}
 .htx-tool-btn{width:22px;height:22px;border:none;border-radius:var(--r-xs);background:transparent;color:var(--muted);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;padding:0}
 .htx-tool-btn:hover{background:var(--panel2);color:var(--txt)}
+.htx-tool-btn.active{background:var(--accent-soft);color:var(--accent)}
 .htx-tool-btn svg{width:13px;height:13px}
 .htx-add-root{font-size:16px;font-weight:600;color:var(--accent);line-height:1}
 
@@ -1526,18 +1527,35 @@ svg.sparkline{width:100%; height:46px; display:block}
   text-align:center;border-radius:999px;background:var(--panel3);border:1px solid var(--line);
   box-sizing:border-box;
 }
-/* 操作列固定占位，计数徽章纵向对齐；无按钮时仍保留宽度 */
+/* 操作列固定占位，计数徽章纵向对齐；无按钮时仍保留宽度（星标/新建/改名/删除四粒各 18px） */
 .htx-acts{
-  flex:0 0 52px;width:52px;display:inline-flex;justify-content:flex-end;gap:0;
+  flex:0 0 72px;width:72px;display:inline-flex;justify-content:flex-end;gap:0;
   opacity:0;pointer-events:none;transition:opacity .12s;height:26px;align-items:center;
 }
-.htx-node:hover .htx-acts,.htx-node.selected .htx-acts{opacity:1;pointer-events:auto}
+.htx-node:hover .htx-acts,.htx-node.selected .htx-acts,.htx-node.has-fav .htx-acts{opacity:1;pointer-events:auto}
 .htx-acts:empty{opacity:0!important;pointer-events:none!important}
 .htx-act{border:none;background:transparent;color:var(--muted);cursor:pointer;width:18px;height:18px;border-radius:4px;line-height:1;padding:0;font-size:12px;display:inline-flex;align-items:center;justify-content:center;flex:none}
 .htx-act:hover{background:var(--panel3);color:var(--txt)}
 .htx-act.htx-add{color:var(--accent);font-weight:700;font-size:14px}
 .htx-act.htx-add:hover{background:var(--accent-soft)}
 .htx-act.danger:hover{color:var(--crit,#ef4d5a)}
+/* 收藏星标：金色与新控制台一致；未收藏的☆随操作组悬停才出现，已收藏的★常驻 */
+.htx-act.htx-fav{font-size:13px}
+.htx-act.htx-fav.on{color:var(--warn,#e8a13c)}
+.htx-act.htx-fav.on:hover{background:var(--warn-soft,rgba(232,161,60,.12));color:var(--warn,#e8a13c)}
+
+/* ---- 收藏固定区：钉在树顶，行高/选中态与树节点一致，点击即跳转 ---- */
+.htx-favs{flex:none;padding:4px 0 6px;border-bottom:1px dashed var(--line)}
+.htx-favs-head{display:flex;align-items:center;gap:4px;padding:2px 8px;font-size:11px;font-weight:650;color:var(--muted);letter-spacing:.04em}
+.htx-favs-star{color:var(--warn,#e8a13c)}
+.htx-fav-row{display:flex;align-items:center;gap:5px;height:26px;margin:1px 0;padding:0 6px 0 20px;border-radius:5px;font-size:12.5px;line-height:26px;color:var(--txt2);cursor:pointer;position:relative;user-select:none}
+.htx-fav-row:hover{background:var(--panel2);color:var(--txt)}
+.htx-fav-row.selected{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.htx-fav-row.selected::before{content:"";position:absolute;left:0;top:5px;bottom:5px;width:2px;background:var(--accent);border-radius:0 2px 2px 0}
+.htx-fav-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.htx-fav-row .htx-count{margin-left:0}
+.htx-fav-del{flex:none;opacity:0}
+.htx-fav-row:hover .htx-fav-del,.htx-fav-row:focus-within .htx-fav-del{opacity:1}
 
 /* 子树：每级 14px + 轻量竖向引导线，层级一眼可读 */
 .htx-children{

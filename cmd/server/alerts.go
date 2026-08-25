@@ -369,13 +369,10 @@ func Evaluate(hosts []*Host, t Thresholds) []Alert {
 			}
 		}
 		// Process count anomaly: compare current proc count vs 1h baseline
-		if m.ProcCount > 0 && t.ProcWarn > 0 && len(h.hist1m) > 0 {
-			var sumProc float64
-			for _, s := range h.hist1m {
-				sumProc += float64(s.ProcCount)
-			}
-			baseline := sumProc / float64(len(h.hist1m))
-			if baseline > 0 {
+		// 基线由 store 在 1m 层追加时预先算好（见 Host.procBase1h），这里不再遍历 hist1m。
+		if m.ProcCount > 0 && t.ProcWarn > 0 && h.procBase1h > 0 {
+			baseline := h.procBase1h
+			{
 				change := math.Abs(float64(m.ProcCount)-baseline) / baseline
 				if change >= t.ProcWarn {
 					dir := "increase"

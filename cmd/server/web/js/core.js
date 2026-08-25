@@ -777,6 +777,13 @@ let FIRST_LOAD = true;
 let LAST_CATS_KEY = ""; // 用于检测分类列表是否变化
 let LAST_RENDER_KEY = ""; // P0-3: 用于差量更新检测
 let ALERT_TYPE = "";   // 告警类型筛选
+// 告警面与拨测面的客户端切页。上万条告警 / 上万个进程监控在生产环境是常态：
+// 告警原来把过滤后的**全部**条目差量塞进 DOM，拨测原来每 10 秒 innerHTML 全量重建
+// 全部卡片——都是把标签页冻住的量级。只画一页，计数用全量（见 pagerHTML）。
+let ALERT_PAGE = 1;
+const ALERT_PAGE_SIZE = 100;
+let CHECK_PAGE = 1;
+const CHECK_PAGE_SIZE = 60;
 let ALERT_SEARCH = ""; // 告警主机搜索
 
 /* ---------- 工具函数 ---------- */
@@ -1497,4 +1504,27 @@ if (document.readyState === "loading") {
 } else {
   initActMenus();
   initUiConfirm();
+}
+
+// pagerHTML：通用分页器（主机列表的 renderPager 是它的前身；这里参数化 page 与单位）。
+// 计数必须是全量：只画一页却把总数写成一页的长度，用户会当成"就这么多"。
+function pagerHTML(page, pages, total, unit) {
+  const tot = I18N.t("section.pager_total", "共");
+  if (pages <= 1) return `<span class="pinfo">${tot} ${total} ${esc(unit)}</span>`;
+  let btns = `<button ${page === 1 ? "disabled" : ""} data-pg="prev">‹</button>`;
+  for (let i = 1; i <= pages; i++) {
+    if (i === 1 || i === pages || Math.abs(i - page) <= 1) {
+      btns += `<button class="${i === page ? "active" : ""}" data-pg="${i}">${i}</button>`;
+    } else if (Math.abs(i - page) === 2) {
+      btns += `<span class="pinfo">…</span>`;
+    }
+  }
+  btns += `<button ${page === pages ? "disabled" : ""} data-pg="next">›</button>`;
+  btns += `<span class="pinfo">${tot} ${total} ${esc(unit)} · ${page}/${pages}</span>`;
+  return btns;
+}
+// clampPageNo：行数随轮询变化时把页码钳回 [1, pages]，别停在一片空白上。
+function clampPageNo(page, total, size) {
+  const pages = Math.max(1, Math.ceil(total / size));
+  return Math.min(Math.max(1, page || 1), pages);
 }

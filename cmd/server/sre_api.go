@@ -236,13 +236,22 @@ func (s *Server) wireSRE() {
 	}
 }
 
+// hostByID 按 ID 取一台主机的列表视图副本（进程名已剥掉，与 ListHosts 的元素同形）。
+//
+// 原来是 `for _, h := range s.store.ListHosts()` 线性找——ListHosts 会在读锁下把**全部**
+// 主机连同 Latest 各复制一份。它有四十来个调用点，其中 effectiveCategory 挂在每一次
+// Agent 上报的路径上：500 台就是每秒 17 次 × 500 份拷贝，5000 台时是每秒 167 × 5000，
+// 全部在与 UpsertAuthenticated 争抢同一把 store.mu。拓扑影响面接口更是在边循环里再套
+// 一层，单次请求能复制上千万个 Host。store.hosts 本来就是 map，直接查。
 func (s *Server) hostByID(id string) *Host {
-	for _, h := range s.store.ListHosts() {
-		if h.ID == id {
-			return h
-		}
+	if id == "" {
+		return nil
 	}
-	return nil
+	h, ok := s.store.GetHost(id)
+	if !ok || h == nil {
+		return nil
+	}
+	return hostMeta(h)
 }
 
 // annotateHostNames fills hostname/ip from the managed-host store onto list rows

@@ -6,7 +6,7 @@
 
 [![Version](https://img.shields.io/badge/Version-v1.0.6-blue)](https://github.com/sreyun/aiops/releases/tag/v1.0.6)
 [![Go](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white)](https://go.dev)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](../LICENSE)
 [![Platforms](https://img.shields.io/badge/Platforms-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey)]()
 
 **[简体中文](README.md) · [繁體中文](README.zh-TW.md) · [English](README_EN.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Deutsch](README.de.md) · [Français](README.fr.md) · [Español](README.es.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md)**
@@ -47,7 +47,7 @@ open http://localhost:8529
 |---|---|
 | **反向連線，少改網路** | Agent 主動連回 Server；終端、桌面、轉發走同一隧道 |
 | **單一二進位 + 零依賴 Agent** | 服務端一個 Go 行程；Agent 標準庫採集 |
-| **資料在你自己機器上** | PostgreSQL + VictoriaMetrics，MIT 開源 |
+| **資料在你自己機器上** | PostgreSQL + VictoriaMetrics，全部自架，無強制遙測 |
 
 > 產品可以很廣——**對外入口只講清上面這一條路徑。**
 
@@ -145,7 +145,7 @@ docker compose up -d
 ## 參與貢獻與授權
 
 歡迎 Issue / PR。建議從尖刀路徑（Agent / 監控 / 終端）起步。  
-**MIT** — 見 [LICENSE](LICENSE)。GitHub：<https://github.com/sreyun/aiops> · Gitee：<https://gitee.com/bigdatasafe/aiops>
+**AGPL-3.0** — 見 [LICENSE](../LICENSE)。內部自架自用免費且不限主機數；閉源分發、整合轉售或對外提供服務需商業授權，見 [LICENSING.md](../LICENSING.md)。`v1.1.119` 及更早版本仍為 MIT 且永久有效。GitHub：<https://github.com/sreyun/aiops> · Gitee：<https://gitee.com/bigdatasafe/aiops>
 
 ---
 

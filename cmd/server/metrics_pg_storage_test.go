@@ -8,7 +8,7 @@ import (
 
 func TestWritePGStorageMetricsEmptyWhenNeverProbed(t *testing.T) {
 	var b strings.Builder
-	writePGStorageMetrics(&b, pgStorageSnapshot{})
+	writePGStorageMetrics(&b, pgStorageSnapshot{}, time.Now())
 	if b.Len() != 0 {
 		t.Fatalf("没有 PG 时不应输出任何 series，得到:\n%s", b.String())
 	}
@@ -16,15 +16,61 @@ func TestWritePGStorageMetricsEmptyWhenNeverProbed(t *testing.T) {
 
 // 探针失败时必须留下一条 aiops_pg_metrics_error=1，而不是"什么都不输出"——
 // 后者在 Prometheus 里和"一切正常"长得一模一样。
+// 首次就失败（还没有过任何一次成功）时，只给标记，不能凭空造出体积数字。
 func TestWritePGStorageMetricsReportsProbeFailure(t *testing.T) {
 	var b strings.Builder
-	writePGStorageMetrics(&b, pgStorageSnapshot{takenAt: time.Now(), err: errProbe{}})
+	writePGStorageMetrics(&b, pgStorageSnapshot{erredAt: time.Now(), err: errProbe{}}, time.Now())
 	out := b.String()
 	if !strings.Contains(out, "aiops_pg_metrics_error 1") {
 		t.Fatalf("缺少失败标记:\n%s", out)
 	}
 	if strings.Contains(out, "aiops_pg_database_bytes") {
-		t.Fatalf("探针失败时不应输出体积数字（会被当成真值）:\n%s", out)
+		t.Fatalf("从未成功过时不应输出体积数字（会被当成真值）:\n%s", out)
+	}
+}
+
+// 探针失败但**曾经成功过**：上一份好数据要继续供着，另配 age 说明它有多旧。
+// 出错就整段不输出，等于让存储指标在 PG 最不健康的时候消失。
+func TestWritePGStorageMetricsKeepsLastGoodOnFailure(t *testing.T) {
+	now := time.Now()
+	var b strings.Builder
+	writePGStorageMetrics(&b, pgStorageSnapshot{
+		takenAt: now.Add(-4 * time.Minute), dbBytes: 12345, reclaimableBytes: 999,
+		err: errProbe{}, erredAt: now,
+	}, now)
+	out := b.String()
+	if !strings.Contains(out, "aiops_pg_metrics_error 1") {
+		t.Fatalf("缺少失败标记:\n%s", out)
+	}
+	if !strings.Contains(out, "aiops_pg_database_bytes 12345") {
+		t.Fatalf("失败时丢掉了上一份好数据:\n%s", out)
+	}
+	if !strings.Contains(out, "aiops_pg_metrics_age_seconds 240") {
+		t.Fatalf("缺少新鲜度（应为 240 秒）:\n%s", out)
+	}
+}
+
+// 失败快照按 TTL 缓存，会让平台每次重启后存储指标失明 10 分钟——
+// 因为启动那几秒连接池被建表占满，8 秒探针超时极易撞穿。失败必须走短重试。
+func TestPGStorageFailedProbeRetriesQuickly(t *testing.T) {
+	now := time.Now()
+	failed := pgStorageSnapshot{err: errProbe{}, erredAt: now}
+	if pgStorageRefreshDue(failed, now.Add(pgStorageRetryAfter-time.Second)) {
+		t.Error("重试间隔未到就重跑，会把一个挣扎中的 PG 打得更狠")
+	}
+	if !pgStorageRefreshDue(failed, now.Add(pgStorageRetryAfter+time.Second)) {
+		t.Errorf("失败后应在 %v 内重试，而不是等满 %v 的 TTL", pgStorageRetryAfter, pgStorageMetricsTTL)
+	}
+	// 成功的快照仍然走长 TTL：那条查询要扫 pg_class/pg_stats，不能跟着抓取跑。
+	ok := pgStorageSnapshot{takenAt: now}
+	if pgStorageRefreshDue(ok, now.Add(pgStorageMetricsTTL-time.Second)) {
+		t.Error("成功快照不应提前失效")
+	}
+	if !pgStorageRefreshDue(ok, now.Add(pgStorageMetricsTTL+time.Second)) {
+		t.Error("成功快照过了 TTL 应刷新")
+	}
+	if !pgStorageRefreshDue(pgStorageSnapshot{}, now) {
+		t.Error("从未探测过时应立即探测")
 	}
 }
 
@@ -42,7 +88,7 @@ func TestWritePGStorageMetricsTopNAndValues(t *testing.T) {
 	writePGStorageMetrics(&b, pgStorageSnapshot{
 		takenAt: time.Now(), dbBytes: 12345, tables: stats,
 		reclaimableBytes: 999, candidates: 2,
-	})
+	}, time.Now())
 	out := b.String()
 	if !strings.Contains(out, "aiops_pg_database_bytes 12345") {
 		t.Errorf("库体积缺失:\n%s", out)

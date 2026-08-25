@@ -1188,6 +1188,12 @@ function renderChecks(checks) {
     ));
   }
 
+  // 只画当前页：上万个进程/端口监控每 10 秒全量 innerHTML 重建是把标签页冻住的量级。
+  CHECK_PAGE = clampPageNo(CHECK_PAGE, shown.length, CHECK_PAGE_SIZE);
+  const checkPages = Math.max(1, Math.ceil(shown.length / CHECK_PAGE_SIZE));
+  const checksPager = $("checksPager");
+  if (checksPager) checksPager.innerHTML = shown.length ? pagerHTML(CHECK_PAGE, checkPages, shown.length, I18N.t("section.pager_items", "条")) : "";
+  shown = shown.slice((CHECK_PAGE - 1) * CHECK_PAGE_SIZE, CHECK_PAGE * CHECK_PAGE_SIZE);
   grid.innerHTML = shown.map(c => {
     const st = !c.enabled ? "unknown" : (c.checked_at ? (c.ok ? "up" : "down") : "unknown");
     const stText = !c.enabled ? I18N.t("ui.disabled_status") : (c.checked_at ? (c.ok ? I18N.t("ui.normal") : I18N.t("ui.abnormal")) : I18N.t("ui.pending"));

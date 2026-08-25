@@ -2954,6 +2954,47 @@ func (p *pgStore) getHardwareEvents(hostID, target string, limit int) ([]map[str
 	return out, rows.Err()
 }
 
+// getAllHardwareSnapshots 一次取回**全部**主机的硬件快照，每行带上 host_id。
+//
+// 存在的理由是一次真实的规模事故：控制台的硬件页原来是「先取全部主机，再对每一台
+// 各发一个 /hardware/health」——500 台的现场就是 500 个并发请求。浏览器每个域名只有
+// 6 条连接，于是它们排着队走；服务端要跑 500 次 handler；API 限流还会开始回 429。
+// 而硬件数据只有那几十台物理机有，其余几百个请求纯属浪费。
+//
+// 这里用一条 SQL 换掉那 500 次往返。返回的行带 host_id，调用方按可见性过滤即可
+// （见 handleHardwareHealth：仍然逐台过主机级 RBAC，不因为改成批量就放宽）。
+func (p *pgStore) getAllHardwareSnapshots() ([]map[string]any, error) {
+	rows, err := p.db.Query(`
+		SELECT host_id, target_name, target_url, snapshot, health, updated_at
+		FROM hardware_snapshot ORDER BY updated_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []map[string]any
+	for rows.Next() {
+		var hostID, targetName, targetURL, health string
+		var snapshot json.RawMessage
+		var updatedAt time.Time
+		if err := rows.Scan(&hostID, &targetName, &targetURL, &snapshot, &health, &updatedAt); err != nil {
+			continue
+		}
+		var snapData any
+		_ = json.Unmarshal(snapshot, &snapData)
+		results = append(results, map[string]any{
+			"host_id":     hostID,
+			"target_name": targetName,
+			"target_url":  targetURL,
+			"health":      health,
+			"snapshot":    snapData,
+			"updated_at":  updatedAt,
+		})
+	}
+	noteRowsErr("getAllHardwareSnapshots", rows)
+	return results, rows.Err()
+}
+
 func (p *pgStore) getHardwareSnapshots(hostID string) ([]map[string]any, error) {
 	rows, err := p.db.Query(`
 		SELECT target_name, target_url, snapshot, health, updated_at

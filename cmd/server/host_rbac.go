@@ -14,46 +14,66 @@ func (u AccountConfig) hostScopeRestricted() bool {
 }
 
 func (s *Server) userCanAccessHost(u AccountConfig, hostID string) bool {
-	if roleRank(u.Role) >= roleRank(RoleAdmin) {
-		return true
+	return s.hostAccessFor(u)(hostID)
+}
+
+// hostAccessFor 为一个账号预先算好授权判定所需的全部静态输入，返回一个按主机 ID 判定的
+// 闭包。判定规则与原来逐台调用 userCanAccessHost 完全一致，只是把「复制整张
+// host→folder 映射 + 展开授权文件夹子树」从每台主机一次提到每次请求一次。
+//
+// 原来 filterHostsForUser / filterAlertsForUser 对**每一台主机、每一条告警**都重复这两步：
+// 受限账号看一次主机列表就是 5000 次整表复制，看一次告警面是几千次；而这两个接口每个
+// 控制台每 5 秒各打一次。
+func (s *Server) hostAccessFor(u AccountConfig) func(hostID string) bool {
+	if roleRank(u.Role) >= roleRank(RoleAdmin) || !u.hostScopeRestricted() {
+		return func(string) bool { return true }
 	}
-	if !u.hostScopeRestricted() {
-		return true
-	}
+	allowedIDs := make(map[string]bool, len(u.AllowedHostIDs))
 	for _, id := range u.AllowedHostIDs {
-		if id == hostID {
-			return true
-		}
+		allowedIDs[id] = true
 	}
-	h, ok := s.store.GetHost(hostID)
-	if !ok {
-		return false
+	tags := make([]string, 0, len(u.AllowedTags))
+	for _, t := range u.AllowedTags {
+		tags = append(tags, strings.TrimSpace(t))
 	}
-	if len(u.AllowedTags) > 0 {
-		cat := strings.TrimSpace(h.Category)
-		for _, t := range u.AllowedTags {
-			if strings.EqualFold(strings.TrimSpace(t), cat) {
-				return true
+	var assign map[string]string
+	var allowedFolders map[string]bool
+	if len(u.AllowedFolderIDs) > 0 {
+		assign = s.cfg.HostFolderAssign()
+		allowedFolders = map[string]bool{}
+		for _, fid := range u.AllowedFolderIDs {
+			allowedFolders[fid] = true
+			for _, child := range s.cfg.FolderDescendantIDs(fid) {
+				allowedFolders[child] = true
 			}
 		}
 	}
-	if len(u.AllowedFolderIDs) == 0 {
-		// Only host-id / tag rules applied above.
-		return len(u.AllowedHostIDs) > 0 && containsStr(u.AllowedHostIDs, hostID)
-	}
-	assign := s.cfg.HostFolderAssign()
-	folderID := assign[hostID]
-	if folderID == "" {
-		return false
-	}
-	allowed := map[string]bool{}
-	for _, fid := range u.AllowedFolderIDs {
-		allowed[fid] = true
-		for _, child := range s.cfg.FolderDescendantIDs(fid) {
-			allowed[child] = true
+	return func(hostID string) bool {
+		if allowedIDs[hostID] {
+			return true
 		}
+		h, ok := s.store.GetHost(hostID)
+		if !ok {
+			return false
+		}
+		if len(tags) > 0 {
+			cat := strings.TrimSpace(h.Category)
+			for _, t := range tags {
+				if strings.EqualFold(t, cat) {
+					return true
+				}
+			}
+		}
+		if allowedFolders == nil {
+			// Only host-id / tag rules apply; the id rule was already checked above.
+			return false
+		}
+		folderID := assign[hostID]
+		if folderID == "" {
+			return false
+		}
+		return allowedFolders[folderID]
 	}
-	return allowed[folderID]
 }
 
 func (s *Server) filterHostsForUser(r *http.Request, hosts []*Host) []*Host {
@@ -61,9 +81,10 @@ func (s *Server) filterHostsForUser(r *http.Request, hosts []*Host) []*Host {
 	if !ok || !u.hostScopeRestricted() || roleRank(u.Role) >= roleRank(RoleAdmin) {
 		return hosts
 	}
+	can := s.hostAccessFor(u)
 	out := make([]*Host, 0, len(hosts))
 	for _, h := range hosts {
-		if h != nil && s.userCanAccessHost(u, h.ID) {
+		if h != nil && can(h.ID) {
 			out = append(out, h)
 		}
 	}
@@ -187,9 +208,10 @@ func (s *Server) filterAlertsForUser(r *http.Request, alerts []Alert) []Alert {
 	if !ok || !u.hostScopeRestricted() || roleRank(u.Role) >= roleRank(RoleAdmin) {
 		return alerts
 	}
+	can := s.hostAccessFor(u)
 	out := make([]Alert, 0, len(alerts))
 	for _, a := range alerts {
-		if a.HostID == "" || s.userCanAccessHost(u, a.HostID) {
+		if a.HostID == "" || can(a.HostID) {
 			out = append(out, a)
 		}
 	}
@@ -225,15 +247,6 @@ func (s *Server) filterInventoryRows(r *http.Request, rows []map[string]any) []m
 		}
 	}
 	return out
-}
-
-func containsStr(ss []string, want string) bool {
-	for _, s := range ss {
-		if s == want {
-			return true
-		}
-	}
-	return false
 }
 
 // HostFolderAssign returns a copy of hostID → folderID map.

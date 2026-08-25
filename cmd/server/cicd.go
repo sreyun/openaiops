@@ -282,9 +282,11 @@ func cicdOwnerRepo(project string) (owner, repo string) {
 // base_url is operator-supplied, so this is a "user can influence the URL" egress
 // exactly like the AI endpoint and the notification webhooks: it dials through
 // ssrfDialControl (see safedial.go), which rejects link-local and cloud metadata
-// addresses after DNS resolution — covering redirects and DNS rebinding too. It
-// cannot simply reuse newGuardedHTTPClient because the CA bundle / skip-verify
-// options need their own TLS config.
+// addresses after DNS resolution — covering redirects and DNS rebinding too, and
+// through guardedProxy the same check applies to the target written into the
+// request line when the deployment routes egress through HTTP_PROXY. It cannot
+// simply reuse newGuardedHTTPClient because the CA bundle / skip-verify options
+// need their own TLS config.
 // cicdTransportCache 复用 Transport。
 //
 // 原来每发一次请求都新建一个 Transport：连接池、TLS 会话全都用完即弃，于是**每次调用都要
@@ -340,7 +342,7 @@ func cicdHTTPClient(c CICDConnection, timeout time.Duration) (*http.Client, erro
 		return &http.Transport{
 			TLSClientConfig:     tlsCfg,
 			TLSHandshakeTimeout: 10 * time.Second,
-			Proxy:               http.ProxyFromEnvironment,
+			Proxy:               guardedProxy,
 			MaxIdleConnsPerHost: 4,
 			IdleConnTimeout:     90 * time.Second,
 			DialContext: (&net.Dialer{

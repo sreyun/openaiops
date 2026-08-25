@@ -872,7 +872,7 @@ func (n *Notifier) sendAliyunSMS(cfg SMSConfig, text string) error {
 	if templateParam == "" {
 		templateParam = `{"message":"` + jsonEsc(safe) + `"}`
 	} else if strings.Contains(templateParam, "${") {
-		templateParam = regexp.MustCompile(`\$\{[^}]*\}`).ReplaceAllStringFunc(templateParam, func(string) string { return jsonEsc(safe) })
+		templateParam = notifyTplVarRe.ReplaceAllStringFunc(templateParam, func(string) string { return jsonEsc(safe) })
 	}
 	params := map[string]string{
 		"PhoneNumbers":  phones,
@@ -969,7 +969,7 @@ func (n *Notifier) sendAliyunVoiceCall(cfg VoiceCallConfig, text string) error {
 	if tsParam == "" {
 		tsParam = `{"message":"` + jsonEsc(safe) + `"}`
 	} else if strings.Contains(tsParam, "${") {
-		tsParam = regexp.MustCompile(`\$\{[^}]*\}`).ReplaceAllStringFunc(tsParam, func(string) string { return jsonEsc(safe) })
+		tsParam = notifyTplVarRe.ReplaceAllStringFunc(tsParam, func(string) string { return jsonEsc(safe) })
 	}
 	calledNumber := cfg.CalledNumbers[0] // SingleCallByTts only supports one callee per call
 
@@ -1432,7 +1432,7 @@ func sendCustomWebhook(cfg CustomWebhookConfig, text string, a Alert, firing boo
 	// Build body: use template if provided, otherwise default JSON
 	var body []byte
 	if cfg.BodyTemplate != "" {
-		tmpl, err := template.New("webhook").Parse(cfg.BodyTemplate)
+		tmpl, err := webhookTemplate(cfg.BodyTemplate)
 		if err != nil {
 			return fmt.Errorf("template parse error: %w", err)
 		}
@@ -1499,4 +1499,24 @@ func sendCustomWebhook(cfg CustomWebhookConfig, text string, a Alert, firing boo
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(rb)))
 	}
 	return nil
+}
+
+// notifyTplVarRe 匹配短信/语音模板参数里的 ${var} 占位。原来在每次发送时
+// regexp.MustCompile 一遍——告警风暴里就是每条通知编译一次正则。
+var notifyTplVarRe = regexp.MustCompile(`\$\{[^}]*\}`)
+
+// webhookTemplateCache 按模板原文缓存已解析的 text/template：同一条 webhook 配置在一次
+// 告警风暴里会被成百上千次地用到，而解析结果只取决于模板文本本身。
+var webhookTemplateCache sync.Map // template text -> *template.Template
+
+func webhookTemplate(text string) (*template.Template, error) {
+	if t, ok := webhookTemplateCache.Load(text); ok {
+		return t.(*template.Template), nil
+	}
+	t, err := template.New("webhook").Parse(text)
+	if err != nil {
+		return nil, err
+	}
+	webhookTemplateCache.Store(text, t)
+	return t, nil
 }

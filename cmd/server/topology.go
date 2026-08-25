@@ -149,6 +149,7 @@ func (s *Server) computeTopologyRCA(hostID string, lookbackDays int) TopologyRCA
 	upSet := map[string]TopologyNodeHit{}
 	downSet := map[string]TopologyNodeHit{}
 	relatedSeed := map[string]string{} // hostID -> reason
+	cats := s.hostCategorySnapshot()   // 本次请求内所有「分类 → 主机」展开共用这一份快照
 
 	for _, e := range edges {
 		from, to := normalizeTopoRef(e.From), normalizeTopoRef(e.To)
@@ -164,14 +165,14 @@ func (s *Server) computeTopologyRCA(hostID string, lookbackDays int) TopologyRCA
 		switch {
 		case fromHit && !toHit:
 			upSet[to] = TopologyNodeHit{Ref: to, Kind: kind, Via: from + "→" + to, Note: e.Note}
-			for _, hid := range s.expandTopoRefToHosts(to) {
+			for _, hid := range s.expandTopoRefToHosts(to, cats) {
 				if hid != hostID {
 					relatedSeed[hid] = "upstream"
 				}
 			}
 		case toHit && !fromHit:
 			downSet[from] = TopologyNodeHit{Ref: from, Kind: kind, Via: from + "→" + to, Note: e.Note}
-			for _, hid := range s.expandTopoRefToHosts(from) {
+			for _, hid := range s.expandTopoRefToHosts(from, cats) {
 				if hid != hostID {
 					relatedSeed[hid] = "downstream"
 				}
@@ -185,7 +186,7 @@ func (s *Server) computeTopologyRCA(hostID string, lookbackDays int) TopologyRCA
 			if toHit {
 				other = from
 			}
-			for _, hid := range s.expandTopoRefToHosts(other) {
+			for _, hid := range s.expandTopoRefToHosts(other, cats) {
 				if hid != hostID {
 					if _, ok := relatedSeed[hid]; !ok {
 						relatedSeed[hid] = "peer"
@@ -197,14 +198,12 @@ func (s *Server) computeTopologyRCA(hostID string, lookbackDays int) TopologyRCA
 
 	// 同分类软关联（无边时也能给一点上下文）
 	if cat != "" {
-		for _, hh := range s.store.ListHosts() {
-			if hh.ID == hostID {
+		for hid, c := range cats {
+			if hid == hostID || c != cat {
 				continue
 			}
-			if s.effectiveCategory(hh.ID) == cat {
-				if _, ok := relatedSeed[hh.ID]; !ok {
-					relatedSeed[hh.ID] = "same_category"
-				}
+			if _, ok := relatedSeed[hid]; !ok {
+				relatedSeed[hid] = "same_category"
 			}
 		}
 	}
@@ -222,7 +221,7 @@ func (s *Server) computeTopologyRCA(hostID string, lookbackDays int) TopologyRCA
 
 	for hid, reason := range relatedSeed {
 		hh, ok := s.store.GetHost(hid)
-		name, c := hid, s.effectiveCategory(hid)
+		name, c := hid, cats[hid]
 		if ok && hh != nil {
 			name = hh.Hostname
 		}
@@ -334,7 +333,28 @@ func (s *Server) computeTopologyRCA(hostID string, lookbackDays int) TopologyRCA
 	return out
 }
 
-func (s *Server) expandTopoRefToHosts(ref string) []string {
+// hostCategorySnapshot 一次性取全部主机的有效分类（人工覆盖优先）。
+//
+// 拓扑影响面要在边循环里反复问「这个分类下有哪些主机」，原来每问一次都 ListHosts
+// 复制全部主机、再逐台 effectiveCategory（它自己又 ListHosts 一遍）——单次请求能复制
+// 上千万个 Host。现在一次请求只拍一张快照。
+func (s *Server) hostCategorySnapshot() map[string]string {
+	hosts := s.store.ListHosts()
+	out := make(map[string]string, len(hosts))
+	for _, h := range hosts {
+		if h == nil || h.ID == "" {
+			continue
+		}
+		if ov, ok := s.cfg.CategoryOverride(h.ID); ok {
+			out[h.ID] = ov
+		} else {
+			out[h.ID] = h.Category
+		}
+	}
+	return out
+}
+
+func (s *Server) expandTopoRefToHosts(ref string, cats map[string]string) []string {
 	ref = normalizeTopoRef(ref)
 	switch topoRefKind(ref) {
 	case "host":
@@ -342,11 +362,12 @@ func (s *Server) expandTopoRefToHosts(ref string) []string {
 	case "cat":
 		cat := topoRefValue(ref)
 		var ids []string
-		for _, h := range s.store.ListHosts() {
-			if s.effectiveCategory(h.ID) == cat {
-				ids = append(ids, h.ID)
+		for hid, c := range cats {
+			if c == cat {
+				ids = append(ids, hid)
 			}
 		}
+		sort.Strings(ids) // map 遍历无序；给调用方稳定的顺序
 		return ids
 	default:
 		// svc：找与该服务直接相连的 host 节点
@@ -369,7 +390,7 @@ func (s *Server) expandTopoRefToHosts(ref string) []string {
 					ids = append(ids, hid)
 				}
 			} else if topoRefKind(other) == "cat" {
-				for _, hid := range s.expandTopoRefToHosts(other) {
+				for _, hid := range s.expandTopoRefToHosts(other, cats) {
 					if !seen[hid] {
 						seen[hid] = true
 						ids = append(ids, hid)

@@ -56,13 +56,20 @@ async function loadHardwarePanel() {
   loadDuplicates(() => renderHardwarePanel());
 
   // 不过滤离线主机：BMC 是带外通道，主机宕机时的硬件数据恰恰最有价值。
+  //
+  // 一次批量请求，不再逐台发。原来是对**每一台**主机各发一个 /hardware/health——
+  // 500 台现场就是 500 个并发请求，浏览器每域名 6 条连接排队走、服务端跑 500 次
+  // handler、API 限流开始回 429，而其中约 470 个打在根本没有 BMC 数据的虚拟机上。
+  // 不带 host 的 /hardware/health 批量返回，服务端仍逐行过主机级 RBAC。
+  const byId = new Map(hosts.map(h => [String(h.id), h]));
   const results = [];
-  await Promise.all(hosts.map(h =>
-    fetch(`${API}/hardware/health?host=${encodeURIComponent(h.id)}`)
-      .then(r => r.json())
-      .then(d => { (d.snapshots || []).forEach(s => results.push({ host: h, snap: s, online: !!h.online })); })
-      .catch(() => {})
-  ));
+  try {
+    const d = await fetch(`${API}/hardware/health`).then(r => r.json());
+    (d.snapshots || []).forEach(s => {
+      const h = byId.get(String(s.host_id || ""));
+      if (h) results.push({ host: h, snap: s, online: !!h.online });
+    });
+  } catch (e) { /* 整批失败按"暂无数据"处理 */ }
   HW_RESULTS = results;
   renderHardwarePanel();
 }
