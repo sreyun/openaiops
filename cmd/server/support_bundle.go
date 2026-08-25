@@ -115,13 +115,10 @@ func (s *Server) supportMeta(ts time.Time) map[string]any {
 			online++
 		}
 	}
-	licMu.RLock()
-	install := licInstallID
-	licMu.RUnlock()
 	return map[string]any{
 		"generated_at":   ts.Format(time.RFC3339),
 		"version":        appVersion,
-		"install_id":     install,
+		"install_id":     "",
 		"go_version":     runtime.Version(),
 		"os":             runtime.GOOS,
 		"arch":           runtime.GOARCH,

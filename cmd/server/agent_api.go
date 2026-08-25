@@ -126,21 +126,6 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// 授权准入：只拦**新主机**。超限/过期时已登记的机器照常上报——把在跑的机器
-	// 踢下线等于把客户的监控打瞎，商业上得不偿失。见 license.go 顶部注释。
-	if isNew {
-		if ok, lic := s.licenseAllowNewHost(); !ok {
-			slog.Warn("授权限制：拒绝新主机注册", "hostname", req.Hostname,
-				"state", lic.State, "used", lic.UsedHosts, "max", lic.MaxHosts)
-			s.store.AddLog(LogEntry{Kind: KindSystem, Level: "warning",
-				Message: Tz("log.license_host_rejected", req.Hostname, lic.UsedHosts, lic.MaxHosts)})
-			writeJSON(w, http.StatusPaymentRequired, map[string]any{
-				"error":   Tr(r, "license.host_quota"),
-				"license": lic,
-			})
-			return
-		}
-	}
 	if allowFPRebind {
 		s.store.RegisterHostRebindFP(hostID, req.Hostname, req.Fingerprint)
 	} else {
