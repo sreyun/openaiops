@@ -74,23 +74,6 @@ func breakerStateCode(s string) int {
 	}
 }
 
-func licenseStateCode(s string) int {
-	switch s {
-	case "active":
-		return 0
-	case "over_quota":
-		return 1
-	case "grace":
-		return 2
-	case "expired":
-		return 3
-	case "invalid":
-		return 4
-	default: // unlicensed
-		return 5
-	}
-}
-
 // handleMetrics GET /metrics —— Prometheus 文本格式。
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if !metricsTokenOK(r) {
@@ -191,19 +174,6 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	// PG 存储：库体积、膨胀与「一次回收能拿回多少」。10 分钟缓存，见 metrics_pg_storage.go。
 	probeNow := time.Now()
 	writePGStorageMetrics(&b, s.pgStorageMetrics(probeNow), probeNow)
-
-	// 授权余量：签发方与客户的 SRE 都需要在到期前看见它
-	lic := s.licenseStatus()
-	g("aiops_license_state", "License state (0=active 1=over_quota 2=grace 3=expired 4=invalid 5=unlicensed)",
-		float64(licenseStateCode(lic.State)), "state", lic.State)
-	g("aiops_license_days_left", "Days until license expiry (negative = expired)", float64(lic.DaysLeft))
-	g("aiops_license_hosts_used", "Hosts counted against the license", float64(lic.UsedHosts))
-	g("aiops_license_hosts_max", "Licensed host limit (0 = unlimited)", float64(lic.MaxHosts))
-	if lic.ReadOnly {
-		g("aiops_license_read_only", "1 when writes are degraded to read-only", 1)
-	} else {
-		g("aiops_license_read_only", "1 when writes are degraded to read-only", 0)
-	}
 
 	// 事件面（未关闭的 SRE 事件）
 	openIncidents := 0
