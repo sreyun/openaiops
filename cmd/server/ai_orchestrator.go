@@ -56,24 +56,24 @@ func assistTaskPolicy(task string) aiTaskPolicy {
 		p.Timeout = 90 * time.Second
 	case "dashboard_optimize":
 		// 开启思考但严格限预算：过长思维链会占满超时/输出额度，最终 JSON 出不来。
-		// MaxTokens 16k，避免大型看板优化 JSON 被截断导致「应用失败」。
+		// MaxTokens 12k，避免大型看板优化 JSON 被截断导致「应用失败」。
 		p.EnableThink = true
 		p.DisableThink = false
-		p.ThinkingBudget = 256
-		p.MaxTokens = 16384
-		p.Timeout = 240 * time.Second
+		p.ThinkingBudget = 128
+		p.MaxTokens = 12288
+		p.Timeout = 180 * time.Second
 	case "dashboard_prompt_optimize":
+		p.EnableThink = true
+		p.DisableThink = false
+		p.ThinkingBudget = 64
+		p.MaxTokens = 2048
+		p.Timeout = 60 * time.Second
+	case "dashboard_analysis":
 		p.EnableThink = true
 		p.DisableThink = false
 		p.ThinkingBudget = 128
 		p.MaxTokens = 2048
 		p.Timeout = 90 * time.Second
-	case "dashboard_analysis":
-		p.EnableThink = true
-		p.DisableThink = false
-		p.ThinkingBudget = 384
-		p.MaxTokens = 4096
-		p.Timeout = 120 * time.Second
 	case "logql", "promql", "playbook", "remediation_rule", "remediation_proposal":
 		p.Timeout = 90 * time.Second
 	}
@@ -417,7 +417,7 @@ func (s *Server) streamOrchestratedAssist(ctx context.Context, w http.ResponseWr
 			retry.EnableThinking = true
 			retry.DisableThinking = false
 			if retry.ThinkingBudget <= 0 {
-				retry.ThinkingBudget = 512
+				retry.ThinkingBudget = 256
 			}
 			if retry.Timeout < 180*time.Second {
 				retry.Timeout = 180 * time.Second
