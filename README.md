@@ -5,15 +5,15 @@
 **一个开源、可私有化的主机监控与 SRE 运维平台**  
 观测 · 告警 · 自愈 · 远程运维 · AI 诊断 —— 收敛进一个你完全掌控的二进制。
 
-[![Version](https://img.shields.io/badge/Version-v0.19.67-blue)](https://github.com/sreyun/aiops-monitor/releases/tag/v0.19.67)
+[![Version](https://img.shields.io/badge/Version-v0.20.47-blue)](https://github.com/sreyun/openaiops/releases/tag/v0.20.47)
 [![Go](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%203.0-blue.svg)](LICENSE)
 [![Platforms](https://img.shields.io/badge/Platforms-Linux%20%7C%20Windows%20%7C%20macOS%20%7C%20Android%20%7C%20HarmonyOS-lightgrey)]()
-[![Stars](https://img.shields.io/github/stars/sreyun/aiops-monitor?style=social)](https://github.com/sreyun/aiops-monitor)
+[![Stars](https://img.shields.io/github/stars/sreyun/openaiops?style=social)](https://github.com/sreyun/openaiops)
 
 **[简体中文](README.md) · [繁體中文](docs/i18n/zh-TW.md) · [English](docs/i18n/en.md) · [日本語](docs/i18n/ja.md) · [한국어](docs/i18n/ko.md) · [Français](docs/i18n/fr.md) · [Deutsch](docs/i18n/de.md) · [Español](docs/i18n/es.md) · [Português](docs/i18n/pt-BR.md) · [Русский](docs/i18n/ru.md)**
 
-[快速开始](#-3-分钟上手) · [核心能力](#-核心能力) · [文档中心](docs/README.md) · [变更日志](CHANGELOG.md) · [Releases](https://github.com/sreyun/aiops-monitor/releases)
+[快速开始](#-3-分钟上手) · [默认凭据](#-默认登录凭据) · [核心能力](#-核心能力) · [文档中心](docs/README.md) · [变更日志](CHANGELOG.md) · [Releases](https://github.com/sreyun/openaiops/releases)
 
 </div>
 
@@ -35,6 +35,19 @@ AIOps 把高频路径收敛为 **一个可自托管的平台**：
 | **许可** | **AGPL-3.0**，无主机数阉割 | 按节点 / 模块收费 |
 
 > 适合：自建机房、混合云、信创环境；需要「看得见、管得住、改得动、说得清」的运维与 SRE 团队。
+
+---
+
+## 🔑 默认登录凭据
+
+| 项目 | 值 |
+|---|---|
+| **Web 控制台地址** | `http://<服务器IP>:8529` |
+| **默认用户名** | `admin` |
+| **默认密码** | `admin` |
+| **首次登录** | 强制修改密码（`MustChangePassword`），改密后方可正常使用 |
+
+> **安全提醒**：生产环境部署后请**立即修改默认密码**并启用 MFA（多因素认证）。如忘记密码，可通过服务端命令行工具重置：`./aiops-server -reset-admin`。
 
 ---
 
@@ -84,7 +97,7 @@ AIOps 把高频路径收敛为 **一个可自托管的平台**：
 - 主机/Web 安全扫描、FIM、内容审计（合规可控）。
 - Web 控制台与 **Android / HarmonyOS** 客户端独立分发。
 
-当前版本 **[v0.19.67](https://github.com/sreyun/aiops-monitor/releases/tag/v0.19.67)** · 镜像 [GitHub](https://github.com/sreyun/aiops-monitor) / [Gitee](https://gitee.com/bigdatasafe/aiops-monitor)
+当前版本 **[v0.20.47](https://github.com/sreyun/openaiops/releases/tag/v0.20.47)** · 镜像 [GitHub](https://github.com/sreyun/openaiops) / [Gitee](https://gitee.com/bigdatasafe/openaiops)
 
 ---
 
@@ -101,6 +114,7 @@ bash scripts/secure-compose.sh
 docker compose up -d
 
 # 浏览器打开 http://localhost:8529
+# 默认账号：admin / admin（首次登录强制修改密码）
 # 完成首次安全初始化 →「安装命令」页生成 Agent 指令 → 粘贴到目标主机
 ```
 
