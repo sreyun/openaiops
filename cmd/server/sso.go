@@ -438,22 +438,12 @@ func (s *Server) provisionSSOUser(req ssoProvisionReq) (string, error) {
 	if base == "" {
 		return "", fmt.Errorf("SSO user has no usable username")
 	}
-	// Legacy OIDC: same username without identity yet → bind in place.
-	if existing, ok := s.cfg.UserByName(base); ok {
-		if err := s.cfg.BindUserIdentity(existing.Username, req.Provider, req.Subject); err != nil {
-			return "", err
-		}
-		display := req.DisplayName
-		email := req.Email
-		if display == "" {
-			display = existing.DisplayName
-		}
-		if email == "" {
-			email = existing.Email
-		}
-		_ = s.cfg.UpdateUserMeta(existing.Username, display, email, req.Role)
-		return existing.Username, nil
-	}
+	// Never auto-bind an IdP subject to an existing local username on the
+	// unauthenticated login path. UsernameHint / email local-part come from the
+	// IdP (preferred_username, nick, …); an attacker who can assert hint "admin"
+	// would otherwise take over the unbound local admin account and get a full
+	// session via finishSSOLogin. Linking must go through the authenticated
+	// bind flow (st.BindUser != ""). allocateSSOUsername below suffixes on clash.
 
 	if !req.AutoCreate {
 		return "", fmt.Errorf("user not provisioned; enable auto_create or create locally")

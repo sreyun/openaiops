@@ -92,6 +92,42 @@ func TestProvisionSSOUserRequiresAutoCreate(t *testing.T) {
 	}
 }
 
+// An IdP user whose preferred_username / email local-part equals an existing
+// local account must NOT silently bind to that account on login. Otherwise a
+// stranger asserting hint "admin" takes over the unbound admin user.
+func TestProvisionSSOUserRejectsUsernameCollisionTakeover(t *testing.T) {
+	s := newSSOTestServer(t)
+	if _, ok := s.cfg.UserByName("admin"); !ok {
+		t.Fatal("fixture admin missing")
+	}
+	// AutoCreate off: collision must fail closed (not bind + session).
+	_, err := s.provisionSSOUser(ssoProvisionReq{
+		Provider: ssoProviderOIDC, Subject: "attacker-sub", UsernameHint: "admin",
+		Email: "admin@evil.example", Role: RoleViewer, AutoCreate: false,
+	})
+	if err == nil {
+		t.Fatal("expected reject when colliding with unbound local admin")
+	}
+	if _, ok := s.cfg.UserByIdentity(ssoProviderOIDC, "attacker-sub"); ok {
+		t.Fatal("identity must not be bound to admin on failed provision")
+	}
+	// AutoCreate on: allocate a distinct username, never hijack admin.
+	got, err := s.provisionSSOUser(ssoProvisionReq{
+		Provider: ssoProviderOIDC, Subject: "attacker-sub", UsernameHint: "admin",
+		Email: "admin@evil.example", Role: RoleViewer, AutoCreate: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == "admin" {
+		t.Fatal("must not return local admin username on IdP hint collision")
+	}
+	acc, ok := s.cfg.UserByIdentity(ssoProviderOIDC, "attacker-sub")
+	if !ok || acc.Username == "admin" {
+		t.Fatalf("identity bound to wrong user: %+v ok=%v", acc, ok)
+	}
+}
+
 func TestSSOConfigMaskAndKeepSecret(t *testing.T) {
 	s := newSSOTestServer(t)
 	err := s.cfg.SetSSOConfig(SSOConfig{
