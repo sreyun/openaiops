@@ -158,6 +158,39 @@ func TestCollectFIMChangesRespectsExcludes(t *testing.T) {
 	}
 }
 
+// 排除是 SkipDir，不是"枚举后发现没了"。父目录往往已经在 visitedDirs 里
+// （整盘扫、要害目录根都会先标记祖先），若排除目录不进 blockedDirs，
+// fimRegionVisited 会把基线里整棵子树误报成删除并从基线清掉。
+// 现场触发：后加 fim_excludes、NFS/overlay 盖上原先扫过的本地路径。
+func TestCollectFIMExcludeMustNotFalseDelete(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "keep.txt"), "k\n")
+	writeFile(t, filepath.Join(root, "dropme", "secret.txt"), "s\n")
+	opts := fimTestOpts(t, root)
+
+	collectFIMChanges(opts) // 基线含 dropme/
+
+	opts.Excludes = []string{filepath.Join(root, "dropme")}
+	changes, stats := collectFIMChanges(opts)
+	for _, c := range changes {
+		if c.Change == "removed" && strings.Contains(c.Path, "dropme") {
+			t.Fatalf("excluded subtree false-deleted: %+v stats=%+v", c, stats)
+		}
+	}
+	base, ok := fimLoadBaseline(fimBaselinePath())
+	if !ok {
+		t.Fatal("baseline missing")
+	}
+	want := fimNormPath(filepath.Join(root, "dropme", "secret.txt"))
+	if _, ok := base[want]; !ok {
+		t.Fatalf("baseline purged excluded path %s", want)
+	}
+	keep := fimNormPath(filepath.Join(root, "keep.txt"))
+	if _, ok := base[keep]; !ok {
+		t.Fatalf("unrelated baseline entry lost: %s", keep)
+	}
+}
+
 func TestFimPartialWalkDoesNotFakeDeletes(t *testing.T) {
 	root := t.TempDir()
 	for _, n := range []string{"a.txt", "b.txt", "c.txt", "d.txt"} {

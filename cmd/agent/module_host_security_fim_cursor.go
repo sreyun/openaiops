@@ -188,6 +188,11 @@ func fimRegionKnown(p string, prevDirs map[string]bool) bool {
 // 沿途撞上就停。被截断的停点祖先同样不在 visited 里（调用方在扫描收尾时剔除），
 // 所以"还没轮到扫"的区域不会被误判成删除。
 func fimRegionVisited(p string, visited, blocked map[string]bool) bool {
+	// 路径自身被挡住（排除的文件、或排除目录的键）时直接否——删判定走的是祖先，
+	// 不看自身的话，单文件 exclude 仍会被父目录的 visited 误杀。
+	if blocked[fimMatchKey(p)] {
+		return false
+	}
 	for d := fimParentDir(p); d != ""; d = fimParentDir(d) {
 		k := fimMatchKey(d)
 		if blocked[k] {

@@ -686,6 +686,11 @@ func fimWalkVolume(group []string, opts fimOptions, excl *fimExcluder, patterns 
 			}
 			if d.IsDir() {
 				if excl.skipName(d.Name()) || excl.skipPath(np) {
+					// 排除/远程挂载是"故意不看"，与权限不足同属 blocked：
+					// 父目录可能已在 visitedDirs 里，若不挡掉，基线里这棵子树
+					// 会被 fimRegionVisited 当成整棵删光（加 exclude、NFS 盖上
+					// 原先的本地目录、overlay/tmpfs 临时挂上都会触发）。
+					out.blockedDirs[fimMatchKey(np)] = true
 					return fs.SkipDir
 				}
 				// 已经被前面的"要害目录"根走过了：整棵子树跳过，别扫两遍。
@@ -712,6 +717,8 @@ func fimWalkVolume(group []string, opts fimOptions, excl *fimExcluder, patterns 
 				return nil
 			}
 			if excl.skipName(d.Name()) || excl.skipPath(np) {
+				// 单文件排除同样不能让父目录的 visited 把它判成删除。
+				out.blockedDirs[fimMatchKey(np)] = true
 				return nil
 			}
 			if resume != "" && fimPathBefore(np, resume) {
