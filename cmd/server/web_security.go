@@ -459,11 +459,13 @@ func sanitizeWebTarget(t *WebScanTarget, globalAllowPrivate bool) error {
 	return nil
 }
 
-func ipBlockedWhenPrivateDenied(ip net.IP) bool {
-	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-		ip.IsMulticast() || ip.IsUnspecified()
-}
-
+// assertURLAllowed gates operator-supplied web-scan URLs.
+//
+// Cloud metadata / link-local / unspecified / multicast are **always** rejected
+// (same policy as safedial.go), even when allowPrivate is on. 「允许私网」only
+// unlocks RFC1918 / loopback / ULA so operators can scan internal apps — it must
+// never open a path to 169.254.169.254 or 100.100.100.200 (Aliyun IMDS), which
+// Go's IsPrivate/IsLinkLocalUnicast miss for the latter.
 func assertURLAllowed(raw string, allowPrivate bool) error {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -476,25 +478,30 @@ func assertURLAllowed(raw string, allowPrivate bool) error {
 	if host == "" {
 		return fmt.Errorf("empty host")
 	}
-	if !allowPrivate {
-		if ip := net.ParseIP(host); ip != nil {
-			if ipBlockedWhenPrivateDenied(ip) {
-				return fmt.Errorf("禁止扫描私网/保留地址（需管理员开启「允许私网」）")
-			}
-		} else {
-			// Fail closed: unresolved hosts must not bypass SSRF guards.
-			addrs, err := net.LookupIP(host)
-			if err != nil {
-				return fmt.Errorf("无法解析目标主机（已拒绝）：%v", err)
-			}
-			if len(addrs) == 0 {
-				return fmt.Errorf("目标主机无解析结果（已拒绝）")
-			}
-			for _, ip := range addrs {
-				if ipBlockedWhenPrivateDenied(ip) {
-					return fmt.Errorf("目标解析到私网地址（需管理员开启「允许私网」）")
-				}
-			}
+	// Always block cloud-metadata hostnames (and literal metadata IPs).
+	if blocked, why := ssrfBlockedTarget(host, false); blocked {
+		return fmt.Errorf("禁止扫描云元数据/保留地址（%s）", why)
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if !allowPrivate && (ip.IsLoopback() || ip.IsPrivate()) {
+			return fmt.Errorf("禁止扫描私网/保留地址（需管理员开启「允许私网」）")
+		}
+		return nil
+	}
+	// Fail closed: unresolved hosts must not bypass SSRF guards.
+	addrs, err := net.LookupIP(host)
+	if err != nil {
+		return fmt.Errorf("无法解析目标主机（已拒绝）：%v", err)
+	}
+	if len(addrs) == 0 {
+		return fmt.Errorf("目标主机无解析结果（已拒绝）")
+	}
+	for _, ip := range addrs {
+		if blocked, why := ssrfBlockedIP(ip, false); blocked {
+			return fmt.Errorf("目标解析到云元数据/保留地址（%s）", why)
+		}
+		if !allowPrivate && (ip.IsLoopback() || ip.IsPrivate()) {
+			return fmt.Errorf("目标解析到私网地址（需管理员开启「允许私网」）")
 		}
 	}
 	return nil

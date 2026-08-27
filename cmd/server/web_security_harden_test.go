@@ -23,6 +23,34 @@ func TestAssertURLAllowedUnspecified(t *testing.T) {
 	}
 }
 
+// Cloud metadata must stay blocked even when 「允许私网」is on. Aliyun IMDS
+// (100.100.100.200) is neither RFC1918 nor link-local, so a private-only check
+// previously let operators SSRF it via web-scan targets.
+func TestAssertURLAllowedCloudMetadataAlwaysBlocked(t *testing.T) {
+	cases := []string{
+		"http://100.100.100.200/latest/meta-data/",
+		"http://169.254.169.254/latest/meta-data/",
+		"http://169.254.170.2/v2/metadata",
+		"http://metadata.google.internal/computeMetadata/v1/",
+		"http://metadata.tencentyun.com/latest/meta-data/",
+	}
+	for _, u := range cases {
+		if err := assertURLAllowed(u, false); err == nil {
+			t.Fatalf("allowPrivate=false must reject %s", u)
+		}
+		if err := assertURLAllowed(u, true); err == nil {
+			t.Fatalf("allowPrivate=true must still reject cloud metadata %s", u)
+		}
+	}
+	// RFC1918 stays gated by the allowPrivate flag.
+	if err := assertURLAllowed("http://10.0.0.8/", false); err == nil {
+		t.Fatal("10/8 must be blocked when private denied")
+	}
+	if err := assertURLAllowed("http://10.0.0.8/", true); err != nil {
+		t.Fatalf("10/8 must be allowed when private permitted: %v", err)
+	}
+}
+
 func TestConstrainPathUnderRoot(t *testing.T) {
 	root := t.TempDir()
 	if full, ok := constrainPathUnderRoot("http/cves", root); !ok || !strings.HasPrefix(full, root) {
