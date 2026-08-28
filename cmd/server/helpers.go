@@ -552,6 +552,43 @@ func mergeSecrets(in *ServerConfig, old ServerConfig) {
 			}
 		}
 	}
+	// MySQL / K8s 凭证在 GET 里被整段替换成 "****"。告警设置/阈值保存会拉全量再回存，
+	// 若不按 ID 还原，字面量 "****" 会永久写进配置，SQL 工具箱与 K8s 集成立刻失效。
+	for i := range in.MySQLConnections {
+		if p := in.MySQLConnections[i].Password; p == "" || strings.Contains(p, "****") {
+			for _, om := range old.MySQLConnections {
+				if om.ID == in.MySQLConnections[i].ID {
+					in.MySQLConnections[i].Password = om.Password
+					break
+				}
+			}
+		}
+	}
+	for i := range in.K8sClusters {
+		tok := in.K8sClusters[i].Token
+		kc := in.K8sClusters[i].KubeconfigYAML
+		needTok := tok == "" || strings.Contains(tok, "****")
+		needKC := kc == "" || strings.Contains(kc, "****")
+		if !needTok && !needKC {
+			continue
+		}
+		for _, ok8 := range old.K8sClusters {
+			if ok8.ID != in.K8sClusters[i].ID {
+				continue
+			}
+			if needTok {
+				in.K8sClusters[i].Token = ok8.Token
+			}
+			if needKC {
+				in.K8sClusters[i].KubeconfigYAML = ok8.KubeconfigYAML
+			}
+			break
+		}
+	}
+	in.PrevInstallToken = keepIfBlank(in.PrevInstallToken, old.PrevInstallToken)
+	if in.PrevTokenExpiresAt == 0 {
+		in.PrevTokenExpiresAt = old.PrevTokenExpiresAt
+	}
 }
 
 func keepIfBlank(newv, oldv string) string {

@@ -1324,6 +1324,17 @@ func (cs *ConfigStore) Set(c ServerConfig) error {
 	c.RelaySecret = cs.cfg.RelaySecret   // managed via storage/relay config (masked in GET)
 	c.HTTPProxies = cs.cfg.HTTPProxies   // managed via proxy endpoints
 	c.ForwardRules = cs.cfg.ForwardRules // managed via forward endpoints
+	// Dedicated-endpoint inventories: alert-settings / thresholds UI does
+	// GET(masked)→POST(full). Without these preserves, MySQL/K8s secrets become
+	// the literal "****" mask, CI/CD / data-sources / security-feeds wipe on any
+	// partial POST, and PrevInstallToken grace breaks after a routine save.
+	c.DataSources = cs.cfg.DataSources
+	c.CICDConnections = cs.cfg.CICDConnections
+	c.K8sClusters = cs.cfg.K8sClusters
+	c.MySQLConnections = cs.cfg.MySQLConnections
+	c.SecurityFeeds = cs.cfg.SecurityFeeds
+	c.PrevInstallToken = cs.cfg.PrevInstallToken
+	c.PrevTokenExpiresAt = cs.cfg.PrevTokenExpiresAt
 	// Preserve SMTP password when the incoming value is blank or masked (same
 	// strategy as webhook secrets — the browser may submit without re-typing it).
 	if c.SMTP.Password == "" || strings.Contains(c.SMTP.Password, "****") {
