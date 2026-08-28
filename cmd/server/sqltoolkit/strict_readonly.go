@@ -60,15 +60,9 @@ func strictReadOnly(sql string, mysql bool) string {
 			return "forbidden clause:" + bad
 		}
 	}
-	// Dangerous functions / session writes.
-	danger := []string{
-		"pg_sleep(", "sleep(", "benchmark(", "get_lock(", "load_file(",
-		"set_config(", "lo_export(", "lo_import(",
-	}
-	for _, d := range danger {
-		if strings.Contains(flat, d) {
-			return "forbidden function: " + strings.TrimSuffix(d, "(")
-		}
+	// Dangerous functions / session writes (tolerate whitespace before '(').
+	if name := containsDangerousSQLFunc(flat); name != "" {
+		return "forbidden function: " + name
 	}
 	if strings.HasPrefix(flat, "set ") {
 		return "SET not allowed"
@@ -98,11 +92,13 @@ func strictReadOnly(sql string, mysql bool) string {
 				" insert ", " update ", " delete ", " drop ", " alter ", " create ",
 				" truncate ", " replace ", " grant ", " revoke ",
 				" into outfile", " into dumpfile", " load data",
-				" pg_sleep(", " sleep(", " benchmark(", " get_lock(",
 			} {
 				if strings.Contains(padded, w) {
 					return "forbidden pattern"
 				}
+			}
+			if containsDangerousSQLFunc(flat) != "" {
+				return "forbidden pattern"
 			}
 		} else {
 			return "write statement"

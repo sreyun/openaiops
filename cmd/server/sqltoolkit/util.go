@@ -168,6 +168,60 @@ func IsReadOnlyQuery(sql string) bool {
 	}
 }
 
+// dangerousSQLFuncs are side-effecting / host-filesystem helpers that must never
+// run through the read-only SQL workbench, even when wrapped in SELECT.
+// Matching uses containsFuncCall so "load_file ('…')" (space before '(') still hits.
+var dangerousSQLFuncs = []string{
+	"pg_sleep", "sleep", "benchmark", "get_lock", "load_file",
+	"set_config", "lo_export", "lo_import",
+	// PostgreSQL admin file helpers — SELECT-callable, not blocked by READ ONLY txns.
+	"pg_read_file", "pg_read_binary_file", "pg_ls_dir", "pg_stat_file",
+}
+
+// containsFuncCall reports whether flat (lowercased, compactSpaces'd SQL without
+// string/comment literals) contains an identifier call to name with optional
+// whitespace before '('. Identifier boundaries prevent matching substrings
+// (e.g. my_load_file).
+func containsFuncCall(flat, name string) bool {
+	if flat == "" || name == "" {
+		return false
+	}
+	idx := 0
+	for {
+		i := strings.Index(flat[idx:], name)
+		if i < 0 {
+			return false
+		}
+		i += idx
+		beforeOK := i == 0 || !isIdentByte(flat[i-1])
+		after := i + len(name)
+		if !beforeOK {
+			idx = after
+			continue
+		}
+		j := after
+		for j < len(flat) && flat[j] == ' ' {
+			j++
+		}
+		if j < len(flat) && flat[j] == '(' {
+			return true
+		}
+		idx = after
+		if idx >= len(flat) {
+			return false
+		}
+	}
+}
+
+func containsDangerousSQLFunc(flat string) string {
+	for _, name := range dangerousSQLFuncs {
+		if containsFuncCall(flat, name) {
+			return name
+		}
+	}
+	return ""
+}
+
 // ForbiddenWrite reports DDL/DML/file ops that must never hit the connection.
 func ForbiddenWrite(sql string) bool {
 	s := strings.ToLower(compactSpaces(StripCommentsAndStrings(sql)))
@@ -178,13 +232,15 @@ func ForbiddenWrite(sql string) bool {
 		" lock tables", " unlock tables", " set global", " set @@",
 		" copy ", " \\copy ", " execute ", " prepare ", " deallocate ",
 		" do ", " listen ", " notify ", " vacuum ", " reindex ",
-		" pg_sleep(", " sleep(", " benchmark(", " get_lock(",
 	}
 	padded := " " + s + " "
 	for _, b := range bad {
 		if strings.Contains(padded, b) {
 			return true
 		}
+	}
+	if containsDangerousSQLFunc(s) != "" {
+		return true
 	}
 	kw := FirstKeyword(sql)
 	switch kw {

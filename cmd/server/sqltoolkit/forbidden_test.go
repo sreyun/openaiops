@@ -16,3 +16,21 @@ func TestForbiddenWriteBlocksSleepAndCopy(t *testing.T) {
 		t.Fatal("plain SELECT must be allowed")
 	}
 }
+
+func TestForbiddenWriteBlocksSpacedAndFileFuncs(t *testing.T) {
+	cases := []string{
+		"SELECT load_file ('/etc/passwd')",
+		"SELECT LOAD_FILE\t('/etc/passwd')",
+		"SELECT pg_sleep (10)",
+		"SELECT pg_read_file('/etc/passwd')",
+		"SELECT pg_read_binary_file('/var/lib/postgresql/data/pg_hba.conf')",
+		"SELECT pg_ls_dir('.')",
+		"SELECT pg_stat_file('/etc/passwd')",
+		"SELECT lo_export (1, '/tmp/x')",
+	}
+	for _, sql := range cases {
+		if !ForbiddenWrite(sql) {
+			t.Fatalf("ForbiddenWrite must reject %q", sql)
+		}
+	}
+}
