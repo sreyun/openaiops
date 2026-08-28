@@ -1105,11 +1105,18 @@ func (cs *ConfigStore) ResetToken() string {
 	return tok
 }
 
-// RevokeInstallToken invalidates the current install token without issuing a new one.
-// Already-registered agents (fingerprint auth) are unaffected.
+// RevokeInstallToken invalidates the current install token and any still-active
+// previous-token grace window, without issuing a new one. Already-registered
+// agents (fingerprint auth) are unaffected.
+//
+// Clearing PrevInstallToken is required: ValidInstallToken accepts the rotated-out
+// token during grace, and that path previously ignored InstallTokenRevoked — so
+// "revoke after rotate" left the leaked prior token usable for up to 7 days.
 func (cs *ConfigStore) RevokeInstallToken() error {
 	cs.mu.Lock()
 	cs.cfg.InstallTokenRevoked = true
+	cs.cfg.PrevInstallToken = ""
+	cs.cfg.PrevTokenExpiresAt = 0
 	cs.mu.Unlock()
 	return cs.save()
 }
@@ -1150,10 +1157,10 @@ func (cs *ConfigStore) ValidInstallToken(got string) bool {
 	expiresAt := cs.cfg.InstallTokenExpiresAt
 	cs.mu.RUnlock()
 	now := time.Now().Unix()
+	if revoked {
+		return false
+	}
 	if cur != "" && subtle.ConstantTimeCompare([]byte(got), []byte(cur)) == 1 {
-		if revoked {
-			return false
-		}
 		if expiresAt > 0 && now >= expiresAt {
 			return false
 		}
