@@ -104,13 +104,14 @@ func decryptSecretV2(v string) (string, bool) {
 	rest := strings.TrimPrefix(v, secretEncPrefixV2)
 	idx := strings.IndexByte(rest, ':')
 	if idx <= 0 {
-		return "", true
+		// Malformed enc:v2 — keep original so a later save cannot blank the field.
+		return v, true
 	}
 	kid, b64 := rest[:idx], rest[idx+1:]
 	data, err := base64.StdEncoding.DecodeString(b64)
 	if err != nil {
 		slog.Error("配置密钥 v2 base64 失败", "err", err)
-		return "", true
+		return v, true
 	}
 	for _, e := range loadAllSecretKeys() {
 		if e.ID == kid {
@@ -124,8 +125,8 @@ func decryptSecretV2(v string) (string, bool) {
 			return pt, true
 		}
 	}
-	slog.Error("配置密钥 v2 解密失败：无匹配密钥", "key_id", kid)
-	return "", true
+	slog.Error("配置密钥 v2 解密失败：无匹配密钥（密文已保留以免写回清空）", "key_id", kid)
+	return v, true
 }
 
 func tryOpenGCM(key, data []byte) string {

@@ -265,12 +265,21 @@ func (ls *logStore) searchStats(hostID, level, keyword string, since int64, allo
 
 // recentErrors returns up to limit error/warn lines since a timestamp (AI input).
 func (ls *logStore) recentErrors(since int64, limit int) []StoredLog {
+	return ls.recentErrorsFiltered(since, limit, nil)
+}
+
+// recentErrorsFiltered is like recentErrors but skips hosts rejected by allow
+// (same contract as searchPage: nil allow = unrestricted).
+func (ls *logStore) recentErrorsFiltered(since int64, limit int, allow func(string) bool) []StoredLog {
 	ls.mu.RLock()
 	defer ls.mu.RUnlock()
 	out := []StoredLog{}
 	for i := len(ls.logs) - 1; i >= 0 && len(out) < limit; i-- {
 		l := ls.logs[i]
 		if l.Ts < since {
+			continue
+		}
+		if allow != nil && !allow(l.HostID) {
 			continue
 		}
 		if l.Level == "error" || l.Level == "warn" {
@@ -282,13 +291,22 @@ func (ls *logStore) recentErrors(since int64, limit int) []StoredLog {
 
 // errorCount counts error lines since a timestamp (for AI/UI).
 func (ls *logStore) errorCount(since int64) int {
+	return ls.errorCountFiltered(since, nil)
+}
+
+// errorCountFiltered counts error lines visible under allow (nil = unrestricted).
+func (ls *logStore) errorCountFiltered(since int64, allow func(string) bool) int {
 	ls.mu.RLock()
 	defer ls.mu.RUnlock()
 	n := 0
 	for _, l := range ls.logs {
-		if l.Ts >= since && l.Level == "error" {
-			n++
+		if l.Ts < since || l.Level != "error" {
+			continue
 		}
+		if allow != nil && !allow(l.HostID) {
+			continue
+		}
+		n++
 	}
 	return n
 }

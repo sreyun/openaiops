@@ -59,6 +59,11 @@ func encryptSecret(plain string) string {
 }
 
 // decryptSecret reverses encryptSecret. Supports enc:v2 (multi-key) and legacy enc:v1.
+//
+// On decrypt failure for an encrypted value, the original ciphertext is returned
+// unchanged (never blanked). Startup migrations often mark config dirty and call
+// save(); blanking here used to persist empty secrets and permanently wipe
+// SMTP/OIDC/K8s/MySQL/AI credentials when AIOPS_SECRET_KEY was missing or wrong.
 func decryptSecret(v string) string {
 	if pt, handled := decryptSecretV2(v); handled {
 		return pt
@@ -78,13 +83,13 @@ func decryptSecret(v string) string {
 				return pt
 			}
 		}
-		slog.Error("配置中存在加密字段，但未设置 AIOPS_SECRET_KEY，无法解密（相关凭据将不可用）")
-		return ""
+		slog.Error("配置中存在加密字段，但未设置 AIOPS_SECRET_KEY，无法解密（相关凭据将不可用；密文已保留以免写回清空）")
+		return v
 	}
 	data, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(v, secretEncPrefix))
 	if err != nil {
 		slog.Error("配置密钥解密失败：base64 解码", "err", err)
-		return ""
+		return v
 	}
 	if pt := tryOpenGCM(key, data); pt != "" {
 		return pt
@@ -94,8 +99,8 @@ func decryptSecret(v string) string {
 			return pt
 		}
 	}
-	slog.Error("配置密钥解密失败：密钥不匹配或数据损坏")
-	return ""
+	slog.Error("配置密钥解密失败：密钥不匹配或数据损坏（密文已保留以免写回清空）")
+	return v
 }
 
 func newGCM(key []byte) (cipher.AEAD, error) {

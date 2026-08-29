@@ -1408,8 +1408,11 @@ func (s *Server) handleLogDiagnose(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	ctx.RecentErrors = s.logs.recentErrors(since, 50)
-	ctx.ErrorCount = s.logs.errorCount(since)
+	// Match GET /api/v1/logs: scoped operators must not pull platform-wide error
+	// rings into the diagnose prompt when host_id is omitted.
+	allow := s.hostLogVisibility(r)
+	ctx.RecentErrors = s.logs.recentErrorsFiltered(since, 50, allow)
+	ctx.ErrorCount = s.logs.errorCountFiltered(since, allow)
 
 	reportCtx := fmt.Sprintf("日志诊断：主机 %s，时间范围 %d 分钟", req.Hostname, req.SinceMin)
 	if len(req.ErrorLogs) > 0 {
@@ -3587,6 +3590,16 @@ func (s *Server) handleGetDiagnosisChatHistory(w http.ResponseWriter, r *http.Re
 	id, ok := sreParseID(r)
 	if !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "common.invalid_id")})
+		return
+	}
+	inc, found := s.incidents.Get(id)
+	if !found {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "incident.not_found")})
+		return
+	}
+	// Same host-scope gate as POST on this path — history can include terminal
+	// snippets and host context from out-of-scope incidents.
+	if !s.requireIncidentAccess(w, r, inc.HostID) {
 		return
 	}
 	var history []diagnosisChatMessage
