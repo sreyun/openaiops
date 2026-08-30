@@ -126,6 +126,21 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Reserve a MaxUses slot *before* inserting the host so concurrent enrollments
+	// cannot all pass ValidInstallToken and then each ++ past the quota.
+	tokenConsumed := false
+	if isNew && req.Token != "" {
+		if s.cfg.TryConsumeInstallTokenUse(req.Token) {
+			tokenConsumed = true
+		} else if s.cfg.isCurrentInstallToken(req.Token) {
+			// Presented the current token but could not reserve a use (MaxUses /
+			// revoke / expiry race). Do not fall through to RegisterHost.
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": Tr(r, "agent.invalid_token")})
+			return
+		}
+		// Grace prev token: ValidInstallToken may be true but never consumed —
+		// same as pre-existing behavior (adjacent to open PR#23).
+	}
 	if allowFPRebind {
 		s.store.RegisterHostRebindFP(hostID, req.Hostname, req.Fingerprint)
 	} else {
@@ -138,11 +153,11 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	// exhausting the fleet install token while the host stayed deleted for ~60s and
 	// then could never re-enroll until the token was rotated.
 	if _, ok := s.store.GetHost(hostID); !ok {
+		if tokenConsumed {
+			s.cfg.RefundInstallTokenUse()
+		}
 		writeJSON(w, http.StatusConflict, map[string]string{"error": Tr(r, "agent.register_suppressed")})
 		return
-	}
-	if isNew && req.Token != "" {
-		s.cfg.ConsumeInstallTokenUse(req.Token)
 	}
 	resp := map[string]any{
 		"status": "ok",

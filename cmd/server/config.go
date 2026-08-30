@@ -1169,17 +1169,70 @@ func (cs *ConfigStore) ValidInstallToken(got string) bool {
 	return false
 }
 
-// ConsumeInstallTokenUse increments the use counter after a successful NEW agent
-// registration that presented the current (not grace) token.
-func (cs *ConfigStore) ConsumeInstallTokenUse(got string) {
+// isCurrentInstallToken reports whether got equals the active install token
+// (not the grace prev). Used to distinguish "quota race on current" from
+// "grace prev / unrelated string" after TryConsumeInstallTokenUse returns false.
+func (cs *ConfigStore) isCurrentInstallToken(got string) bool {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.cfg.InstallToken != "" &&
+		subtle.ConstantTimeCompare([]byte(got), []byte(cs.cfg.InstallToken)) == 1
+}
+
+// TryConsumeInstallTokenUse atomically validates the *current* install token
+// (revoke / expiry / MaxUses) and increments the use counter under the write lock.
+//
+// Returns true only when this call reserved one use. Returning false means either
+// got is not the current token (grace/anonymous callers may still enroll) or the
+// quota/revoke/expiry check failed — callers that already passed ValidInstallToken
+// for the current token must treat false as "reject this new host".
+//
+// Splitting ValidInstallToken (RLock) from ConsumeInstallTokenUse let concurrent
+// new registrations all pass the MaxUses check and then each ++ the counter,
+// enrolling past the configured quota.
+func (cs *ConfigStore) TryConsumeInstallTokenUse(got string) bool {
 	cs.mu.Lock()
 	if cs.cfg.InstallToken == "" || subtle.ConstantTimeCompare([]byte(got), []byte(cs.cfg.InstallToken)) != 1 {
 		cs.mu.Unlock()
-		return
+		return false
+	}
+	if cs.cfg.InstallTokenRevoked {
+		cs.mu.Unlock()
+		return false
+	}
+	now := time.Now().Unix()
+	if cs.cfg.InstallTokenExpiresAt > 0 && now >= cs.cfg.InstallTokenExpiresAt {
+		cs.mu.Unlock()
+		return false
+	}
+	if cs.cfg.InstallTokenMaxUses > 0 && cs.cfg.InstallTokenUseCount >= cs.cfg.InstallTokenMaxUses {
+		cs.mu.Unlock()
+		return false
 	}
 	cs.cfg.InstallTokenUseCount++
 	cs.mu.Unlock()
 	_ = cs.save()
+	return true
+}
+
+// RefundInstallTokenUse undoes a TryConsumeInstallTokenUse when enrollment was
+// aborted after the counter moved (e.g. delete-suppress stub).
+func (cs *ConfigStore) RefundInstallTokenUse() {
+	cs.mu.Lock()
+	if cs.cfg.InstallTokenUseCount > 0 {
+		cs.cfg.InstallTokenUseCount--
+	}
+	cs.mu.Unlock()
+	_ = cs.save()
+}
+
+// ConsumeInstallTokenUse increments the use counter after a successful NEW agent
+// registration that presented the current (not grace) token.
+//
+// Deprecated for enrollment paths: prefer TryConsumeInstallTokenUse so MaxUses
+// cannot race. Kept for callers that only need a best-effort ++ after the fact.
+func (cs *ConfigStore) ConsumeInstallTokenUse(got string) {
+	_ = cs.TryConsumeInstallTokenUse(got)
 }
 
 // ---- account ----
