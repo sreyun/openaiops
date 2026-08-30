@@ -315,6 +315,7 @@
   "agent.fingerprint_failed": "指纹鉴权失败：未注册或指纹不匹配",
   "agent.fingerprint_required": "指纹信息必填",
   "agent.fingerprint_conflict": "主机指纹与已登记记录冲突，拒绝覆盖身份",
+  "agent.register_suppressed": "主机刚被删除，暂不可重新注册，请稍后再试（不会消耗安装 Token）",
   "email.not_configured": "邮件服务未配置或未启用",
   "email.invalid_header": "非法的收件人 / 主题 / 发件人名称",
   "email.tls_failed": "TLS 连接失败: %v",

@@ -315,6 +315,7 @@
   "agent.fingerprint_failed": "Fingerprint authentication failed: not registered or fingerprint mismatch",
   "agent.fingerprint_required": "Fingerprint required",
   "agent.fingerprint_conflict": "Host fingerprint conflicts with an existing record; identity rebind refused",
+  "agent.register_suppressed": "Host was just deleted; re-registration is temporarily refused (install token not consumed)",
   "email.not_configured": "Email service is not configured or enabled",
   "email.invalid_header": "Invalid recipient / subject / sender name",
   "email.tls_failed": "TLS connection failed: %v",

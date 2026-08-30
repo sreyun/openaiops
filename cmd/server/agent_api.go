@@ -131,6 +131,16 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	} else {
 		s.store.RegisterHost(hostID, req.Hostname, req.Fingerprint)
 	}
+	// Delete-suppress briefly refuses to re-insert a just-deleted host (anti-flap).
+	// RegisterHost returns a stub in that window WITHOUT putting the host back in
+	// the store. Returning 200 here made the agent mark itself registered and, when
+	// InstallTokenMaxUses is set, burn a use on every report-cycle re-register —
+	// exhausting the fleet install token while the host stayed deleted for ~60s and
+	// then could never re-enroll until the token was rotated.
+	if _, ok := s.store.GetHost(hostID); !ok {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": Tr(r, "agent.register_suppressed")})
+		return
+	}
 	if isNew && req.Token != "" {
 		s.cfg.ConsumeInstallTokenUse(req.Token)
 	}
