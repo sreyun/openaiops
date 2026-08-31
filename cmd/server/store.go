@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -138,13 +139,20 @@ type Store struct {
 
 // BindPG wires PostgreSQL as the durable store for host metadata, the audit log,
 // plugin events and alert-ack states, seeding the in-memory state from it.
-func (s *Store) BindPG(pg *pgStore) {
+//
+// loadHosts errors are fatal to the caller: ignoring them left an empty host map,
+// and the first pgFlush (write-cache mirror-delete) would then DELETE every row
+// still present in PostgreSQL.
+func (s *Store) BindPG(pg *pgStore) error {
 	if pg == nil {
-		return
+		return nil
 	}
 	audit, _ := pg.loadRecentAudit(maxActivity)
 	events, _ := pg.loadRecentEvents(maxEvents)
-	hosts, _ := pg.loadHosts()
+	hosts, err := pg.loadHosts()
+	if err != nil {
+		return fmt.Errorf("加载主机清单失败: %w", err)
+	}
 	alertHistory, _ := pg.loadRecentAlerts(maxAlertHistory)
 	var alertStates map[string]string
 	if raw, _ := pg.loadKV("alert_states"); raw != nil {
@@ -176,6 +184,7 @@ func (s *Store) BindPG(pg *pgStore) {
 		}
 	}
 	s.mu.Unlock()
+	return nil
 }
 
 // exportHosts returns copies of every host's metadata WITHOUT the history tiers

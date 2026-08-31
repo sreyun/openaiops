@@ -17,7 +17,6 @@ import (
 // TestMetricsEndpointAuthAndPayload 钉住两件事：/metrics 不能匿名放行（里面有主机规模、
 // 告警面与授权信息），以及运维真正会用到的那几个量确实在输出里。
 func TestMetricsEndpointAuthAndPayload(t *testing.T) {
-	licenseResetForTest(t)
 	srv, _ := newTestServer(t)
 	srv.store.RegisterHost("h1", "n1", "fp1")
 
@@ -82,7 +81,6 @@ func TestMetricsLabelEscaping(t *testing.T) {
 // TestSupportBundleContentsAndSanitization：诊断包会被邮件转发、贴进工单，
 // 所以既要有该有的东西，也**绝不能**带出密钥。
 func TestSupportBundleContentsAndSanitization(t *testing.T) {
-	licenseResetForTest(t)
 	srv, token := newTestServer(t)
 	srv.store.RegisterHost("h1", "node-1", "fp1")
 

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"log/slog"
 	"net"
 	"net/url"
@@ -904,6 +905,13 @@ func (p *pgStore) saveHosts(hosts []*Host, withMetrics bool) error {
 		ids, err := p.selectIDsText(`SELECT id FROM hosts`)
 		if err != nil {
 			return err
+		}
+		// Defense in depth against BindPG/loadHosts failure: an empty in-memory
+		// set plus a non-empty PG id list would mirror-delete the entire fleet.
+		// A successful BindPG always loads before the first flush; empty+non-empty
+		// therefore means the load was skipped or failed — refuse rather than wipe.
+		if len(hosts) == 0 && len(ids) > 0 {
+			return fmt.Errorf("拒绝 hosts 镜像删除：内存 0 台主机但 PostgreSQL 仍有 %d 台（主机清单可能未加载成功）", len(ids))
 		}
 		p.wc.seed(table, ids)
 	}
@@ -2619,10 +2627,23 @@ func (s *Server) bindPG(ps *pgStore) {
 	if tks, err := ps.loadTickets(); err == nil && len(tks) > 0 {
 		s.tickets.Import(tks)
 	}
-	if pages, err := ps.loadOnCallPages(); err == nil && len(pages) > 0 {
+	// oncall_pages / change_records use write-cache mirror-delete. A failed load
+	// that leaves memory empty would wipe PG on the first flush — same class of
+	// bug as hosts. Refuse to start the flush loop until those loads succeed.
+	pages, err := ps.loadOnCallPages()
+	if err != nil {
+		slog.Error("加载 On-call pages 失败；拒绝启动 PG 刷写（否则空内存会镜像删除）", "err", err)
+		log.Fatalf("PostgreSQL oncall_pages 加载失败，服务终止：%v", err)
+	}
+	if len(pages) > 0 {
 		s.oncall.Import(pages)
 	}
-	if chgs, err := ps.loadChangeRecords(); err == nil && len(chgs) > 0 {
+	chgs, err := ps.loadChangeRecords()
+	if err != nil {
+		slog.Error("加载变更记录失败；拒绝启动 PG 刷写（否则空内存会镜像删除）", "err", err)
+		log.Fatalf("PostgreSQL change_records 加载失败，服务终止：%v", err)
+	}
+	if len(chgs) > 0 {
 		s.changes.Import(chgs)
 	}
 	// Login sessions survive restart (no forced re-login in dual-DB mode).
@@ -4159,6 +4180,9 @@ func (p *pgStore) saveOnCallPages(list []OnCallPage) error {
 		if err != nil {
 			return err
 		}
+		if len(list) == 0 && len(ids) > 0 {
+			return fmt.Errorf("拒绝 oncall_pages 镜像删除：内存 0 条但 PostgreSQL 仍有 %d 条（清单可能未加载成功）", len(ids))
+		}
 		p.wc.seed(table, ids)
 	}
 	live := make(map[string]bool, len(list))
@@ -4238,6 +4262,9 @@ func (p *pgStore) saveChangeRecords(list []ChangeRecord) error {
 		ids, err := p.selectIDsText(`SELECT id::text FROM change_records`)
 		if err != nil {
 			return err
+		}
+		if len(list) == 0 && len(ids) > 0 {
+			return fmt.Errorf("拒绝 change_records 镜像删除：内存 0 条但 PostgreSQL 仍有 %d 条（清单可能未加载成功）", len(ids))
 		}
 		p.wc.seed(table, ids)
 	}
