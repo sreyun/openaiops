@@ -34,6 +34,13 @@ func TestNewStore(t *testing.T) {
 	}
 }
 
+func TestBindPGNil(t *testing.T) {
+	s := NewStore()
+	if err := s.BindPG(nil); err != nil {
+		t.Fatalf("BindPG(nil): %v", err)
+	}
+}
+
 func TestRegisterHost(t *testing.T) {
 	t.Run("new host", func(t *testing.T) {
 		s := NewStore()

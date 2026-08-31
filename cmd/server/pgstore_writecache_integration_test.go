@@ -178,18 +178,31 @@ func TestSaveHostsMirrorsDeletes(t *testing.T) {
 		t.Fatalf("removed host was not mirrored away: %+v", loaded)
 	}
 
-	// Simulate a restart: a brand-new cache must re-seed from PG, otherwise a host
-	// deleted while the process was down would linger forever.
+	// Simulate a restart: re-seed the write cache, then reload hosts the way
+	// BindPG does. An empty in-memory set must NOT wipe PG — that path is how a
+	// failed/ignored loadHosts used to delete the fleet on the first flush.
 	ps.wc = newPGWriteCache()
-	if err := ps.saveHosts(nil, true); err != nil {
-		t.Fatalf("post-restart save: %v", err)
+	if err := ps.saveHosts(nil, true); err == nil {
+		t.Fatal("empty memory + non-empty PG must refuse mirror-delete")
+	}
+	loaded, err = ps.loadHosts()
+	if err != nil {
+		t.Fatalf("loadHosts after refused wipe: %v", err)
+	}
+	if len(loaded) != 1 || loaded[0].ID != "ha" {
+		t.Fatalf("hosts were wiped despite safety latch: %+v", loaded)
+	}
+	// Proper restart path: load into memory, then flush — row survives.
+	ps.wc = newPGWriteCache()
+	if err := ps.saveHosts(loaded, true); err != nil {
+		t.Fatalf("post-restart save with loaded hosts: %v", err)
 	}
 	loaded, err = ps.loadHosts()
 	if err != nil {
 		t.Fatalf("loadHosts after restart: %v", err)
 	}
-	if len(loaded) != 0 {
-		t.Fatalf("stale rows survived a restart with an empty in-memory set: %+v", loaded)
+	if len(loaded) != 1 || loaded[0].ID != "ha" {
+		t.Fatalf("host lost across restart simulation: %+v", loaded)
 	}
 }
 
