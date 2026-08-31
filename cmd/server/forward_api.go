@@ -218,13 +218,14 @@ func (s *Server) handleForwardGroupEdit(w http.ResponseWriter, r *http.Request) 
 	if !s.requireForwardGroupAccess(w, r, gid) {
 		return
 	}
-	// 收集组内旧规则（目标端口 / 主机 / 协议），并求最小端口作为整段平移的基准。
+	// 收集组内旧规则（目标端口 / 主机 / 协议 / 跳板），并求最小端口作为整段平移的基准。
 	// 关键修复：此前把 req.TargetPort 直接套到组内每一条 → 整段塌成同一个端口、只剩一条能
 	// 绑定；改为「按最小端口平移」，保留各端口的相对偏移（TCP / UDP 通用）。
 	type oldRule struct {
 		target           int
 		hostID, hostname string
 		protocol         string
+		remoteTarget     string
 		wlEnabled        bool
 		whitelist        []string
 	}
@@ -236,7 +237,11 @@ func (s *Server) handleForwardGroupEdit(w http.ResponseWriter, r *http.Request) 
 			continue
 		}
 		wlOn, wlList, _ := rule.whitelistSnapshot()
-		olds = append(olds, oldRule{rule.targetPort, rule.hostID, rule.hostname, rule.protocol, wlOn, wlList})
+		olds = append(olds, oldRule{
+			target: rule.targetPort, hostID: rule.hostID, hostname: rule.hostname,
+			protocol: rule.protocol, remoteTarget: rule.remoteTarget,
+			wlEnabled: wlOn, whitelist: wlList,
+		})
 		if oldStart == 0 || rule.targetPort < oldStart {
 			oldStart = rule.targetPort
 		}
@@ -259,6 +264,17 @@ func (s *Server) handleForwardGroupEdit(w http.ResponseWriter, r *http.Request) 
 		newStart = oldStart // 未改端口则不平移
 	}
 	delta := newStart - oldStart
+	// 预检：平移后任一端口越界则整组拒绝——旧实现先删再 continue 跳过越界端口，
+	// 会在返回 200 时永久丢掉部分（甚至大部分）已持久化的转发规则。
+	for _, o := range olds {
+		nt := o.target + delta
+		if nt < 1 || nt > 65535 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": fmt.Sprintf("端口平移越界：%d → %d（组内 %d 条），已拒绝编辑以免丢失规则", o.target, nt, len(olds)),
+			})
+			return
+		}
+	}
 	user, _ := s.currentUser(r)
 	operator := s.clientIP(r)
 	if user.Username != "" {
@@ -266,29 +282,46 @@ func (s *Server) handleForwardGroupEdit(w http.ResponseWriter, r *http.Request) 
 	}
 	// 先删旧规则（关掉全部旧监听），再按平移后的端口整段重建——避免就地改端口时新旧端口
 	// 区间重叠导致的绑定冲突。沿用同一 group id，组关系不变；本地端口镜像目标端口。
+	// 必须保留 remoteTarget（跳板）：旧实现硬编码 ""，整组编辑会默默清掉跳板目标。
 	for _, id := range s.forward.groupRuleIDs(gid) {
 		s.forward.removeRule(id)
 	}
 	listenHost := s.cfg.ForwardListenAddr()
-	var created []forwardInfo
-	for _, o := range olds {
-		host, hostname := o.hostID, o.hostname
-		if newHost != "" {
-			host, hostname = newHost, newHostname
+	recreate := func(useNew bool) ([]forwardInfo, error) {
+		var created []forwardInfo
+		var firstErr error
+		for _, o := range olds {
+			host, hostname, nt, remote := o.hostID, o.hostname, o.target, o.remoteTarget
+			if useNew {
+				if newHost != "" {
+					host, hostname = newHost, newHostname
+				}
+				nt = o.target + delta
+			}
+			rule, err := s.forward.createRule(host, hostname, nt, nt, listenHost, o.protocol, gid, operator, remote, o.wlEnabled, o.whitelist)
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			go s.serveRule(rule)
+			created = append(created, infoFromRule(rule, 0, 0))
 		}
-		nt := o.target + delta
-		if nt < 1 || nt > 65535 {
-			continue
-		}
-		rule, err := s.forward.createRule(host, hostname, nt, nt, listenHost, o.protocol, gid, operator, "", o.wlEnabled, o.whitelist)
-		if err != nil {
-			continue
-		}
-		go s.serveRule(rule)
-		created = append(created, infoFromRule(rule, 0, 0))
+		return created, firstErr
 	}
-	if len(created) == 0 {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "整组编辑失败"})
+	created, firstErr := recreate(true)
+	if len(created) != len(olds) {
+		// 部分失败：清掉已建的新规则，按快照尽力回滚，避免留下残缺组。
+		for _, id := range s.forward.groupRuleIDs(gid) {
+			s.forward.removeRule(id)
+		}
+		_, _ = recreate(false)
+		msg := "整组编辑失败"
+		if firstErr != nil {
+			msg = firstErr.Error()
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": msg})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"edited": len(created), "rules": created})
