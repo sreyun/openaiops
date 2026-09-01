@@ -159,21 +159,32 @@ func (s *Server) createRecordingsBackup(operator, note string) (BackupMeta, erro
 			if rerr != nil {
 				return nil
 			}
-			hdr, herr := tar.FileInfoHeader(info, "")
-			if herr != nil {
-				return nil
-			}
-			hdr.Name = filepath.ToSlash(filepath.Join(kind, rel))
-			if err := tw.WriteHeader(hdr); err != nil {
-				return err
-			}
+			// Open BEFORE WriteHeader. A header with Size=N followed by a skipped
+			// body (Open failed after Stat — race with rotation/delete) shifts every
+			// later entry by N bytes and produces a "successful" corrupt archive.
 			fh, oerr := os.Open(p)
 			if oerr != nil {
 				return nil
 			}
-			defer fh.Close()
-			if _, err := io.Copy(tw, fh); err != nil {
+			st, serr := fh.Stat()
+			if serr != nil || st == nil || !st.Mode().IsRegular() {
+				fh.Close()
+				return nil
+			}
+			hdr, herr := tar.FileInfoHeader(st, "")
+			if herr != nil {
+				fh.Close()
+				return nil
+			}
+			hdr.Name = filepath.ToSlash(filepath.Join(kind, rel))
+			if err := tw.WriteHeader(hdr); err != nil {
+				fh.Close()
 				return err
+			}
+			_, copyErr := io.Copy(tw, fh)
+			fh.Close()
+			if copyErr != nil {
+				return copyErr
 			}
 			count++
 			return nil

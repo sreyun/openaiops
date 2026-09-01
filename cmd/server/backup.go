@@ -618,14 +618,21 @@ func (s *Server) handleGetBackupCfg(w http.ResponseWriter, r *http.Request) {
 	b := s.cfg.BackupCfg()
 	b.Remote.SecretKey = maskSecret(b.Remote.SecretKey)
 	b.Remote.AccessKey = maskSecret(b.Remote.AccessKey)
+	// include_vm / vm_days / include_recordings MUST be echoed: the settings UI
+	// loads this GET into checkboxes then POSTs the whole BackupConfig on save.
+	// Omitting them made !!undefined → false, so any later "save backup plan"
+	// silently cleared scheduled VictoriaMetrics + recordings disaster recovery.
 	writeJSON(w, http.StatusOK, map[string]any{
-		"enabled":       b.Enabled,
-		"daily_at":      b.DailyAt,
-		"retain_count":  b.RetainCount,
-		"dir":           b.Dir,
-		"remote":        b.Remote,
-		"dir_effective": backupDir(b),
-		"tools":         backupToolsStatus(),
+		"enabled":            b.Enabled,
+		"daily_at":           b.DailyAt,
+		"retain_count":       b.RetainCount,
+		"dir":                b.Dir,
+		"remote":             b.Remote,
+		"include_vm":         b.IncludeVM,
+		"vm_days":            b.VMDays,
+		"include_recordings": b.IncludeRecordings,
+		"dir_effective":      backupDir(b),
+		"tools":              backupToolsStatus(),
 	})
 }
 
