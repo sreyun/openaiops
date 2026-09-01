@@ -1,4 +1,4 @@
-# AIOps 安装使用说明书
+﻿# AIOps 安装使用说明书
 
 > 轻量级主机监控运维平台 —— Go 原生采集 + Python 插件层 + 实时面板 + 阈值告警 + 远程终端 + 自动化剧本。单二进制服务端、零依赖 Agent、三平台原生采集（含 GPU）、一条命令安装、开箱即用。
 
@@ -89,7 +89,7 @@ AIOps 用**一个服务端 + 每台主机一个 Agent**的极简架构，替代�
 **① 启动服务端（Docker 一键，推荐）**
 
 ```bash
-git clone https://github.com/sreyun/aiops-monitor.git && cd aiops-monitor
+git clone https://github.com/sreyun/openaiops.git && cd openaiops
 docker compose up -d
 # 浏览器打开 http://localhost:8529
 ```
@@ -136,7 +136,7 @@ irm "http://<服务端>:8529/install.ps1?token=<TOKEN>" | iex
 **方式一：Docker（推荐）**
 
 ```bash
-git clone https://github.com/sreyun/aiops-monitor.git && cd aiops-monitor
+git clone https://github.com/sreyun/openaiops.git && cd openaiops
 docker compose up -d aiops-server
 ```
 
@@ -803,13 +803,27 @@ server {
 
 ## 七、升级与卸载
 
-**升级 Agent**：停服务 → 替换二进制（和有改动的 `plugins/`）→ 起服务。`host_id` 存在 `agent_state.json`，升级不改变主机身份。
+### 7.1 Agent OTA 自动升级（推荐）
+
+服务端升级后，**无需逐台登录**即可把采集端推到同版本（默认开启）：
+
+1. **自动 OTA**：在线且版本落后的 Agent 会在上报时自动入队；控制台主机列表可看到版本徽章与批量更新入口。
+2. **手动推送**：在控制台勾选主机 →「更新 Agent」；或调用 `POST /api/v1/agents/update`。
+3. **换版过程**：Agent 从服务端 `/dl/` 下载匹配 OS/架构 的二进制，**SHA-256 校验**后热替换并重启服务；失败自动回滚 `.bak`。
+4. **策略控制**：设置 → Agent 自动升级 —— 维护窗口、按主机/分类豁免、连续失败熔断；`GET /api/v1/agents/auto-update-status` 可查看「为什么没升级」。
+5. **任务状态**：`running → pending_verify → success/failed`；各平台均有独立升级助手日志，控制台可拉取现场证据。
+
+> **Nginx 反代环境**：OTA 与远程终端共用反向长连接，须按 [第六节](#六跨网络部署nginx-反代) 关闭缓冲。验收清单见 [docs/engineering/agent-update-soak.md](../engineering/agent-update-soak.md)。
+
+### 7.2 手工升级 Agent（离线 / 兜底）
+
+停服务 → 替换二进制（和有改动的 `plugins/`）→ 起服务。`host_id` 存在 `agent_state.json`，升级不改变主机身份。
 
 ```bash
 systemctl stop aiops-agent && cp new/aiops-agent /opt/aiops-agent/ && systemctl start aiops-agent
 ```
 
-**卸载**：
+### 7.3 卸载
 
 ```bash
 # Linux
@@ -851,15 +865,19 @@ launchctl unload ~/Library/LaunchAgents/com.aiops.agent.plist
 - 飞书关键词 / 钉钉加签是否匹配（见 [4.2 告警与通知](#42-告警与通知)）。
 
 **远程终端连不上（但指标正常）？**
-- 走了 Nginx 却没放行 WebSocket。按 [六、跨网络部署](#六跨网络部署nginx-反代) 配置 `Upgrade` 头并关闭缓冲。
+- 走了 Nginx 却没放行 WebSocket 或未关闭双向缓冲。按 [六、跨网络部署](#六跨网络部署nginx-反代) 配置。
+
+**Agent 自动升级一直失败（但指标正常）？**
+- 与远程终端相同：Nginx 须关闭 `proxy_buffering` 与 `proxy_request_buffering`。
+- 控制台查看自动升级状态或调用 `GET /api/v1/agents/auto-update-status` 看跳过原因。
+
+**部署要不要额外装数据库 / 消息队列？**
+- 不需要消息队列。服务端为单二进制，但**必须**配套 PostgreSQL 与 VictoriaMetrics（Docker Compose 一键拉起即可）。
 
 **终端里复制不出来？**
 - 拖选后按 Ctrl+C，或在高亮上点右键；标题栏的复制按钮任何时候都可用（没有选区时复制整屏）。
 - 明文 HTTP 下浏览器不给剪贴板 API，面板会自动走兜底；若连兜底也被浏览器策略挡下，会弹出手动复制框——内容已选中，按 Ctrl+C 即可。
 - 想彻底避开这类限制，把面板放到 HTTPS 后面（见 [六、跨网络部署](#六跨网络部署nginx-反代)），浏览器就会开放剪贴板 API。
-
-**部署要不要额外装数据库 / 消息队列？**
-- 不需要。服务端单二进制内嵌持久化，零外部依赖。
 
 **数据存在哪、安全吗？**
 - 全部落在你自己掌控的 PostgreSQL / VictoriaMetrics，数据主权完全自持，不经任何第三方。
@@ -874,8 +892,8 @@ launchctl unload ~/Library/LaunchAgents/com.aiops.agent.plist
 > 对应官网「联系我们」页。
 
 - **电子邮件**：bigdatasafe@gmail.com（一般 1–2 个工作日内回复）
-- **问题反馈**：GitHub Issues — <https://github.com/sreyun/aiops-monitor/issues>
-- **开源社区**：GitHub 仓库 — <https://github.com/sreyun/aiops-monitor>
+- **问题反馈**：GitHub Issues — <https://github.com/sreyun/openaiops/issues>
+- **开源社区**：GitHub 仓库 — <https://github.com/sreyun/openaiops>
 
 欢迎提交 Issue、PR 或使用反馈，我们会认真对待每一条建议。
 

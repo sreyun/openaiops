@@ -1,4 +1,4 @@
-# 安装指南 · INSTALL
+﻿# 安装指南 · INSTALL
 
 > AIOps 开源运维监控平台。本文档覆盖服务端、采集端 Agent 与安卓客户端的安装配置。
 > 所有步骤均基于真实架构；如与代码默认行为不符，以代码与 `--help` 输出为准。
@@ -31,7 +31,7 @@
 
 ```bash
 # 推荐：自动下载编排并生成强随机密钥到 .env
-bash <(curl -fsSL https://raw.githubusercontent.com/sreyun/aiops-monitor/master/scripts/secure-compose.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/sreyun/openaiops/master/scripts/secure-compose.sh)
 docker compose up -d
 
 # 或在已克隆仓库内：
@@ -53,7 +53,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 
 ## 三、方式二：二进制部署
 
-1. 从 [Release](https://github.com/sreyun/aiops-monitor/releases) 下载对应平台的服务端 `aiops-server` 与采集端 `aiops-agent` 二进制。
+1. 从 [Release](https://github.com/sreyun/openaiops/releases) 下载对应平台的服务端 `aiops-server` 与采集端 `aiops-agent` 二进制。
 2. 设置环境变量后启动服务端：
    ```bash
    export AIOPS_POSTGRES_DSN="postgres://aiops:密码@127.0.0.1:5432/aiops?sslmode=disable"

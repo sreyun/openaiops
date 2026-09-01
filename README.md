@@ -3,9 +3,9 @@
 # AIOps
 
 **一个开源、可私有化的主机监控与 SRE 运维平台**  
-观测 · 告警 · 自愈 · 远程运维 · AI 诊断 —— 收敛进一个你完全掌控的二进制。
+观测 · 告警 · 自愈 · 远程运维 · Agent OTA · AI 诊断 —— 收敛进一个你完全掌控的二进制。
 
-[![Version](https://img.shields.io/badge/Version-v0.20.47-blue)](https://github.com/sreyun/openaiops/releases/tag/v0.20.47)
+[![Version](https://img.shields.io/badge/Version-v0.20.49-blue)](https://github.com/sreyun/openaiops/releases/tag/v0.20.49)
 [![Go](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%203.0-blue.svg)](LICENSE)
 [![Platforms](https://img.shields.io/badge/Platforms-Linux%20%7C%20Windows%20%7C%20macOS%20%7C%20Android%20%7C%20HarmonyOS-lightgrey)]()
@@ -31,6 +31,7 @@ AIOps 把高频路径收敛为 **一个可自托管的平台**：
 | **上线** | `docker compose up -d`，约 3 分钟 | 多组件联调，常以天计 |
 | **数据** | PostgreSQL + VictoriaMetrics，**永久自持** | SaaS 或分散多库 |
 | **远程** | Web 终端 / 桌面 / 端口转发，Agent **反向连接**免开入站 | 另购堡垒机或 VPN |
+| **机群** | **Agent OTA 自动升级**（SHA-256 校验、维护窗、批量推送、失败回滚） | 逐台 SSH 替换二进制 |
 | **闭环** | 告警 → 剧本/自愈 → 事件/SLO/工单 → AI 研判 | 工具之间靠人肉粘合 |
 | **许可** | **AGPL-3.0**，无主机数阉割 | 按节点 / 模块收费 |
 
@@ -53,14 +54,15 @@ AIOps 把高频路径收敛为 **一个可自托管的平台**：
 
 ## ✨ 核心能力
 
-围绕六条主线，而不是功能清单堆砌：
+围绕七条主线，而不是功能清单堆砌：
 
 ```
   观测 ──────────► 治理 ──────────► 自愈 ──────────► 诊断
   主机/GPU/日志      静默·抑制·路由     剧本·审批护栏     AI·RAG·MCP
   拨测/API/带外      多渠道通知         事件·SLO·工单     证据门控
 
-  远程运维 · 终端/桌面/转发（反向隧道）     安全 · RBAC/MFA/FIM/审计
+  远程运维 · 终端/桌面/转发（反向隧道）     机群 · Agent OTA 自动升级
+  安全 · RBAC/MFA/FIM/审计
 ```
 
 ### 1. 观测 —— 看得见
@@ -97,7 +99,17 @@ AIOps 把高频路径收敛为 **一个可自托管的平台**：
 - 主机/Web 安全扫描、FIM、内容审计（合规可控）。
 - Web 控制台与 **Android / HarmonyOS** 客户端独立分发。
 
-当前版本 **[v0.20.47](https://github.com/sreyun/openaiops/releases/tag/v0.20.47)** · 镜像 [GitHub](https://github.com/sreyun/openaiops) / [Gitee](https://gitee.com/bigdatasafe/openaiops)
+### 7. Agent OTA —— 机群升得动
+
+服务端升级后，**无需逐台登录**即可把采集端推到同一版本：
+
+- **自动 OTA**（默认开启）：在线且版本落后的 Agent 会在上报时自动入队；也可在控制台 **批量 / 选择性推送**，或调用 `POST /api/v1/agents/update`。
+- **安全换版**：从服务端 `/dl/` 拉取匹配 **OS/架构** 的二进制（含 Windows Server 2012 专用构建），**SHA-256 校验**；换版前备份 `.bak`，失败自动回滚。
+- **可控灰度**：维护窗口（`HH:MM-HH:MM`）、按主机 / 分类豁免、连续同因失败熔断；`GET /api/v1/agents/auto-update-status` 可查看每台「为什么没升级」。
+- **全链路可观测**：任务状态 `running → pending_verify → success/failed`；Windows / Linux / macOS 均有独立升级助手与日志，控制台可拉取现场证据。
+- **部署注意**：OTA 走 Agent **反向长连接**（与远程终端相同）；Nginx 反代须关闭双向缓冲并放行 WebSocket，否则会出现「指标正常、升级永远失败」——见 [deploy/nginx-aiops.conf](deploy/nginx-aiops.conf) 与 [docs/getting-started/deploy.md](docs/getting-started/deploy.md)。
+
+当前版本 **[v0.20.49](https://github.com/sreyun/openaiops/releases/tag/v0.20.49)** · 镜像 [GitHub](https://github.com/sreyun/openaiops) / [Gitee](https://gitee.com/bigdatasafe/openaiops)
 
 ---
 
@@ -106,16 +118,17 @@ AIOps 把高频路径收敛为 **一个可自托管的平台**：
 > 服务端**强依赖** PostgreSQL 与 VictoriaMetrics，缺一不可。
 
 ```bash
-# 推荐：Docker Compose 一键拉起 server + VictoriaMetrics + Postgres(pgvector)
+# 1) 生成强随机密钥到 .env（PostgreSQL 密码、AIOPS_SECRET_KEY 等）
 bash scripts/secure-compose.sh
 #    Windows：powershell -ExecutionPolicy Bypass -File scripts/secure-compose.ps1
 
-# 1) 一键拉起 server + VictoriaMetrics + Postgres(pgvector)
+# 2) 一键拉起 server + VictoriaMetrics + Postgres(pgvector)
 docker compose up -d
 
-# 浏览器打开 http://localhost:8529
-# 默认账号：admin / admin（首次登录强制修改密码）
-# 完成首次安全初始化 →「安装命令」页生成 Agent 指令 → 粘贴到目标主机
+# 3) 浏览器打开 http://localhost:8529
+#    默认账号：admin / admin（首次登录强制修改密码）
+#    完成首次安全初始化 →「安装命令」页生成 Agent 指令 → 粘贴到目标主机
+#    服务端升级后，Agent 默认会自动 OTA 到同版本（可在控制台调整策略）
 ```
 
 二进制 / 源码构建：
@@ -155,12 +168,13 @@ flowchart LR
   API --> Core
   Core --> PG
   Core --> VM
-  Ag -->|反向上报 / 终端隧道| API
+  Ag -->|反向上报 / 终端隧道 / OTA| API
   Ag --> Ext
 ```
 
-- **Agent 主动出站**：机房无需为每台机器开 SSH/RDP 入站。
+- **Agent 主动出站**：机房无需为每台机器开 SSH/RDP 入站；指标上报、远程终端与 **OTA 升级** 共用反向长连接。
 - **关系与时序分离**：审计 / 工单 / RAG 在 PG；指标趋势在 VictoriaMetrics。
+- **机群换版**：服务端内置各平台 Agent 二进制（`/dl/`）；版本落后时自动或手动推送，Agent 本地校验 SHA-256 后热替换并重启服务。
 
 ---
 
@@ -172,6 +186,7 @@ flowchart LR
 |------|------|
 | 安装 Agent / 服务端 | [docs/getting-started/install.md](docs/getting-started/install.md) · [EN](docs/getting-started/install.en.md) |
 | 生产部署 / 备份 / 容灾 | [docs/getting-started/deploy.md](docs/getting-started/deploy.md) · [EN](docs/getting-started/deploy.en.md) |
+| Agent OTA 升级 / 浸泡验收 | [docs/engineering/agent-update-soak.md](docs/engineering/agent-update-soak.md) |
 | 按功能学怎么用 | [docs/guides/user-guide.md](docs/guides/user-guide.md) |
 | 端口转发 | [docs/guides/forward.md](docs/guides/forward.md) |
 | 内容审计与剧本 | [docs/guides/content-audit.md](docs/guides/content-audit.md) |

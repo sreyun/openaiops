@@ -1,19 +1,19 @@
-<div align="center">
+﻿<div align="center">
 
 # AIOps
 
 **Plataforma open-source self-hosted de monitoramento de hosts e SRE**  
-Observar · Alertar · Remediar · Ops remotas · Diagnóstico de IA — um binário sob o seu controle.
+Observar · Alertar · Remediar · Ops remotas · Agent OTA · Diagnóstico de IA — um binário sob o seu controle.
 
-[![Version](https://img.shields.io/badge/Version-v0.19.65-blue)](https://github.com/sreyun/aiops-monitor/releases/tag/v0.19.65)
+[![Version](https://img.shields.io/badge/Version-v0.20.49-blue)](https://github.com/sreyun/openaiops/releases/tag/v0.20.49)
 [![Go](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white)](https://go.dev)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](../../LICENSE)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%203.0-blue.svg)](../../LICENSE)
 [![Platforms](https://img.shields.io/badge/Platforms-Linux%20%7C%20Windows%20%7C%20macOS%20%7C%20Android%20%7C%20HarmonyOS-lightgrey)]()
-[![Stars](https://img.shields.io/github/stars/sreyun/aiops-monitor?style=social)](https://github.com/sreyun/aiops-monitor)
+[![Stars](https://img.shields.io/github/stars/sreyun/openaiops?style=social)](https://github.com/sreyun/openaiops)
 
 **[简体中文](../../README.md) · [繁體中文](zh-TW.md) · [English](en.md) · [日本語](ja.md) · [한국어](ko.md) · [Français](fr.md) · [Deutsch](de.md) · [Español](es.md) · [Português](pt-BR.md) · [Русский](ru.md)**
 
-[Início rápido](#-início-rápido) · [Capacidades principais](#-capacidades-principais) · [Documentação](../README.md) · [Changelog](../../CHANGELOG.md) · [Releases](https://github.com/sreyun/aiops-monitor/releases)
+[Início rápido](#-início-rápido) · [Capacidades principais](#-capacidades-principais) · [Documentação](../README.md) · [Changelog](../../CHANGELOG.md) · [Releases](https://github.com/sreyun/openaiops/releases)
 
 </div>
 
@@ -31,8 +31,9 @@ AIOps concentra o caminho comum em **uma plataforma self-hosted**:
 | **Time-to-value** | `docker compose up -d` (~3 min) | Dias de integração |
 | **Dados** | PostgreSQL + VictoriaMetrics, **seus** | SaaS ou BDs espalhados |
 | **Remoto** | Terminal / desktop / port-forward web; agente **somente saída** | VPN / bastion extra |
+| **Frota** | **OTA automático do Agent** (SHA-256, janela de manutenção, push em lote, rollback) | Troca SSH por host |
 | **Loop** | Alerta → playbook → incidente/SLO/ticket → RCA IA | Pessoas colam as falhas |
-| **Licença** | **MIT**, sem limite de hosts | Por nó / módulo |
+| **Licença** | **AGPL-3.0**, sem limite de hosts | Por nó / módulo |
 
 > Para DC privado, nuvem híbrida e times que precisam de visibilidade, controle, segurança de mudança e ops explicáveis.
 
@@ -40,14 +41,15 @@ AIOps concentra o caminho comum em **uma plataforma self-hosted**:
 
 ## ✨ Capacidades principais
 
-Seis pilares — não uma lista infinita:
+Sete pilares — não uma lista infinita :
 
 ```
   Observe ──────► Govern ──────► Remediate ──────► Diagnose
   Hosts/GPU/logs   Silence/route   Playbooks/gates   AI · RAG · MCP
   Probes/OOB       Multi-channel   Incident/SLO      Evidence gate
 
-  Remote · terminal/desktop/forward (reverse tunnel)   Security · RBAC/MFA/FIM
+  Remote · terminal/desktop/forward (reverse tunnel)   Fleet · Agent OTA
+  Security · RBAC/MFA/FIM
 ```
 
 1. **Observar** — Agente multiplataforma (Linux / Windows / macOS / Kylin), GPU, logs, probes HTTP/TCP, SLIs de API, Redfish / SNMP / NetFlow / containers / K8s / Hyper-V.
@@ -56,8 +58,9 @@ Seis pilares — não uma lista infinita:
 4. **Diagnóstico IA** — Inspeção + RCA (modelos compatíveis OpenAI; heurística se não houver); RAG pgvector, Skills, MCP (Cursor / Claude); autoteste de voz.
 5. **Ops remotas** — Terminal web (replay, observação, auditoria, senha secundária), desktop remoto (JPEG/H.264), port-forward / proxy HTTP com proteção SSRF.
 6. **Entrega segura** — RBAC, MFA, fingerprint do agente, AES-256-GCM; console Web; Android / HarmonyOS separados.
+7. **Agent OTA** — Após upgrade do servidor, agents online atrasados entram na fila (ON por padrão); push em lote no console ou `POST /api/v1/agents/update`; download `/dl/` com SHA-256, rollback `.bak`.
 
-Versão atual **[v0.19.65](https://github.com/sreyun/aiops-monitor/releases/tag/v0.19.65)** · Espelhos: [GitHub](https://github.com/sreyun/aiops-monitor) / [Gitee](https://gitee.com/bigdatasafe/aiops-monitor)
+Versão atual **[v0.20.49](https://github.com/sreyun/openaiops/releases/tag/v0.20.49)** · Espelhos: [GitHub](https://github.com/sreyun/openaiops) / [Gitee](https://gitee.com/bigdatasafe/openaiops)
 
 ---
 
@@ -106,7 +109,7 @@ flowchart LR
   API --> Core
   Core --> PG
   Core --> VM
-  Ag -->|outbound report / terminal| API
+  Ag -->|outbound report / terminal / OTA| API
   Ag --> Ext
 ```
 
@@ -119,6 +122,7 @@ Docs longas e READMEs localizados ficam em [`docs/`](../README.md). Na raiz fica
 | Need | Doc |
 |------|-----|
 | Install | [../getting-started/install.md](../getting-started/install.md) · [EN](../getting-started/install.en.md) |
+| Agent OTA | [../engineering/agent-update-soak.md](../engineering/agent-update-soak.md) |
 | Production deploy | [../getting-started/deploy.md](../getting-started/deploy.md) · [EN](../getting-started/deploy.en.md) |
 | End-user guide | [../guides/user-guide.md](../guides/user-guide.md) |
 | Port forward | [../guides/forward.md](../guides/forward.md) |
@@ -137,7 +141,7 @@ Se o AIOps substituir uma stack colada, **dê uma Star** — mantém o projeto v
 
 ## Licença
 
-[MIT](../../LICENSE). Sem limite de hosts. Clientes móveis em pacotes separados (fonte fora deste repositório).
+[AGPL-3.0](../../LICENSE). Sem limite de hosts. Clientes móveis em pacotes separados (fonte fora deste repositório).
 
 ---
 

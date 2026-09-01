@@ -1,19 +1,19 @@
-<div align="center">
+﻿<div align="center">
 
 # AIOps
 
 **Открытая self-hosted платформа мониторинга хостов и SRE**  
-Наблюдение · Алерты · Автовосстановление · Удалённые ops · ИИ-диагностика — один бинарник под вашим контролем.
+Наблюдение · Алерты · Автовосстановление · Удалённые ops · Agent OTA · ИИ-диагностика — один бинарник под вашим контролем.
 
-[![Version](https://img.shields.io/badge/Version-v0.19.65-blue)](https://github.com/sreyun/aiops-monitor/releases/tag/v0.19.65)
+[![Version](https://img.shields.io/badge/Version-v0.20.49-blue)](https://github.com/sreyun/openaiops/releases/tag/v0.20.49)
 [![Go](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white)](https://go.dev)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](../../LICENSE)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%203.0-blue.svg)](../../LICENSE)
 [![Platforms](https://img.shields.io/badge/Platforms-Linux%20%7C%20Windows%20%7C%20macOS%20%7C%20Android%20%7C%20HarmonyOS-lightgrey)]()
-[![Stars](https://img.shields.io/github/stars/sreyun/aiops-monitor?style=social)](https://github.com/sreyun/aiops-monitor)
+[![Stars](https://img.shields.io/github/stars/sreyun/openaiops?style=social)](https://github.com/sreyun/openaiops)
 
 **[简体中文](../../README.md) · [繁體中文](zh-TW.md) · [English](en.md) · [日本語](ja.md) · [한국어](ko.md) · [Français](fr.md) · [Deutsch](de.md) · [Español](es.md) · [Português](pt-BR.md) · [Русский](ru.md)**
 
-[Быстрый старт](#-быстрый-старт) · [Ключевые возможности](#-ключевые-возможности) · [Документация](../README.md) · [Changelog](../../CHANGELOG.md) · [Releases](https://github.com/sreyun/aiops-monitor/releases)
+[Быстрый старт](#-быстрый-старт) · [Ключевые возможности](#-ключевые-возможности) · [Документация](../README.md) · [Changelog](../../CHANGELOG.md) · [Releases](https://github.com/sreyun/openaiops/releases)
 
 </div>
 
@@ -31,8 +31,9 @@ AIOps сводит обычный путь в **одну self-hosted платф�
 | **Время до результата** | `docker compose up -d` (~3 мин) | Дни интеграции |
 | **Данные** | PostgreSQL + VictoriaMetrics, **ваши** | SaaS или разрозненные БД |
 | **Удалённо** | Web-терминал / рабочий стол / port-forward; агент **только исходящий** | Отдельный VPN / bastion |
+| **Флот** | **Авто OTA Agent** (SHA-256, окно обслуживания, пакетный push, rollback) | SSH-замена на каждом хосте |
 | **Контур** | Алерт → playbook → инцидент/SLO/тикет → ИИ RCA | Люди закрывают разрывы |
-| **Лицензия** | **MIT**, без лимита хостов | За узел / модуль |
+| **Лицензия** | **AGPL-3.0**, без лимита хостов | За узел / модуль |
 
 > Для частных ЦОД, гибридного облака и команд, которым нужны видимость, контроль, безопасность изменений и объяснимые ops.
 
@@ -40,14 +41,15 @@ AIOps сводит обычный путь в **одну self-hosted платф�
 
 ## ✨ Ключевые возможности
 
-Шесть столбов — не бесконечный список функций:
+Семь столбов — не бесконечный список функций :
 
 ```
   Observe ──────► Govern ──────► Remediate ──────► Diagnose
   Hosts/GPU/logs   Silence/route   Playbooks/gates   AI · RAG · MCP
   Probes/OOB       Multi-channel   Incident/SLO      Evidence gate
 
-  Remote · terminal/desktop/forward (reverse tunnel)   Security · RBAC/MFA/FIM
+  Remote · terminal/desktop/forward (reverse tunnel)   Fleet · Agent OTA
+  Security · RBAC/MFA/FIM
 ```
 
 1. **Наблюдение** — кроссплатформенный агент (Linux / Windows / macOS / Kylin), GPU, логи, HTTP/TCP-пробы, API SLI, Redfish / SNMP / NetFlow / контейнеры / K8s / Hyper-V.
@@ -56,8 +58,9 @@ AIOps сводит обычный путь в **одну self-hosted платф�
 4. **ИИ-диагностика** — инспекция + RCA (модели совместимые с OpenAI; иначе эвристика); RAG на pgvector, Skills, MCP (Cursor / Claude); самотест речи.
 5. **Удалённые ops** — web-терминал (replay, наблюдение, аудит, второй пароль), удалённый рабочий стол (JPEG/H.264), port-forward / HTTP-прокси с защитой SSRF.
 6. **Безопасная поставка** — RBAC, MFA, fingerprint агента, AES-256-GCM; веб-консоль; Android / HarmonyOS отдельно.
+7. **Agent OTA** — после обновления сервера отстающие online-агенты автоматически ставятся в очередь (по умолчанию ВКЛ); пакетный push из консоли или `POST /api/v1/agents/update`; загрузка `/dl/` с SHA-256, rollback `.bak`.
 
-Текущий релиз **[v0.19.65](https://github.com/sreyun/aiops-monitor/releases/tag/v0.19.65)** · Зеркала: [GitHub](https://github.com/sreyun/aiops-monitor) / [Gitee](https://gitee.com/bigdatasafe/aiops-monitor)
+Текущий релиз **[v0.20.49](https://github.com/sreyun/openaiops/releases/tag/v0.20.49)** · Зеркала: [GitHub](https://github.com/sreyun/openaiops) / [Gitee](https://gitee.com/bigdatasafe/openaiops)
 
 ---
 
@@ -106,7 +109,7 @@ flowchart LR
   API --> Core
   Core --> PG
   Core --> VM
-  Ag -->|outbound report / terminal| API
+  Ag -->|outbound report / terminal / OTA| API
   Ag --> Ext
 ```
 
@@ -119,6 +122,7 @@ flowchart LR
 | Need | Doc |
 |------|-----|
 | Install | [../getting-started/install.md](../getting-started/install.md) · [EN](../getting-started/install.en.md) |
+| Agent OTA | [../engineering/agent-update-soak.md](../engineering/agent-update-soak.md) |
 | Production deploy | [../getting-started/deploy.md](../getting-started/deploy.md) · [EN](../getting-started/deploy.en.md) |
 | End-user guide | [../guides/user-guide.md](../guides/user-guide.md) |
 | Port forward | [../guides/forward.md](../guides/forward.md) |
@@ -137,7 +141,7 @@ Issues, PR и переводы приветствуются. Рекоменду�
 
 ## Лицензия
 
-[MIT](../../LICENSE). Без лимита хостов. Мобильные клиенты — отдельные пакеты (исходников нет в этом репозитории).
+[AGPL-3.0](../../LICENSE). Без лимита хостов. Мобильные клиенты — отдельные пакеты (исходников нет в этом репозитории).
 
 ---
 

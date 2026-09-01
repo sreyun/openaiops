@@ -1,19 +1,19 @@
-<div align="center">
+﻿<div align="center">
 
 # AIOps
 
 **オープンソースのセルフホスト型ホスト監視 & SRE プラットフォーム**  
-観測 · アラート · 自動修復 · リモート運用 · AI 診断 — 完全に自分で制御できる 1 バイナリへ。
+観測 · アラート · 自動修復 · リモート運用 · Agent OTA · AI 診断 — 完全に自分で制御できる 1 バイナリへ。
 
-[![Version](https://img.shields.io/badge/Version-v0.19.65-blue)](https://github.com/sreyun/aiops-monitor/releases/tag/v0.19.65)
+[![Version](https://img.shields.io/badge/Version-v0.20.49-blue)](https://github.com/sreyun/openaiops/releases/tag/v0.20.49)
 [![Go](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white)](https://go.dev)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](../../LICENSE)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%203.0-blue.svg)](../../LICENSE)
 [![Platforms](https://img.shields.io/badge/Platforms-Linux%20%7C%20Windows%20%7C%20macOS%20%7C%20Android%20%7C%20HarmonyOS-lightgrey)]()
-[![Stars](https://img.shields.io/github/stars/sreyun/aiops-monitor?style=social)](https://github.com/sreyun/aiops-monitor)
+[![Stars](https://img.shields.io/github/stars/sreyun/openaiops?style=social)](https://github.com/sreyun/openaiops)
 
 **[简体中文](../../README.md) · [繁體中文](zh-TW.md) · [English](en.md) · [日本語](ja.md) · [한국어](ko.md) · [Français](fr.md) · [Deutsch](de.md) · [Español](es.md) · [Português](pt-BR.md) · [Русский](ru.md)**
 
-[クイックスタート](#-クイックスタート) · [コア機能](#-コア機能) · [ドキュメント](../README.md) · [変更履歴](../../CHANGELOG.md) · [Releases](https://github.com/sreyun/aiops-monitor/releases)
+[クイックスタート](#-クイックスタート) · [コア機能](#-コア機能) · [ドキュメント](../README.md) · [変更履歴](../../CHANGELOG.md) · [Releases](https://github.com/sreyun/openaiops/releases)
 
 </div>
 
@@ -31,8 +31,9 @@ AIOps はよく使う経路を **1 つのセルフホスト基盤** にまとめ
 | **導入** | `docker compose up -d`（約 3 分） | 連携に数日 |
 | **データ** | PostgreSQL + VictoriaMetrics（**自社保持**） | SaaS や分散 DB |
 | **リモート** | Web 端末／デスクトップ／ポート転送、Agent **外向きのみ** | 別途 VPN／Bastion |
+| **フリート** | **Agent OTA 自動更新**（SHA-256 検証、メンテナンスウィンドウ、一括 push、ロールバック） | ホストごとに SSH で差し替え |
 | **ループ** | アラート → Playbook → インシデント／SLO／チケット → AI RCA | 人手でつなぐ |
-| **ライセンス** | **MIT**、ホスト数制限なし | ノード／モジュール課金 |
+| **ライセンス** | **AGPL-3.0**、ホスト数制限なし | ノード／モジュール課金 |
 
 > プライベート DC・ハイブリッドクラウド、可視化・制御・変更安全・説明可能な運用を求めるチーム向け。
 
@@ -40,14 +41,15 @@ AIOps はよく使う経路を **1 つのセルフホスト基盤** にまとめ
 
 ## ✨ コア機能
 
-機能の羅列ではなく、6 本の柱：
+機能の羅列ではなく、7 本の柱：
 
 ```
   Observe ──────► Govern ──────► Remediate ──────► Diagnose
   Hosts/GPU/logs   Silence/route   Playbooks/gates   AI · RAG · MCP
   Probes/OOB       Multi-channel   Incident/SLO      Evidence gate
 
-  Remote · terminal/desktop/forward (reverse tunnel)   Security · RBAC/MFA/FIM
+  Remote · terminal/desktop/forward (reverse tunnel)   Fleet · Agent OTA
+  Security · RBAC/MFA/FIM
 ```
 
 1. **観測** — クロスプラットフォーム Agent（Linux／Windows／macOS／Kylin）、GPU、ログ、HTTP／TCP プローブ、API SLI、Redfish／SNMP／NetFlow／コンテナ／K8s／Hyper-V。
@@ -56,8 +58,9 @@ AIOps はよく使う経路を **1 つのセルフホスト基盤** にまとめ
 4. **AI 診断** — 点検＋RCA（OpenAI 互換、未設定時はヒューリスティック）；pgvector RAG、Skills、MCP（Cursor／Claude）；音声セルフテスト。
 5. **リモート運用** — Web 端末（再生／観戦／監査／二次パスワード）、リモートデスクトップ（JPEG／H.264）、ポート転送／HTTP プロキシと SSRF 防御。
 6. **セキュアな提供** — RBAC、MFA、Agent 指紋、AES-256-GCM；Android／HarmonyOS は別配布。
+7. **Agent OTA** — サーバー更新後、遅れているオンライン Agent を自動キュー（デフォルト ON）；コンソール一括 push または `POST /api/v1/agents/update`；`/dl/` から SHA-256 検証付きダウンロード、`.bak` ロールバック。
 
-現行リリース **[v0.19.65](https://github.com/sreyun/aiops-monitor/releases/tag/v0.19.65)** · [GitHub](https://github.com/sreyun/aiops-monitor)／[Gitee](https://gitee.com/bigdatasafe/aiops-monitor)
+現行リリース **[v0.20.49](https://github.com/sreyun/openaiops/releases/tag/v0.20.49)** · [GitHub](https://github.com/sreyun/openaiops)／[Gitee](https://gitee.com/bigdatasafe/openaiops)
 
 ---
 
@@ -106,7 +109,7 @@ flowchart LR
   API --> Core
   Core --> PG
   Core --> VM
-  Ag -->|outbound report / terminal| API
+  Ag -->|outbound report / terminal / OTA| API
   Ag --> Ext
 ```
 
@@ -119,6 +122,7 @@ flowchart LR
 | Need | Doc |
 |------|-----|
 | Install | [../getting-started/install.md](../getting-started/install.md) · [EN](../getting-started/install.en.md) |
+| Agent OTA | [../engineering/agent-update-soak.md](../engineering/agent-update-soak.md) |
 | Production deploy | [../getting-started/deploy.md](../getting-started/deploy.md) · [EN](../getting-started/deploy.en.md) |
 | End-user guide | [../guides/user-guide.md](../guides/user-guide.md) |
 | Port forward | [../guides/forward.md](../guides/forward.md) |
@@ -137,7 +141,7 @@ AIOps が寄せ集めスタックを置き換えたら、**ぜひ Star** をお�
 
 ## ライセンス
 
-[MIT](../../LICENSE)。ホスト数制限なし。モバイルは別パッケージ（本リポジトリにソースなし）。
+[AGPL-3.0](../../LICENSE)。ホスト数制限なし。モバイルは別パッケージ（本リポジトリにソースなし）。
 
 ---
 
