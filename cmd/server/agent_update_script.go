@@ -113,8 +113,12 @@ agent_proc_alive() {
   done
   return 1
 }
+# known units must match cmd/agent knownAgentUnits (incl. aiops-relay).
+# Gateway installs only ship aiops-relay.service; omitting it made unit_file_exists
+# false → --install-service wrote a competing aiops-agent unit and never restarted
+# the relay, so the swap looked healthy while the LAN gateway kept the old binary.
 agent_alive() {
-  for u in aiops-agent aiops-monitor-agent; do
+  for u in aiops-agent aiops-monitor-agent aiops-relay; do
     systemctl is-active --quiet "$u" 2>/dev/null && return 0
   done
   agent_proc_alive
@@ -133,7 +137,7 @@ wait_alive() {
 }
 unit_file_exists() {
   for base in /etc/systemd/system /run/systemd/system /lib/systemd/system /usr/lib/systemd/system; do
-    for u in aiops-agent aiops-monitor-agent; do
+    for u in aiops-agent aiops-monitor-agent aiops-relay; do
       [ -f "$base/${u}.service" ] && return 0
     done
   done
@@ -141,9 +145,13 @@ unit_file_exists() {
 }
 start_units() {
   systemctl daemon-reload 2>/dev/null || true
-  systemctl restart aiops-agent 2>/dev/null && return 0
-  systemctl restart aiops-monitor-agent 2>/dev/null && return 0
-  return 1
+  # Restart every known unit that accepts the job — shared binary on a
+  # dual agent+relay host must reload both, not only the first success.
+  ok=0
+  for u in aiops-agent aiops-monitor-agent aiops-relay; do
+    systemctl restart "$u" 2>/dev/null && ok=1
+  done
+  [ "$ok" -eq 1 ]
 }
 relaunch() {
   pkill -x aiops-agent 2>/dev/null || pkill -f '[/]aiops-agent( |$)' 2>/dev/null || true
@@ -160,7 +168,7 @@ ulog "legacy update helper start: dir=$DIR cfg=$CFG"
 RESTARTED=0
 if command -v systemctl >/dev/null 2>&1 && [ "$(id -u)" -eq 0 ]; then
   # 只解锁单元文件，不 stop（stop 会连本助手一起杀）。
-  host_run sh -c 'for u in aiops-agent aiops-monitor-agent; do
+  host_run sh -c 'for u in aiops-agent aiops-monitor-agent aiops-relay; do
     rm -rf /etc/systemd/system/${u}.service.d /run/systemd/system/${u}.service.d 2>/dev/null || true
     f=/etc/systemd/system/${u}.service; [ -f "$f" ] || continue
     sed -i -e "s/^User=.*/User=root/" -e "s/^ProtectHome=.*/ProtectHome=false/" \
@@ -172,6 +180,7 @@ if command -v systemctl >/dev/null 2>&1 && [ "$(id -u)" -eq 0 ]; then
     grep -q "^KillMode=process" "$f" || echo "KillMode=process" >> "$f"
   done; systemctl daemon-reload' 2>/dev/null || true
   # 没有任何单元时才做完整安装（--install-service 会 stop+删除单元，是破坏性的）。
+  # aiops-relay alone counts as "has a unit" — never invent aiops-agent beside it.
   if ! unit_file_exists && [ -n "$CFG" ]; then
     host_run "$EXE" --install-service --config "$CFG" >/dev/null 2>&1 && RESTARTED=1
   fi

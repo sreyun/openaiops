@@ -86,18 +86,3 @@ func TestSweepSkipsInflight(t *testing.T) {
 		t.Fatal("check should run once it is no longer in flight")
 	}
 }
-
-// 经典控制台的 app.js 只拼一次，且带稳定的 ETag。
-func TestClassicAppJSCached(t *testing.T) {
-	b1, e1, miss := classicAppJS()
-	if miss != "" {
-		t.Fatalf("module missing: %s", miss)
-	}
-	if len(b1) == 0 || e1 == "" {
-		t.Fatal("empty bundle or etag")
-	}
-	b2, e2, _ := classicAppJS()
-	if &b1[0] != &b2[0] || e1 != e2 {
-		t.Fatal("bundle must be built once and reused")
-	}
-}

@@ -299,6 +299,35 @@ func TestLegacyUnixAgentUpdateScriptPrefersInstallService(t *testing.T) {
 	}
 }
 
+// Gateway hosts only ship aiops-relay.service. The module updater already restarts
+// that unit; the legacy fallback must do the same — otherwise unit_file_exists is
+// false, --install-service invents a competing aiops-agent, and the relay keeps
+// the old binary while the job reports success.
+func TestLegacyUnixAgentUpdateScriptKnowsRelayUnit(t *testing.T) {
+	sh := legacyUnixAgentUpdateScript("https://mon.example", "aiops-agent-linux-amd64", testPinSHA, false)
+	helper := legacyRestartHelperSh
+	for _, frag := range []string{
+		"aiops-relay",
+		`for u in aiops-agent aiops-monitor-agent aiops-relay; do`,
+		`systemctl restart "$u"`,
+	} {
+		if !strings.Contains(helper, frag) {
+			t.Fatalf("legacy restart helper missing %q (must treat aiops-relay like knownAgentUnits)", frag)
+		}
+	}
+	if !strings.Contains(sh, helper) {
+		t.Fatal("legacy unix script must embed the relay-aware restart helper")
+	}
+	// --install-service stays as the no-unit escape hatch, but only after
+	// unit_file_exists has considered aiops-relay.
+	gate := `if ! unit_file_exists && [ -n "$CFG" ]; then`
+	gateIdx := strings.Index(helper, gate)
+	installIdx := strings.Index(helper, `host_run "$EXE" --install-service`)
+	if gateIdx < 0 || installIdx < 0 || !(gateIdx < installIdx) {
+		t.Fatal("unit_file_exists (incl. relay) must gate --install-service")
+	}
+}
+
 func TestLegacyUnixAgentUpdateScriptPinsKillModeBeforeRestart(t *testing.T) {
 	sh := legacyUnixAgentUpdateScript("https://mon.example", "aiops-agent-linux-amd64", testPinSHA, false)
 	sedKill := strings.Index(sh, `s/^KillMode=.*/KillMode=process/`)
