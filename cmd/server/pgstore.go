@@ -1219,14 +1219,48 @@ func (p *pgStore) appendAlertRecord(r AlertRecord) {
 	}
 }
 
-func (p *pgStore) resolveAlertRecord(id int64, resolvedAt int64) {
-	if _, err := p.db.Exec(`UPDATE alert_history SET resolved_at=$1 WHERE id=$2`, resolvedAt, id); err != nil {
+// resolveAlertRecord marks the latest unresolved PG row for key as resolved.
+//
+// Must update both the resolved_at column AND the JSONB payload: loadRecentAlerts
+// rebuilds in-memory history from data, so a column-only write left Status=firing
+// / ResolvedAt=0 after every restart (ghost active alerts in /alerts/history).
+// Match by key (not memory alertSeq): PG BIGSERIAL is independent of the
+// in-memory ID embedded in JSONB, and they diverge after a failed insert.
+func (p *pgStore) resolveAlertRecord(key string, resolvedAt int64) {
+	if key == "" || resolvedAt <= 0 {
+		return
+	}
+	res, err := p.db.Exec(`
+UPDATE alert_history
+SET resolved_at = $1,
+    data = jsonb_set(
+      jsonb_set(COALESCE(data, '{}'::jsonb), '{resolved_at}', to_jsonb($1::bigint), true),
+      '{status}', '"resolved"', true
+    )
+WHERE id = (
+  SELECT id FROM alert_history
+  WHERE key = $2 AND COALESCE(resolved_at, 0) = 0
+  ORDER BY id DESC
+  LIMIT 1
+)`, resolvedAt, key)
+	if err != nil {
 		slog.Warn("PG 更新告警恢复时间失败", "err", err)
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		slog.Warn("PG 告警恢复未匹配到未恢复记录", "key", key)
 	}
 }
 
 func (p *pgStore) loadRecentAlerts(limit int) ([]AlertRecord, error) {
-	rows, err := p.db.Query(`SELECT data FROM (SELECT id,data FROM alert_history ORDER BY id DESC LIMIT $1) t ORDER BY id ASC`, limit)
+	// Read relational resolved_at alongside JSONB so column-only historical
+	// rows (written before JSONB sync) still import as resolved.
+	rows, err := p.db.Query(`
+SELECT data, COALESCE(resolved_at, 0)
+FROM (
+  SELECT id, data, resolved_at FROM alert_history ORDER BY id DESC LIMIT $1
+) t
+ORDER BY id ASC`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1234,13 +1268,21 @@ func (p *pgStore) loadRecentAlerts(limit int) ([]AlertRecord, error) {
 	var out []AlertRecord
 	for rows.Next() {
 		var raw []byte
-		if rows.Scan(&raw) != nil {
+		var resolvedAt int64
+		if rows.Scan(&raw, &resolvedAt) != nil {
 			continue
 		}
 		var r AlertRecord
-		if json.Unmarshal(raw, &r) == nil {
-			out = append(out, r)
+		if json.Unmarshal(raw, &r) != nil {
+			continue
 		}
+		if resolvedAt > 0 {
+			r.ResolvedAt = resolvedAt
+			if r.Status == "" || r.Status == "firing" {
+				r.Status = "resolved"
+			}
+		}
+		out = append(out, r)
 	}
 	return out, rows.Err()
 }
@@ -4075,15 +4117,19 @@ func retainedPartitionParents() []string {
 	return []string{"events_p"}
 }
 
-// cleanupAlertHistory removes old alert_history rows when the table uses ts column.
+// cleanupAlertHistory removes alert_history rows older than retainDays.
+//
+// Bootstrap creates fired_at (unix seconds), not ts/created_at. The previous
+// DELETEs targeted nonexistent columns, failed silently, and left the table
+// unbounded despite Retention.AlertHistoryDays.
 func (p *pgStore) cleanupAlertHistory(retainDays int) {
 	if retainDays <= 0 {
 		retainDays = 90
 	}
 	cut := time.Now().AddDate(0, 0, -retainDays).Unix()
-	// alert_history schema varies; try common shapes
-	_, _ = p.db.Exec(`DELETE FROM alert_history WHERE ts > 0 AND ts < $1`, cut)
-	_, _ = p.db.Exec(`DELETE FROM alert_history WHERE created_at < to_timestamp($1)`, cut)
+	if _, err := p.db.Exec(`DELETE FROM alert_history WHERE fired_at > 0 AND fired_at < $1`, cut); err != nil {
+		slog.Warn("PG 清理告警历史失败", "err", err, "cut", cut, "retain_days", retainDays)
+	}
 }
 
 // cleanupOldFlowPartitions drops monthly partitions older than retainMonths.
