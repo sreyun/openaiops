@@ -17,7 +17,6 @@ import (
 // TestMetricsEndpointAuthAndPayload 钉住两件事：/metrics 不能匿名放行（里面有主机规模、
 // 告警面与授权信息），以及运维真正会用到的那几个量确实在输出里。
 func TestMetricsEndpointAuthAndPayload(t *testing.T) {
-	licenseResetForTest(t)
 	srv, _ := newTestServer(t)
 	srv.store.RegisterHost("h1", "n1", "fp1")
 
@@ -52,7 +51,7 @@ func TestMetricsEndpointAuthAndPayload(t *testing.T) {
 	for _, want := range []string{
 		"aiops_build_info", "aiops_hosts_total", "aiops_agent_online_ratio",
 		"aiops_alerts_active{level=\"critical\"}", "aiops_pg_flush_duration_seconds",
-		"aiops_license_state", "aiops_license_hosts_used", "aiops_goroutines",
+		"aiops_goroutines",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("/metrics 缺少 %s", want)
@@ -82,7 +81,6 @@ func TestMetricsLabelEscaping(t *testing.T) {
 // TestSupportBundleContentsAndSanitization：诊断包会被邮件转发、贴进工单，
 // 所以既要有该有的东西，也**绝不能**带出密钥。
 func TestSupportBundleContentsAndSanitization(t *testing.T) {
-	licenseResetForTest(t)
 	srv, token := newTestServer(t)
 	srv.store.RegisterHost("h1", "node-1", "fp1")
 

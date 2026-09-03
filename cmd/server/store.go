@@ -910,29 +910,35 @@ func (s *Store) AddAlertRecord(r AlertRecord) int64 {
 		s.alertHistory = s.alertHistory[len(s.alertHistory)-maxAlertHistory:]
 	}
 	s.dirty = true
-	if s.pg != nil {
-		go s.pg.appendAlertRecord(r)
-	}
+	pg := s.pg
 	s.mu.Unlock()
+	// Persist before return so a quick ResolveAlert cannot race an async INSERT
+	// and leave the PG row permanently unresolved.
+	if pg != nil {
+		pg.appendAlertRecord(r)
+	}
 	return r.ID
 }
 
 // ResolveAlert marks the most recent firing record for key as resolved.
 func (s *Store) ResolveAlert(key string, resolvedAt int64) {
 	s.mu.Lock()
+	found := false
 	// Walk backwards to find the latest firing record for this key.
 	for i := len(s.alertHistory) - 1; i >= 0; i-- {
 		if s.alertHistory[i].Key == key && s.alertHistory[i].ResolvedAt == 0 {
 			s.alertHistory[i].ResolvedAt = resolvedAt
 			s.alertHistory[i].Status = "resolved"
 			s.dirty = true
-			if s.pg != nil {
-				go s.pg.resolveAlertRecord(s.alertHistory[i].ID, resolvedAt)
-			}
+			found = true
 			break
 		}
 	}
+	pg := s.pg
 	s.mu.Unlock()
+	if found && pg != nil {
+		pg.resolveAlertRecord(key, resolvedAt)
+	}
 }
 
 // AlertHistory returns alert history records, newest first.
