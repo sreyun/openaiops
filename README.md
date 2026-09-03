@@ -115,81 +115,49 @@ AIOps 把高频路径收敛为 **一个可自托管的平台**：
 
 ## 📸 产品截图
 
-<div align="center">
+### Web 控制台
 
-### 概览仪表盘
+<table>
+  <tr>
+    <td align="center"><b>概览仪表盘</b><br/><br/>![概览仪表盘](image/1-shouye.png)<br/>集群资源、告警与活动的统一视图：主机在线率、系统健康状态、活跃告警一览；CPU / GPU / 内存 / 磁盘 / IO / IOPS 资源 TOP10 实时排行，一眼定位瓶颈主机。</td>
+    <td align="center"><b>主机管理</b><br/><br/>![主机管理](image/2-zhuji.png)<br/>左侧资产树按机房 / 业务分组，右侧卡片式展示每台主机的实时指标——CPU、内存、交换分区、各磁盘分区、1/5/15 分钟负载、网络吞吐、IOPS、进程与连接数，支持网格 / 列表双视图。</td>
+  </tr>
+  <tr>
+    <td align="center"><b>Web 远程终端</b><br/><br/>![Web 远程终端](image/3-zhongduan.png)<br/>经 Agent 反向通道直连目标主机，无需开放 SSH 入站端口。支持多标签页同时连接多台主机、命令审计与录制回放、旁观模式。</td>
+    <td align="center"><b>远程桌面</b><br/><br/>![远程桌面](image/4-zhuomian.png)<br/>JPEG / H.264 双编码远程桌面，支持多屏切换、分辨率自适应、Ctrl+Alt+Del 等系统快捷键；右侧面板提供文件上传/下载与剪贴板同步，操作体验接近本地桌面。</td>
+  </tr>
+  <tr>
+    <td align="center"><b>Agent 安装</b><br/><br/>![Agent 安装](image/5-agent.png)<br/>一条命令完成 Agent 部署，支持 Linux / Windows / macOS 三平台。可选标准模式、网关中继模式、多服务端推送模式；Token 策略与自动更新策略均可在控制台统一管理。</td>
+    <td align="center"><b>硬件资源监控</b><br/><br/>![硬件资源监控](image/6-jiqi.png)<br/>通过 Redfish / BMC / iDRAC / iLO 带外采集物理服务器硬件状态：厂商、型号、序列号、电源/温度/功耗、BIOS 版本；BMC 事件日志（SEL）完整留存，支持 AI 诊断。</td>
+  </tr>
+  <tr>
+    <td align="center"><b>容器管理</b><br/><br/>![容器管理](image/7-docker.png)<br/>统一管理主机上的 Docker / Podman 容器与 Compose 项目：实时状态、端口映射、镜像信息一目了然；支持一键启停、重启、日志查看，跨主机批量筛选。</td>
+    <td align="center"><b>剧本编排</b><br/><br/>![剧本编排](image/8-juben.png)<br/>可视化自动化运维剧本：系统巡检、网络巡检、安全巡检、systemd 服务重启、K8s Deployment 滚动重启、深度主机巡检、Java 应用巡检/性能分析/异常分析等内置剧本开箱即用，支持自定义多步骤并行与审批护栏。</td>
+  </tr>
+  <tr>
+    <td align="center"><b>SRE 中枢</b><br/><br/>![SRE 中枢](image/9-sre.png)<br/>告警触发 / SLO 燃尽 / 手动创建的事件统一汇聚于此，含完整时间线与自动修复记录。支持事件、自动修复、依赖拓扑、SLO、工单、On-call、变更、平台健康巡检八大子模块。</td>
+    <td align="center"><b>AI 诊断</b><br/><br/>![AI 诊断](image/10-ai.png)<br/>在 SRE 事件列表中一键唤起 AI 助手，自动分析当前告警根因并给出处置建议。AI 会梳理告警关联、检索相似案例、检查关键主机健康状态，思考过程全程可见。</td>
+  </tr>
+  <tr>
+    <td align="center"><b>告警设置</b><br/><br/>![告警设置](image/11-setting.png)<br/>多渠道告警推送配置：飞书、钉钉、Webhook、邮件、短信、电话六通道可选；支持静默 / 抑制 / 路由策略，危急走电话短信、警告走 IM，避免告警风暴。</td>
+    <td align="center"><b>AI 设置</b><br/><br/>![AI 设置](image/12-aiset.png)<br/>AI 能力一站式配置：对话模型（OpenAI 兼容 / 百炼 / DeepSeek / Ollama / Anthropic / Claude）、RAG 向量库、研判与成本（MoA / 单价）、MCP 集成、调用观测、安全授权六项设置，支持语音输入/播报。</td>
+  </tr>
+</table>
 
-![概览仪表盘](image/1-shouye.png)
+### 移动端 App（Android / HarmonyOS）
 
-集群资源、告警与活动的统一视图：主机在线率、系统健康状态、活跃告警一览；CPU / GPU / 内存 / 磁盘 / IO / IOPS 资源 TOP10 实时排行，一眼定位瓶颈主机。
+> ️ **说明**：移动端 App（Android / HarmonyOS）为独立分发包，**开源社区版本不提供 App 安装包**。如需使用移动端，请联系项目方获取。
 
-### 主机管理
-
-![主机管理](image/2-zhuji.png)
-
-左侧资产树按机房 / 业务分组，右侧卡片式展示每台主机的实时指标——CPU、内存、交换分区、各磁盘分区、1/5/15 分钟负载、网络吞吐、IOPS、进程与连接数，支持网格 / 列表双视图。
-
-### Web 远程终端
-
-![Web 远程终端](image/3-zhongduan.png)
-
-经 Agent 反向通道直连目标主机，无需开放 SSH 入站端口。支持多标签页同时连接多台主机、命令审计与录制回放、旁观模式。
-
-### 远程桌面
-
-![远程桌面](image/4-zhuomian.png)
-
-JPEG / H.264 双编码远程桌面，支持多屏切换、分辨率自适应、Ctrl+Alt+Del 等系统快捷键；右侧面板提供文件上传/下载与剪贴板同步，操作体验接近本地桌面。
-
-### Agent 安装
-
-![Agent 安装](image/5-agent.png)
-
-一条命令完成 Agent 部署，支持 Linux / Windows / macOS 三平台。可选标准模式、网关中继模式、多服务端推送模式；Token 策略与自动更新策略均可在控制台统一管理。
-
-### 硬件资源监控
-
-![硬件资源监控](image/6-jiqi.png)
-
-通过 Redfish / BMC / iDRAC / iLO 带外采集物理服务器硬件状态：厂商、型号、序列号、电源/温度/功耗、BIOS 版本；BMC 事件日志（SEL）完整留存，支持 AI 诊断。
-
-### 容器管理
-
-![容器管理](image/7-docker.png)
-
-统一管理主机上的 Docker / Podman 容器与 Compose 项目：实时状态、端口映射、镜像信息一目了然；支持一键启停、重启、日志查看，跨主机批量筛选。
-
-### 剧本编排
-
-![剧本编排](image/8-juben.png)
-
-可视化自动化运维剧本：系统巡检、网络巡检、安全巡检、systemd 服务重启、K8s Deployment 滚动重启、深度主机巡检、Java 应用巡检/性能分析/异常分析等内置剧本开箱即用，支持自定义多步骤并行与审批护栏。
-
-### SRE 中枢
-
-![SRE 中枢](image/9-sre.png)
-
-告警触发 / SLO 燃尽 / 手动创建的事件统一汇聚于此，含完整时间线与自动修复记录。支持事件、自动修复、依赖拓扑、SLO、工单、On-call、变更、平台健康巡检八大子模块。
-
-### AI 诊断
-
-![AI 诊断](image/10-ai.png)
-
-在 SRE 事件列表中一键唤起 AI 助手，自动分析当前告警根因并给出处置建议。AI 会梳理告警关联、检索相似案例、检查关键主机健康状态，思考过程全程可见。
-
-### 告警设置
-
-![告警设置](image/11-setting.png)
-
-多渠道告警推送配置：飞书、钉钉、Webhook、邮件、短信、电话六通道可选；支持静默 / 抑制 / 路由策略，危急走电话短信、警告走 IM，避免告警风暴。
-
-### AI 设置
-
-![AI 设置](image/12-aiset.png)
-
-AI 能力一站式配置：对话模型（OpenAI 兼容 / 百炼 / DeepSeek / Ollama / Anthropic / Claude）、RAG 向量库、研判与成本（MoA / 单价）、MCP 集成、调用观测、安全授权六项设置，支持语音输入/播报。
-
-</div>
+<table>
+  <tr>
+    <td align="center"><b>SRE 驾驶舱</b><br/><br/>![SRE 驾驶舱](image/app01.jpg)<br/>移动端总览页：主机在线率、严重/警告告警数一目了然；快捷入口覆盖硬件监控、虚拟机、网络流量、拨测、主机监控、日志检索、运维编排、仪表盘；待处理事件按优先级排列。</td>
+    <td align="center"><b>基础设施监控</b><br/><br/>![基础设施监控](image/app02.jpg)<br/>移动端基础设施页：主机/资源/网络/拨测四大维度切换；GPU 资源概览（型号、显存、温度）；主机列表按分组筛选，实时展示 CPU、内存、磁盘等核心指标。</td>
+  </tr>
+  <tr>
+    <td align="center"><b>移动端远程终端</b><br/><br/>![移动端远程终端](image/app03.jpg)<br/>移动端 Web 终端：经 Agent 反向通道直连目标主机，完整终端交互体验；支持快捷键、字体缩放、屏幕旋转，随时随地排查问题。</td>
+    <td align="center"><b>AI 运维助手</b><br/><br/>![AI 运维助手](image/app04.jpg)<br/>移动端 AI 对话：自然语言描述问题，AI 自动检索历史案例、拉取告警详情、检查主机健康状态，给出根因分析与处置建议；底部导航栏覆盖总览/监控/告警/运维/AI 五大入口。</td>
+  </tr>
+</table>
 
 ---
 
