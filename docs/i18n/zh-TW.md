@@ -116,6 +116,54 @@ flowchart LR
 
 ---
 
+## 📸 產品截圖
+
+### Web 控制台
+
+<table>
+  <tr>
+    <td align="center"><b>概覽儀表盤</b><br/><br/><img src="../../image/1-shouye.png" alt="概覽儀表盤" width="100%"><br/>叢集資源、告警與活動的統一視圖：主機在線率、系統健康狀態、活躍告警一覽；CPU / GPU / 記憶體 / 磁碟 / IO / IOPS 資源 TOP10 即時排行，一眼定位瓶頸主機。</td>
+    <td align="center"><b>主機管理</b><br/><br/><img src="../../image/2-zhuji.png" alt="主機管理" width="100%"><br/>左側資產樹按機房 / 業務分組，右側卡片式展示每台主機的即時指標——CPU、記憶體、交換分割區、各磁碟分割區、1/5/15 分鐘負載、網路吞吐、IOPS、處理程序與連線數，支援網格 / 清單雙視圖。</td>
+  </tr>
+  <tr>
+    <td align="center"><b>Web 遠端終端</b><br/><br/><img src="../../image/3-zhongduan.png" alt="Web 遠端終端" width="100%"><br/>經 Agent 反向通道直連目標主機，無需開啟 SSH 入站埠。支援多標籤頁同時連線多台主機、命令審計與錄製回放、旁觀模式。</td>
+    <td align="center"><b>遠端桌面</b><br/><br/><img src="../../image/4-zhuomian.png" alt="遠端桌面" width="100%"><br/>JPEG / H.264 雙編碼遠端桌面，支援多屏切換、解析度自適應、Ctrl+Alt+Del 等系統快速鍵；右側面板提供檔案上傳/下載與剪貼簿同步，操作體驗接近本機桌面。</td>
+  </tr>
+  <tr>
+    <td align="center"><b>Agent 安裝</b><br/><br/><img src="../../image/5-agent.png" alt="Agent 安裝" width="100%"><br/>一條命令完成 Agent 部署，支援 Linux / Windows / macOS 三平台。可選標準模式、閘道中繼模式、多服務端推送模式；Token 策略與自動更新策略均可在控制台統一管理。</td>
+    <td align="center"><b>硬體資源監控</b><br/><br/><img src="../../image/6-jiqi.png" alt="硬體資源監控" width="100%"><br/>透過 Redfish / BMC / iDRAC / iLO 帶外採集實體伺服器硬體狀態：廠商、型號、序號、電源/溫度/功耗、BIOS 版本；BMC 事件日誌（SEL）完整留存，支援 AI 診斷。</td>
+  </tr>
+  <tr>
+    <td align="center"><b>容器管理</b><br/><br/><img src="../../image/7-docker.png" alt="容器管理" width="100%"><br/>統一管理主機上的 Docker / Podman 容器與 Compose 專案：即時狀態、埠映射、映像資訊一目瞭然；支援一鍵啟停、重啟、日誌檢視，跨主機批次篩選。</td>
+    <td align="center"><b>劇本編排</b><br/><br/><img src="../../image/8-juben.png" alt="劇本編排" width="100%"><br/>視覺化自動化運維劇本：系統巡檢、網路巡檢、安全巡檢、systemd 服務重啟、K8s Deployment 滾動重啟、深度主機巡檢、Java 應用巡檢/效能分析/異常分析等內建劇本開箱即用，支援自訂多步驟平行與審批護欄。</td>
+  </tr>
+  <tr>
+    <td align="center"><b>SRE 中樞</b><br/><br/><img src="../../image/9-sre.png" alt="SRE 中樞" width="100%"><br/>告警觸發 / SLO 燃盡 / 手動建立的事件統一匯聚於此，含完整時間線與自動修復記錄。支援事件、自動修復、依賴拓撲、SLO、工單、On-call、變更、平台健康巡檢八大子模組。</td>
+    <td align="center"><b>AI 診斷</b><br/><br/><img src="../../image/10-ai.png" alt="AI 診斷" width="100%"><br/>在 SRE 事件清單中一鍵喚起 AI 助手，自動分析當前告警根因並給出處置建議。AI 會梳理告警關聯、檢索相似案例、檢查關鍵主機健康狀態，思考過程全程可見。</td>
+  </tr>
+  <tr>
+    <td align="center"><b>告警設定</b><br/><br/><img src="../../image/11-setting.png" alt="告警設定" width="100%"><br/>多管道告警推送配置：飛書、釘釘、Webhook、郵件、簡訊、電話六通道可選；支援靜默 / 抑制 / 路由策略，危急走電話簡訊、警告走 IM，避免告警風暴。</td>
+    <td align="center"><b>AI 設定</b><br/><br/><img src="../../image/12-aiset.png" alt="AI 設定" width="100%"><br/>AI 能力一站式配置：對話模型（OpenAI 相容 / 百煉 / DeepSeek / Ollama / Anthropic / Claude）、RAG 向量庫、研判與成本（MoA / 單價）、MCP 整合、呼叫觀測、安全授權六項設定，支援語音輸入/播報。</td>
+  </tr>
+</table>
+
+### 行動端 App（Android / HarmonyOS）
+
+> **說明**：行動端 App（Android / HarmonyOS）為獨立分發包，**開源社群版本不提供 App 安裝包**。如需使用行動端，請聯絡專案方獲取。
+
+<table>
+  <tr>
+    <td align="center"><b>SRE 駕駛艙</b><br/><br/><img src="../../image/app01.jpg" alt="SRE 駕駛艙" width="100%"><br/>行動端總覽頁：主機在線率、嚴重/警告告警數一目瞭然；捷徑入口覆蓋硬體監控、虛擬機器、網路流量、撥測、主機監控、日誌檢索、運維編排、儀表盤；待處理事件按優先順序排列。</td>
+    <td align="center"><b>基礎設施監控</b><br/><br/><img src="../../image/app02.jpg" alt="基礎設施監控" width="100%"><br/>行動端基礎設施頁：主機/資源/網路/撥測四大維度切換；GPU 資源概覽（型號、顯存、溫度）；主機清單按分組篩選，即時展示 CPU、記憶體、磁碟等核心指標。</td>
+  </tr>
+  <tr>
+    <td align="center"><b>行動端遠端終端</b><br/><br/><img src="../../image/app03.jpg" alt="行動端遠端終端" width="100%"><br/>行動端 Web 終端：經 Agent 反向通道直連目標主機，完整終端互動體驗；支援快速鍵、字體縮放、螢幕旋轉，隨時隨地排查問題。</td>
+    <td align="center"><b>AI 運維助手</b><br/><br/><img src="../../image/app04.jpg" alt="AI 運維助手" width="100%"><br/>行動端 AI 對話：自然語言描述問題，AI 自動檢索歷史案例、拉取告警詳情、檢查主機健康狀態，給出根因分析與處置建議；底部導覽列覆蓋總覽/監控/告警/運維/AI 五大入口。</td>
+  </tr>
+</table>
+
+---
+
 ## 📚 文件中心
 
 長文與多語言簡介在 [`docs/`](../README.md)；根目錄僅保留簡體中文 README 與變更日誌。

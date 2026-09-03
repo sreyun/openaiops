@@ -115,6 +115,54 @@ flowchart LR
 
 ---
 
+## 📸 Produkt-Screenshots
+
+### Web-Konsole
+
+<table>
+  <tr>
+    <td align="center"><b>Übersichts-Dashboard</b><br/><br/><img src="../../image/1-shouye.png" alt="Übersichts-Dashboard" width="100%"><br/>Einheitliche Ansicht der Cluster-Ressourcen, Alarme und Aktivitäten: Host-Online-Rate, Systemgesundheitsstatus, aktive Alarme Übersicht; CPU / GPU / Speicher / Festplatte / IO / IOPS Ressourcen TOP10 Echtzeit-Ranking, Engpass-Hosts auf einen Blick identifizieren.</td>
+    <td align="center"><b>Host-Verwaltung</b><br/><br/><img src="../../image/2-zhuji.png" alt="Host-Verwaltung" width="100%"><br/>Linker Asset-Baum nach Rechenzentrum / Geschäft gruppiert, rechte Kartenansicht zeigt Echtzeit-Metriken jedes Hosts: CPU, Speicher, Swap, Festplattenpartitionen, 1/5/15 Min Last, Netzwerk-Durchsatz, IOPS, Prozess- und Verbindungsanzahl, unterstützt Gitter / Listen-Dualansicht.</td>
+  </tr>
+  <tr>
+    <td align="center"><b>Web-Terminal</b><br/><br/><img src="../../image/3-zhongduan.png" alt="Web-Terminal" width="100%"><br/>Direkte Verbindung zu Zielhosts über Agent-Rückwärtskanal, keine Notwendigkeit, SSH-Eingangsports zu öffnen. Unterstützt Multi-Tab-Verbindungen zu mehreren Hosts, Befehlsprüfung und Aufzeichnungswiedergabe, Beobachtermodus.</td>
+    <td align="center"><b>Remote-Desktop</b><br/><br/><img src="../../image/4-zhuomian.png" alt="Remote-Desktop" width="100%"><br/>JPEG / H.264 Dual-Encoding-Remote-Desktop, unterstützt Multi-Screen-Umschaltung, adaptive Auflösung, System-Shortcuts wie Strg+Alt+Entf; rechtes Panel bietet Datei-Upload/Download und Zwischenablagen-Synchronisation, Betriebserlebnis nahe am lokalen Desktop.</td>
+  </tr>
+  <tr>
+    <td align="center"><b>Agent-Installation</b><br/><br/><img src="../../image/5-agent.png" alt="Agent-Installation" width="100%"><br/>Ein Befehl zur Agent-Bereitstellung, unterstützt Linux / Windows / macOS drei Plattformen. Optional Standardmodus, Gateway-Relaismodus, Multi-Server-Push-Modus; Token-Strategie und Auto-Update-Strategie können in der Konsole einheitlich verwaltet werden.</td>
+    <td align="center"><b>Hardware-Ressourcen-Überwachung</b><br/><br/><img src="../../image/6-jiqi.png" alt="Hardware-Ressourcen-Überwachung" width="100%"><br/>Out-of-Band-Sammlung des physischen Server-Hardware-Status über Redfish / BMC / iDRAC / iLO: Hersteller, Modell, Seriennummer, Strom/Temperatur/Stromverbrauch, BIOS-Version; BMC-Ereignisprotokolle (SEL) vollständig aufbewahrt, unterstützt KI-Diagnose.</td>
+  </tr>
+  <tr>
+    <td align="center"><b>Container-Verwaltung</b><br/><br/><img src="../../image/7-docker.png" alt="Container-Verwaltung" width="100%"><br/>Einheitliche Verwaltung von Docker / Podman Containern und Compose-Projekten auf Hosts: Echtzeit-Status, Port-Mapping, Image-Informationen auf einen Blick; unterstützt Ein-Klick-Start/Stopp, Neustart, Protokollanzeige, Cross-Host-Stapelfilterung.</td>
+    <td align="center"><b>Playbook-Orchestrierung</b><br/><br/><img src="../../image/8-juben.png" alt="Playbook-Orchestrierung" width="100%"><br/>Visuelle Automatisierungs-Playbooks: Systeminspektion, Netzwerkinspektion, Sicherheitsinspektion, systemd-Service-Neustart, K8s Deployment Rolling-Neustart, tiefe Host-Inspektion, Java-Anwendungsinspektion/Leistungsanalyse/Ausnahmeanalyse und andere eingebaute Playbooks sofort einsatzbereit, unterstützt benutzerdefinierte Multi-Step-Parallelität und Genehmigungs-Schutzplanken.</td>
+  </tr>
+  <tr>
+    <td align="center"><b>SRE-Zentrum</b><br/><br/><img src="../../image/9-sre.png" alt="SRE-Zentrum" width="100%"><br/>Alarm-Auslöser / SLO-Burn-Down / manuell erstellte Ereignisse konvergieren hier, mit vollständiger Timeline und automatischen Wiederherstellungsprotokollen. Unterstützt acht Untermodule: Vorfälle, automatische Wiederherstellung, Abhängigkeits-Topologie, SLO, Tickets, On-call, Änderungen, Plattform-Gesundheitsprüfung.</td>
+    <td align="center"><b>KI-Diagnose</b><br/><br/><img src="../../image/10-ai.png" alt="KI-Diagnose" width="100%"><br/>Ein-Klick-KI-Assistent in der SRE-Ereignisliste, analysiert automatisch die aktuelle Alarm-Ursache und gibt Entsorgungsvorschläge. KI überprüft Alarmkorrelationen, ruft ähnliche Fälle ab, prüft den Gesundheitszustand kritischer Hosts, Denkprozess vollständig sichtbar.</td>
+  </tr>
+  <tr>
+    <td align="center"><b>Alarm-Einstellungen</b><br/><br/><img src="../../image/11-setting.png" alt="Alarm-Einstellungen" width="100%"><br/>Multi-Kanal-Alarm-Push-Konfiguration: Feishu, DingTalk, Webhook, E-Mail, SMS, Telefon sechs Kanäle wählbar; unterstützt Silence / Inhibit / Routing-Strategien, kritisches geht an Telefon SMS, Warnungen gehen an IM, vermeidet Alarmstürme.</td>
+    <td align="center"><b>KI-Einstellungen</b><br/><br/><img src="../../image/12-aiset.png" alt="KI-Einstellungen" width="100%"><br/>One-Stop-KI-Fähigkeitskonfiguration: Dialogmodelle (OpenAI-kompatibel / Bailian / DeepSeek / Ollama / Anthropic / Claude), RAG-Vektorbibliothek, Urteil und Kosten (MoA / Stückpreis), MCP-Integration, Anrufbeobachtung, Sicherheitsautorisierung sechs Einstellungen, unterstützt Spracheingabe/Ausstrahlung.</td>
+  </tr>
+</table>
+
+### Mobile App (Android / HarmonyOS)
+
+> **Hinweis**: Mobile App (Android / HarmonyOS) ist ein separates Verteilungspaket, **die Open-Source-Community-Version stellt keine App-Installationspakete bereit**. Wenn Sie die mobile Version verwenden müssen, wenden Sie sich bitte an das Projektteam.
+
+<table>
+  <tr>
+    <td align="center"><b>SRE-Cockpit</b><br/><br/><img src="../../image/app01.jpg" alt="SRE-Cockpit" width="100%"><br/>Mobile Übersichtsseite: Host-Online-Rate, schwere/warnende Alarmzahlen auf einen Blick; schnelle Zugriffe decken Hardware-Überwachung, virtuelle Maschinen, Netzwerkverkehr, Dial-Tests, Host-Überwachung, Protokollsuche, Betriebsorchestrierung, Dashboards ab; ausstehende Vorfälle nach Priorität sortiert.</td>
+    <td align="center"><b>Infrastruktur-Überwachung</b><br/><br/><img src="../../image/app02.jpg" alt="Infrastruktur-Überwachung" width="100%"><br/>Mobile Infrastruktur-Seite: vier Dimensionen Host/Ressource/Netzwerk/Dial-Test-Umschaltung; GPU-Ressourcen-Übersicht (Modell, VRAM, Temperatur); Host-Liste nach Gruppe gefiltert, Echtzeit-Anzeige von CPU, Speicher, Festplatte und anderen Kernmetriken.</td>
+  </tr>
+  <tr>
+    <td align="center"><b>Mobiles Terminal</b><br/><br/><img src="../../image/app03.jpg" alt="Mobiles Terminal" width="100%"><br/>Mobiles Web-Terminal: direkte Verbindung zu Zielhosts über Agent-Rückwärtskanal, vollständiges Terminal-Interaktionserlebnis; unterstützt Shortcuts, Schrift-Skalierung, Bildschirmdrehung, Fehlerbehebung jederzeit überall.</td>
+    <td align="center"><b>KI-Betriebsassistent</b><br/><br/><img src="../../image/app04.jpg" alt="KI-Betriebsassistent" width="100%"><br/>Mobile KI-Dialog: Probleme in natürlicher Sprache beschreiben, KI ruft automatisch historische Fälle ab, zieht Alarmdetails, prüft Host-Gesundheitszustand, gibt Ursachenanalyse und Entsorgungsvorschläge; untere Navigationsleiste deckt Übersicht/Überwachung/Alarme/Betrieb/KI fünf Haupteinträge ab.</td>
+  </tr>
+</table>
+
+---
+
 ## 📚 Dokumentation
 
 Lange Texte und lokalisierte READMEs liegen unter [`docs/`](../README.md). Im Root bleiben nur das chinesische README und das Changelog.

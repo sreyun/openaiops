@@ -118,6 +118,54 @@ flowchart LR
 
 ---
 
+## 📸 Product Screenshots
+
+### Web Console
+
+<table>
+  <tr>
+    <td align="center"><b>Overview Dashboard</b><br/><br/><img src="../../image/1-shouye.png" alt="Overview Dashboard" width="100%"><br/>Unified view of cluster resources, alerts and activities: host online rate, system health status, active alerts overview; CPU / GPU / memory / disk / IO / IOPS resource TOP10 real-time ranking, locate bottleneck hosts at a glance.</td>
+    <td align="center"><b>Host Management</b><br/><br/><img src="../../image/2-zhuji.png" alt="Host Management" width="100%"><br/>Left asset tree grouped by datacenter / business, right card-style display shows real-time metrics for each host: CPU, memory, swap, disk partitions, 1/5/15 min load, network throughput, IOPS, process and connection count, supports grid / list dual view.</td>
+  </tr>
+  <tr>
+    <td align="center"><b>Web Terminal</b><br/><br/><img src="../../image/3-zhongduan.png" alt="Web Terminal" width="100%"><br/>Direct connection to target hosts via Agent reverse channel, no need to open SSH inbound ports. Supports multi-tab connections to multiple hosts, command audit and recording playback, observer mode.</td>
+    <td align="center"><b>Remote Desktop</b><br/><br/><img src="../../image/4-zhuomian.png" alt="Remote Desktop" width="100%"><br/>JPEG / H.264 dual-encoding remote desktop, supports multi-screen switching, adaptive resolution, system shortcuts like Ctrl+Alt+Del; right panel provides file upload/download and clipboard sync, operation experience close to local desktop.</td>
+  </tr>
+  <tr>
+    <td align="center"><b>Agent Installation</b><br/><br/><img src="../../image/5-agent.png" alt="Agent Installation" width="100%"><br/>One command to deploy Agent, supports Linux / Windows / macOS three platforms. Optional standard mode, gateway relay mode, multi-server push mode; Token strategy and auto-update strategy can be managed uniformly in the console.</td>
+    <td align="center"><b>Hardware Resource Monitoring</b><br/><br/><img src="../../image/6-jiqi.png" alt="Hardware Resource Monitoring" width="100%"><br/>Out-of-band collection of physical server hardware status via Redfish / BMC / iDRAC / iLO: vendor, model, serial number, power/temperature/power consumption, BIOS version; BMC event logs (SEL) retained completely, supports AI diagnosis.</td>
+  </tr>
+  <tr>
+    <td align="center"><b>Container Management</b><br/><br/><img src="../../image/7-docker.png" alt="Container Management" width="100%"><br/>Unified management of Docker / Podman containers and Compose projects on hosts: real-time status, port mapping, image information at a glance; supports one-click start/stop, restart, log viewing, cross-host batch filtering.</td>
+    <td align="center"><b>Playbook Orchestration</b><br/><br/><img src="../../image/8-juben.png" alt="Playbook Orchestration" width="100%"><br/>Visual automation operations playbooks: system inspection, network inspection, security inspection, systemd service restart, K8s Deployment rolling restart, deep host inspection, Java application inspection/performance analysis/exception analysis and other built-in playbooks ready to use, supports custom multi-step parallelism and approval guardrails.</td>
+  </tr>
+  <tr>
+    <td align="center"><b>SRE Hub</b><br/><br/><img src="../../image/9-sre.png" alt="SRE Hub" width="100%"><br/>Alert triggers / SLO burn-down / manually created events converge here, with complete timeline and auto-remediation records. Supports eight sub-modules: incidents, auto-remediation, dependency topology, SLO, tickets, On-call, changes, platform health inspection.</td>
+    <td align="center"><b>AI Diagnosis</b><br/><br/><img src="../../image/10-ai.png" alt="AI Diagnosis" width="100%"><br/>One-click AI assistant in SRE event list, automatically analyzes current alert root cause and gives disposal suggestions. AI reviews alert correlations, retrieves similar cases, checks critical host health status, thinking process fully visible.</td>
+  </tr>
+  <tr>
+    <td align="center"><b>Alert Settings</b><br/><br/><img src="../../image/11-setting.png" alt="Alert Settings" width="100%"><br/>Multi-channel alert push configuration: Feishu, DingTalk, Webhook, email, SMS, phone six channels optional; supports silence / inhibit / routing policies, critical goes to phone SMS, warnings go to IM, avoids alert storms.</td>
+    <td align="center"><b>AI Settings</b><br/><br/><img src="../../image/12-aiset.png" alt="AI Settings" width="100%"><br/>One-stop AI capability configuration: dialogue models (OpenAI compatible / Bailian / DeepSeek / Ollama / Anthropic / Claude), RAG vector library, judgment and cost (MoA / unit price), MCP integration, call observation, security authorization six settings, supports voice input/broadcast.</td>
+  </tr>
+</table>
+
+### Mobile App (Android / HarmonyOS)
+
+> **Note**: Mobile App (Android / HarmonyOS) is a separate distribution package, **the open-source community version does not provide App installation packages**. If you need to use the mobile end, please contact the project team.
+
+<table>
+  <tr>
+    <td align="center"><b>SRE Cockpit</b><br/><br/><img src="../../image/app01.jpg" alt="SRE Cockpit" width="100%"><br/>Mobile overview page: host online rate, severe/warning alert counts at a glance; quick entries cover hardware monitoring, virtual machines, network traffic, dial testing, host monitoring, log retrieval, operations orchestration, dashboards; pending incidents sorted by priority.</td>
+    <td align="center"><b>Infrastructure Monitoring</b><br/><br/><img src="../../image/app02.jpg" alt="Infrastructure Monitoring" width="100%"><br/>Mobile infrastructure page: four dimensions of host/resource/network/dial testing switching; GPU resource overview (model, VRAM, temperature); host list filtered by group, real-time display of CPU, memory, disk and other core metrics.</td>
+  </tr>
+  <tr>
+    <td align="center"><b>Mobile Terminal</b><br/><br/><img src="../../image/app03.jpg" alt="Mobile Terminal" width="100%"><br/>Mobile web terminal: direct connection to target hosts via Agent reverse channel, complete terminal interactive experience; supports shortcut keys, font scaling, screen rotation, troubleshoot anytime anywhere.</td>
+    <td align="center"><b>AI Operations Assistant</b><br/><br/><img src="../../image/app04.jpg" alt="AI Operations Assistant" width="100%"><br/>Mobile AI dialogue: describe problems in natural language, AI automatically retrieves historical cases, pulls alert details, checks host health status, gives root cause analysis and disposal suggestions; bottom navigation bar covers overview/monitoring/alerts/operations/AI five major entries.</td>
+  </tr>
+</table>
+
+---
+
 ## 📚 Documentation
 
 Long-form docs live under [`docs/`](../README.md). The repo root keeps only the Chinese README and changelog.

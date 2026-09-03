@@ -115,6 +115,54 @@ flowchart LR
 
 ---
 
+## 📸 Captures d'écran produit
+
+### Console Web
+
+<table>
+  <tr>
+    <td align="center"><b>Tableau de bord</b><br/><br/><img src="../../image/1-shouye.png" alt="Tableau de bord" width="100%"><br/>Vue unifiée des ressources cluster, alertes et activités : taux de disponibilité des hôtes, état de santé du système, aperçu des alertes actives ; TOP10 des ressources CPU / GPU / mémoire / disque / IO / IOPS en temps réel, localisez les goulots d'étranglement en un coup d'œil.</td>
+    <td align="center"><b>Gestion des hôtes</b><br/><br/><img src="../../image/2-zhuji.png" alt="Gestion des hôtes" width="100%"><br/>Arborescence des actifs à gauche groupée par datacenter / métier, affichage en cartes à droite avec les métriques temps réel de chaque hôte : CPU, mémoire, swap, partitions disque, charge 1/5/15 min, débit réseau, IOPS, processus et connexions, vue grille / liste.</td>
+  </tr>
+  <tr>
+    <td align="center"><b>Terminal Web</b><br/><br/><img src="../../image/3-zhongduan.png" alt="Terminal Web" width="100%"><br/>Connexion directe aux hôtes cibles via le canal inverse de l'Agent, sans ouvrir de port SSH entrant. Multi-onglets pour plusieurs hôtes, audit des commandes et lecture d'enregistrements, mode observateur.</td>
+    <td align="center"><b>Bureau à distance</b><br/><br/><img src="../../image/4-zhuomian.png" alt="Bureau à distance" width="100%"><br/>Bureau distant à double encodage JPEG / H.264, changement multi-écrans, résolution adaptative, raccourcis système Ctrl+Alt+Del ; panneau droit pour upload/download de fichiers et synchronisation du presse-papiers, expérience proche du bureau local.</td>
+  </tr>
+  <tr>
+    <td align="center"><b>Installation Agent</b><br/><br/><img src="../../image/5-agent.png" alt="Installation Agent" width="100%"><br/>Une commande pour déployer l'Agent, supporte Linux / Windows / macOS. Mode standard, relais passerelle, push multi-serveur ; stratégie Token et mise à jour auto gérées depuis la console.</td>
+    <td align="center"><b>Surveillance matérielle</b><br/><br/><img src="../../image/6-jiqi.png" alt="Surveillance matérielle" width="100%"><br/>Collecte hors bande de l'état matériel des serveurs physiques via Redfish / BMC / iDRAC / iLO : fabricant, modèle, numéro de série, alimentation/température/consommation, version BIOS ; journaux d'événements BMC (SEL) conservés, supporte le diagnostic IA.</td>
+  </tr>
+  <tr>
+    <td align="center"><b>Gestion des conteneurs</b><br/><br/><img src="../../image/7-docker.png" alt="Gestion des conteneurs" width="100%"><br/>Gestion unifiée des conteneurs Docker / Podman et projets Compose sur les hôtes : état temps réel, mappage de ports, informations d'image ; démarrage/arrêt en un clic, redémarrage, visualisation des logs, filtrage multi-hôtes.</td>
+    <td align="center"><b>Orchestration de Playbooks</b><br/><br/><img src="../../image/8-juben.png" alt="Orchestration de Playbooks" width="100%"><br/>Playbooks d'opérations automatisées visuels : inspection système, réseau, sécurité, redémarrage de services systemd, déploiement K8s rolling, inspection approfondie d'hôtes, inspection d'applications Java/analyse de performance/analyse d'exceptions ; playbooks intégrés prêts à l'emploi, parallélisation personnalisable et gardes-fous d'approbation.</td>
+  </tr>
+  <tr>
+    <td align="center"><b>Centre SRE</b><br/><br/><img src="../../image/9-sre.png" alt="Centre SRE" width="100%"><br/>Les déclenchements d'alertes / burn-down SLO / événements créés manuellement convergent ici, avec timeline complète et enregistrements d'auto-remédiation. Huit sous-modules : incidents, auto-remédiation, topologie de dépendances, SLO, tickets, On-call, changements, inspection santé plateforme.</td>
+    <td align="center"><b>Diagnostic IA</b><br/><br/><img src="../../image/10-ai.png" alt="Diagnostic IA" width="100%"><br/>Assistant IA en un clic depuis la liste d'événements SRE, analyse automatiquement la cause racine de l'alerte et donne des suggestions de traitement. L'IA corrèle les alertes, recherche des cas similaires, vérifie la santé des hôtes critiques, processus de réflexion entièrement visible.</td>
+  </tr>
+  <tr>
+    <td align="center"><b>Paramètres d'alerte</b><br/><br/><img src="../../image/11-setting.png" alt="Paramètres d'alerte" width="100%"><br/>Configuration multi-canal de push d'alertes : Feishu, DingTalk, Webhook, e-mail, SMS, téléphone ; supports silence / inhibit / routing, les critiques vont au téléphone SMS, les avertissements à l'IM, évite les tempêtes d'alertes.</td>
+    <td align="center"><b>Paramètres IA</b><br/><br/><img src="../../image/12-aiset.png" alt="Paramètres IA" width="100%"><br/>Configuration IA tout-en-un : modèles de dialogue (compatible OpenAI / Bailian / DeepSeek / Ollama / Anthropic / Claude), bibliothèque vectorielle RAG, jugement et coût (MoA / prix unitaire), intégration MCP, observation des appels, autorisation de sécurité ; supporte l'entrée vocale/la diffusion.</td>
+  </tr>
+</table>
+
+### App Mobile (Android / HarmonyOS)
+
+> **Note** : L'App Mobile (Android / HarmonyOS) est un package de distribution séparé, **la version communautaire open-source ne fournit pas de packages d'installation d'App**. Si vous avez besoin d'utiliser le mobile, veuillez contacter l'équipe du projet.
+
+<table>
+  <tr>
+    <td align="center"><b>Cockpit SRE</b><br/><br/><img src="../../image/app01.jpg" alt="Cockpit SRE" width="100%"><br/>Page d'aperçu mobile : taux de disponibilité des hôtes, nombre d'alertes critiques/avertissements en un coup d'œil ; entrées rapides couvrant la surveillance matérielle, machines virtuelles, trafic réseau, tests de numérotation, surveillance d'hôtes, recherche de logs, orchestration d'opérations, tableaux de bord ; incidents en attente triés par priorité.</td>
+    <td align="center"><b>Surveillance d'infrastructure</b><br/><br/><img src="../../image/app02.jpg" alt="Surveillance d'infrastructure" width="100%"><br/>Page d'infrastructure mobile : quatre dimensions hôte/ressource/réseau/test de numérotation ; aperçu des ressources GPU (modèle, VRAM, température) ; liste d'hôtes filtrée par groupe, affichage en temps réel des métriques clés CPU, mémoire, disque.</td>
+  </tr>
+  <tr>
+    <td align="center"><b>Terminal Mobile</b><br/><br/><img src="../../image/app03.jpg" alt="Terminal Mobile" width="100%"><br/>Terminal web mobile : connexion directe aux hôtes cibles via le canal inverse de l'Agent, expérience interactive complète ; supporte les raccourcis, le zoom de police, la rotation d'écran, dépannage anytime anywhere.</td>
+    <td align="center"><b>Assistant Ops IA</b><br/><br/><img src="../../image/app04.jpg" alt="Assistant Ops IA" width="100%"><br/>Dialogue IA mobile : décrivez les problèmes en langage naturel, l'IA recherche automatiquement les cas historiques, récupère les détails d'alertes, vérifie la santé des hôtes, donne l'analyse de cause racine et les suggestions de traitement ; la barre de navigation inférieure couvre les 5 entrées principales aperçu/surveillance/alertes/opérations/IA.</td>
+  </tr>
+</table>
+
+---
+
 ## 📚 Documentation
 
 Les docs longues et README localisés sont sous [`docs/`](../README.md). La racine ne garde que le README chinois et le changelog.
