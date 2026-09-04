@@ -218,6 +218,7 @@ func moduleHostSecurityScan(ctx context.Context, args map[string]string) ([]byte
 
 	raw, err := json.Marshal(rep)
 	if err != nil {
+		fimClearStagedBaseline()
 		return []byte(`{"error":"marshal failed"}`), 1
 	}
 	// Cap output size (~1.5 MiB). Shed content diffs first (bulky, optional),
@@ -238,18 +239,28 @@ func moduleHostSecurityScan(ctx context.Context, args map[string]string) ([]byte
 				rep.FileChanges[i].Diff = ""
 				rep.FileChanges[i].Truncated = true
 			}
+			trimmed := false
 			if len(rep.FileChanges) > 200 {
 				rep.FileChanges = rep.FileChanges[:200]
+				trimmed = true
 			}
 			if rep.FIMStats != nil {
 				rep.FIMStats.Truncated = true
 				rep.FIMStats.Reported = len(rep.FileChanges)
 			}
 			rep.Meta["fim_changes_truncated"] = true
+			// Transport trim drops deltas that collectFIMChanges already acknowledged.
+			// Re-commit so unreported paths stay in the baseline for the next scan.
+			if trimmed {
+				if err := fimCommitStagedBaseline(rep.FileChanges); err != nil && rep.FIMStats != nil {
+					rep.FIMStats.Error = "baseline save failed: " + err.Error()
+				}
+			}
 		}
 		rep.Meta["truncated"] = true
 		raw, _ = json.Marshal(rep)
 	}
+	fimClearStagedBaseline()
 	return raw, 0
 }
 

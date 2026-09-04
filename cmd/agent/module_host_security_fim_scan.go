@@ -871,28 +871,102 @@ func collectFIMChanges(opts fimOptions) ([]hostSecFileChange, hostSecFIMStats) {
 	changes := fimDiffBaseline(prev, cur, visitedDirs, blockedDirs, prevDirs, patterns, opts.ContentDiff, maxChanges, &stats)
 	stats.DurationMS = time.Since(start).Milliseconds()
 
-	// 没走到的区域必须保留上一份基线的记忆，否则下一轮会把它们全报成删除。
+	// 基线推进必须与实际上报集合对齐：被 maxChanges（或后续传输裁剪）丢掉的
+	// 变更如果也写进基线，下一轮就再也看不到——等于静默永久丢 FIM 事件。
+	fimStageBaselineCommit(basePath, prev, cur, visitedDirs, blockedDirs, prevDirs)
+	if err := fimCommitStagedBaseline(changes); err != nil {
+		stats.Error = "baseline save failed: " + err.Error()
+	}
+	return changes, stats
+}
+
+// fimStagedBaseline holds the last scan's merge inputs so a later transport-size
+// trim can re-commit with the smaller acknowledged set.
+type fimStagedBaseline struct {
+	basePath                 string
+	prev, cur                map[string]fimEntry
+	visitedDirs, blockedDirs map[string]bool
+	prevDirs                 map[string]bool
+	active                   bool
+}
+
+var fimStagedMu sync.Mutex
+var fimStaged fimStagedBaseline
+
+func fimStageBaselineCommit(basePath string, prev, cur map[string]fimEntry, visitedDirs, blockedDirs, prevDirs map[string]bool) {
+	fimStagedMu.Lock()
+	defer fimStagedMu.Unlock()
+	fimStaged = fimStagedBaseline{
+		basePath: basePath, prev: prev, cur: cur,
+		visitedDirs: visitedDirs, blockedDirs: blockedDirs, prevDirs: prevDirs,
+		active: true,
+	}
+}
+
+// fimCommitStagedBaseline advances the on-disk baseline only for unchanged /
+// first-visit entries and paths present in reported. Unreported deltas keep
+// their previous baseline values so the next scan can emit them.
+func fimCommitStagedBaseline(reported []hostSecFileChange) error {
+	fimStagedMu.Lock()
+	defer fimStagedMu.Unlock()
+	if !fimStaged.active {
+		return nil
+	}
+	acked := make(map[string]bool, len(reported))
+	for _, ch := range reported {
+		acked[ch.Path] = true
+	}
+	merged := fimMergeBaselineAcked(fimStaged.prev, fimStaged.cur, fimStaged.visitedDirs, fimStaged.blockedDirs, fimStaged.prevDirs, acked)
+	return fimSaveBaseline(fimStaged.basePath, merged)
+}
+
+func fimClearStagedBaseline() {
+	fimStagedMu.Lock()
+	defer fimStagedMu.Unlock()
+	fimStaged = fimStagedBaseline{}
+}
+
+// fimMergeBaselineAcked builds the next baseline.
+//
+// Rules:
+//   - Unvisited regions keep the previous baseline (resume / budget cuts).
+//   - First visit to a region seeds baseline silently (not an "added" event).
+//   - Unchanged scanned files update to the current snapshot.
+//   - Added / modified / removed only apply when that path was in the reported
+//     change list; otherwise the old baseline entry is retained so the delta
+//     survives into a later scan.
+func fimMergeBaselineAcked(prev, cur map[string]fimEntry, visitedDirs, blockedDirs, prevDirs map[string]bool, acked map[string]bool) map[string]fimEntry {
 	merged := make(map[string]fimEntry, len(prev)+len(cur))
 	for p, e := range prev {
 		merged[p] = e
 	}
 	for p, e := range cur {
-		merged[p] = e
+		o, ok := prev[p]
+		if !ok {
+			// New path: seed on first region visit, or when the "added" event was reported.
+			if !fimRegionKnown(p, prevDirs) || acked[p] {
+				merged[p] = e
+			}
+			continue
+		}
+		if fimChangeReason(o, e) == "" || acked[p] {
+			merged[p] = e
+		}
+		// else: truncated modification — keep prev[p]
 	}
-	// 本轮完整枚举过的位置上，基线中已经不存在的条目要真的删掉——留着它们，
-	// 下一轮还会重复报同一条删除。
 	for p := range prev {
 		if _, ok := cur[p]; ok {
 			continue
 		}
-		if fimRegionVisited(p, visitedDirs, blockedDirs) {
+		if !fimRegionVisited(p, visitedDirs, blockedDirs) {
+			continue
+		}
+		if acked[p] {
 			delete(merged, p)
 		}
+		// else: truncated removal — keep prev[p] so it is reported next time
 	}
-	if err := fimSaveBaseline(basePath, merged); err != nil {
-		stats.Error = "baseline save failed: " + err.Error()
-	}
-	return changes, stats
+	return merged
 }
 
 // fimKnownDirs 取基线里记录过的目录集合（键已归一化，便于大小写不敏感比较）。
