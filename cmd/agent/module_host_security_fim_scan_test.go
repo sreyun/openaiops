@@ -538,3 +538,115 @@ func TestFimVolumeQuotaRespectsSmallLimit(t *testing.T) {
 		t.Fatalf("应当因为上限被截断：%+v", stats)
 	}
 }
+
+// 上报条数触顶后，未发出去的变更绝不能写进基线——否则下一轮永远看不到它们。
+func TestCollectFIMKeepsUnreportedDeltasInBaseline(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < 8; i++ {
+		writeFile(t, filepath.Join(root, "f"+strconv.Itoa(i)+".txt"), "v1\n")
+	}
+	opts := fimTestOpts(t, root)
+	if _, stats := collectFIMChanges(opts); !stats.Baseline {
+		t.Fatal("首轮应当建立基线")
+	}
+
+	// 制造多于 MaxChanges 的变更（改内容 + 删除 + 新增）。
+	// 内容长度必须不同：未哈希时 FIM 靠 size/mtime 判定，同秒同长度写会被当成未变。
+	opts.MaxChanges = 3
+	for i := 0; i < 6; i++ {
+		writeFile(t, filepath.Join(root, "f"+strconv.Itoa(i)+".txt"), "v2-changed\n")
+	}
+	if err := os.Remove(filepath.Join(root, "f6.txt")); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(root, "f8-new.txt"), "new\n")
+
+	first, stats := collectFIMChanges(opts)
+	if !stats.Truncated {
+		t.Fatalf("应当因 maxChanges 截断：reported=%d stats=%+v", len(first), stats)
+	}
+	if len(first) != 3 {
+		t.Fatalf("截断后应只报 3 条，得到 %d：%+v", len(first), first)
+	}
+	reported := changeByPath(first)
+
+	// 下一轮把上限放开：上一轮没报出去的变更必须再次出现。
+	opts.MaxChanges = 100
+	second, stats2 := collectFIMChanges(opts)
+	if stats2.Truncated {
+		t.Fatalf("第二轮不应再截断：%+v", stats2)
+	}
+	byPath := changeByPath(second)
+	var missing []string
+	for i := 0; i < 6; i++ {
+		p := fimNormPath(filepath.Join(root, "f"+strconv.Itoa(i)+".txt"))
+		if reported[p].Path != "" {
+			continue // 第一轮已发出，基线已推进；第二轮不应再报
+		}
+		if c, ok := byPath[p]; !ok || c.Change != "modified" {
+			missing = append(missing, p+" (want modified)")
+		}
+	}
+	removed := fimNormPath(filepath.Join(root, "f6.txt"))
+	if reported[removed].Path == "" {
+		if c, ok := byPath[removed]; !ok || c.Change != "removed" {
+			missing = append(missing, removed+" (want removed)")
+		}
+	}
+	added := fimNormPath(filepath.Join(root, "f8-new.txt"))
+	if reported[added].Path == "" {
+		if c, ok := byPath[added]; !ok || c.Change != "added" {
+			missing = append(missing, added+" (want added)")
+		}
+	}
+	if len(missing) > 0 {
+		t.Fatalf("截断后未上报的变更从基线里丢了，第二轮看不到：%v\nfirst=%+v\nsecond=%+v", missing, first, second)
+	}
+}
+
+// 传输层再次裁剪上报列表时，必须按最终发出的集合重写基线。
+func TestFIMTransportTrimRecommitsBaseline(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < 6; i++ {
+		writeFile(t, filepath.Join(root, "t"+strconv.Itoa(i)+".txt"), "v1\n")
+	}
+	opts := fimTestOpts(t, root)
+	collectFIMChanges(opts)
+
+	for i := 0; i < 6; i++ {
+		writeFile(t, filepath.Join(root, "t"+strconv.Itoa(i)+".txt"), "v2-changed\n")
+	}
+	opts.MaxChanges = 100
+	all, _ := collectFIMChanges(opts)
+	if len(all) < 6 {
+		t.Fatalf("应有 6 条修改，得到 %d", len(all))
+	}
+	// 模拟 1.5MiB 裁剪：只承认前 2 条。
+	kept := all[:2]
+	if err := fimCommitStagedBaseline(kept); err != nil {
+		t.Fatal(err)
+	}
+	fimClearStagedBaseline()
+
+	opts.MaxChanges = 100
+	again, _ := collectFIMChanges(opts)
+	byPath := changeByPath(again)
+	keptSet := changeByPath(kept)
+	var missing []string
+	for i := 0; i < 6; i++ {
+		p := fimNormPath(filepath.Join(root, "t"+strconv.Itoa(i)+".txt"))
+		if keptSet[p].Path != "" {
+			if _, ok := byPath[p]; ok {
+				t.Fatalf("已发出的 %s 不应再报：%+v", p, again)
+			}
+			continue
+		}
+		if c, ok := byPath[p]; !ok || c.Change != "modified" {
+			missing = append(missing, p)
+		}
+	}
+	if len(missing) > 0 {
+		t.Fatalf("传输裁剪后未发出的修改应从基线保留到下一轮，缺失：%v（again=%+v）", missing, again)
+	}
+}
+
