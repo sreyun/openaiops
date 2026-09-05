@@ -804,10 +804,12 @@ func (m *forwardManager) toggleRule(id string, enable bool) (*forwardRule, error
 // updateRule modifies host_id, hostname, target_port and local_port of an existing rule.
 // When hostID is non-empty, both hostID and hostname are updated so the rule points to
 // the correct host after editing. When hostID is empty, host fields are left unchanged.
+// setRemoteTarget must be true to change jump mode; omitting the field must not clear
+// an existing remoteTarget (the classic edit UI only sends host/ports/whitelist).
 // v5.4.1: when localPort changes, the old listener is closed and the new port is
 // reflected in listenAddr. The caller must re-create the listener and restart
 // serveForwardListener.
-func (m *forwardManager) updateRule(id, hostID, hostname string, targetPort, localPort int, remoteTarget string) (*forwardRule, error) {
+func (m *forwardManager) updateRule(id, hostID, hostname string, targetPort, localPort int, remoteTarget string, setRemoteTarget bool) (*forwardRule, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	r, ok := m.rules[id]
@@ -821,8 +823,7 @@ func (m *forwardManager) updateRule(id, hostID, hostname string, targetPort, loc
 	if targetPort > 0 {
 		r.targetPort = targetPort
 	}
-	// Update remote target (jump mode)
-	if remoteTarget != "" || r.remoteTarget != "" {
+	if setRemoteTarget {
 		r.remoteTarget = remoteTarget
 	}
 	// v5.4.1: rebind listener when localPort changes

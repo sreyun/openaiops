@@ -497,7 +497,7 @@ func (s *Server) handleForwardEdit(w http.ResponseWriter, r *http.Request) {
 		HostID           string   `json:"host_id"`
 		TargetPort       int      `json:"target_port"`
 		LocalPort        int      `json:"local_port"`
-		RemoteTarget     string   `json:"remote_target"` // 跳板目标
+		RemoteTarget     *string  `json:"remote_target"` // nil = leave unchanged; "" = clear jump
 		WhitelistEnabled *bool    `json:"whitelist_enabled"`
 		Whitelist        []string `json:"whitelist"`
 	}
@@ -522,7 +522,12 @@ func (s *Server) handleForwardEdit(w http.ResponseWriter, r *http.Request) {
 		}
 		hostname = s.hostLabelForID(req.HostID)
 	}
-	rule, err := s.forward.updateRule(id, req.HostID, hostname, req.TargetPort, req.LocalPort, req.RemoteTarget)
+	rt := ""
+	setRT := req.RemoteTarget != nil
+	if setRT {
+		rt = *req.RemoteTarget
+	}
+	rule, err := s.forward.updateRule(id, req.HostID, hostname, req.TargetPort, req.LocalPort, rt, setRT)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return
