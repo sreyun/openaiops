@@ -69,9 +69,6 @@ func (s *Server) createVMBackup(operator, note string) (BackupMeta, error) {
 		days = 90
 	}
 	dir := backupDir(cfg)
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return BackupMeta{}, err
-	}
 	end := time.Now()
 	start := end.AddDate(0, 0, -days)
 	u := strings.TrimRight(base, "/") + "/api/v1/export/native" +
@@ -93,10 +90,13 @@ func (s *Server) createVMBackup(operator, note string) (BackupMeta, error) {
 		return BackupMeta{}, fmt.Errorf("导出 VictoriaMetrics 返回 %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
-	id := fmt.Sprintf("%s%s.native.gz", backupPrefixVM, end.Format("20060102-150405"))
-	path := filepath.Join(dir, id)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	id, path, err := reserveBackupArtifact(dir, backupPrefixVM, ".native.gz")
 	if err != nil {
+		return BackupMeta{}, err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		_ = os.Remove(path)
 		return BackupMeta{}, err
 	}
 	gz := gzip.NewWriter(f)
@@ -124,9 +124,6 @@ func (s *Server) createVMBackup(operator, note string) (BackupMeta, error) {
 func (s *Server) createRecordingsBackup(operator, note string) (BackupMeta, error) {
 	cfg := s.cfg.BackupCfg()
 	dir := backupDir(cfg)
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return BackupMeta{}, err
-	}
 	srcs := map[string]string{}
 	if s.term != nil && strings.TrimSpace(s.term.recDir) != "" {
 		srcs["terminal"] = s.term.recDir
@@ -138,10 +135,13 @@ func (s *Server) createRecordingsBackup(operator, note string) (BackupMeta, erro
 		return BackupMeta{}, fmt.Errorf("未配置录像目录，无需备份")
 	}
 
-	id := fmt.Sprintf("%s%s.tar.gz", backupPrefixRec, time.Now().Format("20060102-150405"))
-	path := filepath.Join(dir, id)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	id, path, err := reserveBackupArtifact(dir, backupPrefixRec, ".tar.gz")
 	if err != nil {
+		return BackupMeta{}, err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		_ = os.Remove(path)
 		return BackupMeta{}, err
 	}
 	gz := gzip.NewWriter(f)

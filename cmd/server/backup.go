@@ -158,6 +158,50 @@ func backupDir(cfg BackupConfig) string {
 	return filepath.Join(".", "backups")
 }
 
+// backupCreateMu serializes stamp allocation + O_EXCL reservation only (not the
+// long-running dump/export). Without unique stamps, a manual click colliding with
+// the daily scheduler in the same wall-clock second shared one second-precision
+// filename, and O_TRUNC / pg_dump --file silently destroyed the other writer's
+// artifact while both returned success.
+var (
+	backupCreateMu sync.Mutex
+	backupStampSeq uint32
+)
+
+// uniqueBackupStamp returns a filesystem-safe stamp that stays unique under concurrent
+// callers even when wall-clock seconds collide. Format: YYYYMMDD-HHMMSS-<seq6>.
+// Caller must hold backupCreateMu.
+func uniqueBackupStamp() string {
+	n := backupStampSeq
+	backupStampSeq++
+	now := time.Now()
+	return fmt.Sprintf("%s-%06d", now.Format("20060102-150405"), (uint32(now.Nanosecond()/1000)+n)%1000000)
+}
+
+// reserveBackupArtifact creates an exclusive empty file under dir named
+// prefix+stamp+suffix and returns (id, path). Holds the mutex only for the
+// reservation so concurrent PG/VM/recordings backups can run in parallel safely.
+func reserveBackupArtifact(dir, prefix, suffix string) (id, path string, err error) {
+	backupCreateMu.Lock()
+	defer backupCreateMu.Unlock()
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return "", "", err
+	}
+	for attempt := 0; attempt < 8; attempt++ {
+		id = prefix + uniqueBackupStamp() + suffix
+		path = filepath.Join(dir, id)
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err == nil {
+			_ = f.Close()
+			return id, path, nil
+		}
+		if !os.IsExist(err) {
+			return "", "", err
+		}
+	}
+	return "", "", fmt.Errorf("预占备份文件失败: exhausted unique names")
+}
+
 // pgToolStatus probes one PostgreSQL client tool (pg_dump / pg_restore) so the
 // UI can surface availability before the user triggers a backup/restore.
 func pgToolStatus(tool string) map[string]any {
@@ -265,14 +309,14 @@ func (s *Server) createPGBackup(operator, note string) (BackupMeta, error) {
 		return BackupMeta{}, fmt.Errorf("%s（备份目录：%s）", pgToolMissingHint("pg_dump"), backupDir(cfg))
 	}
 	dir := backupDir(cfg)
-	if err := os.MkdirAll(dir, 0o750); err != nil {
+	id, path, err := reserveBackupArtifact(dir, backupPrefixPG, ".dump")
+	if err != nil {
 		return BackupMeta{}, err
 	}
-	id := fmt.Sprintf("aiops-pg-%s.dump", time.Now().Format("20060102-150405"))
-	path := filepath.Join(dir, id)
 	cmd := exec.Command("pg_dump", "--format=custom", "--file", path, dsn)
 	cmd.Env = os.Environ()
 	if out, err := cmd.CombinedOutput(); err != nil {
+		_ = os.Remove(path)
 		return BackupMeta{}, fmt.Errorf("pg_dump 失败: %v (%s)", err, truncateRunes(string(out), 400))
 	}
 	sum, size, err := fileSHA256(path)
