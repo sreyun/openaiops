@@ -704,13 +704,16 @@ func stringifySQLVal(v any) any {
 }
 
 // mysqlQueryReadOnly runs a single SELECT/WITH for datasource / dashboard panels.
+//
+// Same StrictReadOnly gate as the SQL workbench — ForbiddenWrite alone misses
+// mutating keywords glued after "(" inside CTEs / subqueries.
 func mysqlQueryReadOnly(c MySQLConnection, sqlText string, limit int) ([]string, []map[string]any, error) {
 	sqlText = strings.TrimSpace(sqlText)
 	if sqlText == "" {
 		return nil, nil, fmt.Errorf("sql required")
 	}
-	if !sqltoolkit.IsReadOnlyQuery(sqlText) || sqltoolkit.ForbiddenWrite(sqlText) {
-		return nil, nil, fmt.Errorf("仅允许单条只读 SELECT/WITH")
+	if reason := sqltoolkit.StrictReadOnlyMySQL(sqlText); reason != "" {
+		return nil, nil, fmt.Errorf("仅允许只读查询：%s", reason)
 	}
 	kw := sqltoolkit.FirstKeyword(sqlText)
 	if kw != "select" && kw != "with" && kw != "show" && kw != "desc" && kw != "describe" {

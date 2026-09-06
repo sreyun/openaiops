@@ -404,16 +404,17 @@ func pgKillSession(c MySQLConnection, pid int64) error {
 }
 
 // pgQueryReadOnly runs a single SELECT/WITH/VALUES and returns columns + row maps.
+//
+// Guard must match the SQL workbench (prepareSQLRead): ForbiddenWrite alone misses
+// DML embedded after "(" in a CTE (e.g. WITH x AS (DELETE FROM t RETURNING *) …),
+// which PostgreSQL will still execute when the outer SELECT runs.
 func pgQueryReadOnly(c MySQLConnection, sqlText string, limit int) (cols []string, rows []map[string]any, err error) {
 	sqlText = strings.TrimSpace(sqlText)
 	if sqlText == "" {
 		return nil, nil, fmt.Errorf("sql required")
 	}
-	if !sqltoolkit.IsReadOnlyQuery(sqlText) {
-		return nil, nil, fmt.Errorf("仅允许单条只读 SELECT/WITH")
-	}
-	if sqltoolkit.ForbiddenWrite(sqlText) {
-		return nil, nil, fmt.Errorf("禁止写操作")
+	if reason := sqltoolkit.StrictReadOnlyPostgres(sqlText); reason != "" {
+		return nil, nil, fmt.Errorf("仅允许只读查询：%s", reason)
 	}
 	kw := sqltoolkit.FirstKeyword(sqlText)
 	if kw != "select" && kw != "with" && kw != "values" && kw != "show" && kw != "table" {
