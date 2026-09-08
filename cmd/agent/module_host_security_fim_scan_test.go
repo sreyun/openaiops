@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -214,6 +215,38 @@ func TestFimBaselineRoundTrip(t *testing.T) {
 	}
 	if _, ok := fimLoadBaseline(filepath.Join(dir, "missing.gz")); ok {
 		t.Fatal("missing baseline must report not-found")
+	}
+}
+
+// Concurrent baseline saves must not share a fixed "*.tmp" path — two writers
+// truncating the same temp produce a corrupt gzip that the next load treats as
+// "no baseline" (silent re-seed, permanent loss of real deltas).
+func TestFimBaselineConcurrentSavesRemainLoadable(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "b.gz")
+	var wg sync.WaitGroup
+	errCh := make(chan error, 8)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			in := map[string]fimEntry{
+				"/a": {Size: int64(n), Mtime: int64(n), Mode: "0644"},
+				"/b": {Size: int64(n + 1), Mtime: int64(n + 1), Mode: "0644"},
+			}
+			if err := fimSaveBaseline(p, in); err != nil {
+				errCh <- err
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatalf("concurrent save: %v", err)
+	}
+	out, ok := fimLoadBaseline(p)
+	if !ok || len(out) != 2 {
+		t.Fatalf("post-concurrent baseline unreadable ok=%v n=%d (corrupt tmp race)", ok, len(out))
 	}
 }
 

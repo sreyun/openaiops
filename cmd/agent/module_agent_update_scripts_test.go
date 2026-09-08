@@ -178,6 +178,7 @@ func TestBuildLinuxAgentRestartScript(t *testing.T) {
 		"/var/log/aiops-agent-update.log",
 		"--install-service",
 		"wait_alive",
+		"aiops-relay", // unlock + unit_file_exists must know the gateway unit
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("linux restart script missing %q", want)
@@ -189,6 +190,40 @@ func TestBuildLinuxAgentRestartScript(t *testing.T) {
 	}
 	if !strings.Contains(script, "EXE='/opt/aiops-agent/aiops-agent'") {
 		t.Fatalf("linux restart script did not shell-quote EXE:\n%s", script)
+	}
+}
+
+// Dual-unit hosts (aiops-agent + aiops-relay, same process name) must not treat a
+// sibling unit/process as proof that *this* upgrade came back — that skips
+// rollback while the swapped unit stays dead (relay down → fleet-wide 502).
+func TestLinuxRestartScriptDoesNotTreatSiblingUnitAsAlive(t *testing.T) {
+	script := buildLinuxAgentRestartScript("/opt/aiops-agent/aiops-agent", "/opt/aiops-agent",
+		"/opt/aiops-agent/config.yaml", "aiops-relay")
+	if !strings.Contains(script, `systemctl is-active --quiet "$UNIT"`) {
+		t.Fatal("agent_alive must probe only $UNIT, not a sibling unit list")
+	}
+	// Pin the live-ness helpers: they used to fall through
+	// `for u in "$UNIT" aiops-agent …; systemctl restart/is-active` and treat a
+	// sibling coming up as our own success. unit_file_exists may still list
+	// known names (install detection) — that is fine.
+	startIdx := strings.Index(script, "start_units() {")
+	aliveIdx := strings.Index(script, "agent_alive() {")
+	if startIdx < 0 || aliveIdx < 0 {
+		t.Fatal("missing start_units/agent_alive")
+	}
+	startBody := script[startIdx:startIdx+400]
+	aliveBody := script[aliveIdx:aliveIdx+350]
+	if strings.Contains(startBody, `for u in`) {
+		t.Fatal("start_units must not iterate sibling units")
+	}
+	if !strings.Contains(startBody, `systemctl restart "$UNIT"`) {
+		t.Fatal("start_units must restart only $UNIT")
+	}
+	if strings.Contains(aliveBody, `for u in`) {
+		t.Fatal("agent_alive must not iterate sibling units")
+	}
+	if !strings.Contains(script, `grep -q "[/-]${UNIT}\.service"`) {
+		t.Fatal("agent_proc_alive must require the process to belong to $UNIT's cgroup")
 	}
 }
 
