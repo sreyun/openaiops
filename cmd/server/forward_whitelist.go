@@ -8,6 +8,33 @@ import (
 
 const forwardWhitelistMaxEntries = 64
 
+// forwardListenNeedsWhitelist reports whether a bind host exposes a raw TCP/UDP
+// tunnel beyond loopback and therefore must keep an explicit source-IP allowlist.
+//
+// createRule already enforces this at create time. updateRuleWhitelist must
+// enforce the same rule: otherwise an operator creates a Docker 0.0.0.0 forward
+// with a whitelist, then unchecks the box in the edit modal and silently opens
+// the tunnel to every client that can reach the port.
+func forwardListenNeedsWhitelist(listenHost string) bool {
+	h := strings.TrimSpace(strings.Trim(listenHost, "[]"))
+	if h == "" {
+		return false
+	}
+	return h != "127.0.0.1" && !strings.EqualFold(h, "localhost") && h != "::1"
+}
+
+// ruleListenHost extracts the host part of a rule's listenAddr (host:port).
+func ruleListenHost(r *forwardRule) string {
+	if r == nil {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(r.listenAddr)
+	if err != nil {
+		return r.listenAddr
+	}
+	return host
+}
+
 // wlSnap is an immutable snapshot of a rule's source-IP whitelist for hot reads.
 type wlSnap struct {
 	enabled bool

@@ -2,8 +2,75 @@ package main
 
 import (
 	"net"
+	"path/filepath"
 	"testing"
 )
+
+func TestForwardListenNeedsWhitelist(t *testing.T) {
+	cases := []struct {
+		host string
+		want bool
+	}{
+		{"127.0.0.1", false},
+		{"localhost", false},
+		{"LOCALHOST", false},
+		{"::1", false},
+		{"[::1]", false},
+		{"0.0.0.0", true},
+		{"192.168.1.10", true},
+		{"", false},
+	}
+	for _, tc := range cases {
+		if got := forwardListenNeedsWhitelist(tc.host); got != tc.want {
+			t.Errorf("forwardListenNeedsWhitelist(%q)=%v want %v", tc.host, got, tc.want)
+		}
+	}
+}
+
+func TestUpdateRuleWhitelistCannotDisableOnPublicListen(t *testing.T) {
+	cfg, err := NewConfigStore(filepath.Join(t.TempDir(), "cfg.json"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newForwardManager(cfg)
+	r := &forwardRule{
+		id: "r1", hostID: "h1", hostname: "host",
+		targetPort: 3306, localPort: 13306,
+		listenAddr: "0.0.0.0:13306", enabled: true,
+	}
+	r.setWhitelist(true, []string{"10.0.0.1"})
+	m.mu.Lock()
+	m.rules[r.id] = r
+	m.mu.Unlock()
+
+	if _, err := m.updateRuleWhitelist("r1", false, nil); err == nil {
+		t.Fatal("expected error when disabling whitelist on 0.0.0.0 listener")
+	}
+	if _, err := m.updateRuleWhitelist("r1", true, nil); err == nil {
+		t.Fatal("expected error when enabling whitelist with empty list on 0.0.0.0")
+	}
+	if _, err := m.updateRuleWhitelist("r1", true, []string{"10.0.0.2"}); err != nil {
+		t.Fatalf("replacing whitelist entries should succeed: %v", err)
+	}
+	on, list, _ := r.whitelistSnapshot()
+	if !on || len(list) != 1 || list[0] != "10.0.0.2" {
+		t.Fatalf("whitelist not updated: on=%v list=%v", on, list)
+	}
+
+	// Loopback may disable whitelist.
+	r2 := &forwardRule{
+		id: "r2", hostID: "h1", hostname: "host",
+		targetPort: 3306, localPort: 13307,
+		listenAddr: "127.0.0.1:13307", enabled: true,
+	}
+	r2.setWhitelist(true, []string{"10.0.0.1"})
+	m.mu.Lock()
+	m.rules[r2.id] = r2
+	m.mu.Unlock()
+	if _, err := m.updateRuleWhitelist("r2", false, nil); err != nil {
+		t.Fatalf("loopback may disable whitelist: %v", err)
+	}
+}
 
 func TestNormalizeWhitelist(t *testing.T) {
 	// disabled: empty OK

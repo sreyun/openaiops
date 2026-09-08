@@ -451,6 +451,13 @@ func (s *Server) handleForwardToggle(w http.ResponseWriter, r *http.Request) {
 	// v5.4.1: re-create the listener when re-enabling a rule that was stopped.
 	// 按协议重建：UDP 用 ListenPacket + serveForwardUDP，TCP 用 Listen + serveForwardListener。
 	if req.Enabled && rule.listener == nil && rule.packetConn == nil {
+		if err := ruleWhitelistOKForListen(rule); err != nil {
+			// Roll the toggle back so we do not leave "enabled" without a listener
+			// after rejecting an unauthenticated public bind.
+			_, _ = s.forward.toggleRule(id, false)
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
 		if rule.protocol == "udp" {
 			pc, lnErr := net.ListenPacket("udp", rule.listenAddr)
 			if lnErr != nil {
@@ -541,11 +548,20 @@ func (s *Server) handleForwardEdit(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": wlErr.Error()})
 			return
 		}
-		rule, _ = s.forward.updateRuleWhitelist(id, wlOn, wl)
+		updated, wlUpdErr := s.forward.updateRuleWhitelist(id, wlOn, wl)
+		if wlUpdErr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": wlUpdErr.Error()})
+			return
+		}
+		rule = updated
 	}
 	// v5.4.1: when localPort changed, the old listener was closed — rebind
 	// v5.5.76: handle both TCP and UDP re-listen after edit
 	if rule.enabled {
+		if err := ruleWhitelistOKForListen(rule); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
 		if rule.protocol == "udp" {
 			if rule.packetConn == nil {
 				pc, lnErr := net.ListenPacket("udp", rule.listenAddr)
