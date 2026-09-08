@@ -66,11 +66,26 @@ func fimSaveScanState(st fimScanState) {
 	if err != nil {
 		return
 	}
-	tmp := fimScanStatePath() + ".tmp"
-	if os.WriteFile(tmp, raw, 0o600) != nil {
+	// Unique temp (see fimSaveBaseline): concurrent scans must not truncate the
+	// same *.tmp while the other still writes.
+	f, err := os.CreateTemp(fimDataDir(), "fim_cursor-*.tmp")
+	if err != nil {
 		return
 	}
-	_ = os.Rename(tmp, fimScanStatePath())
+	tmp := f.Name()
+	_, werr := f.Write(raw)
+	cerr := f.Close()
+	if werr != nil || cerr != nil {
+		_ = os.Remove(tmp)
+		return
+	}
+	if err := os.Chmod(tmp, 0o600); err != nil {
+		_ = os.Remove(tmp)
+		return
+	}
+	if err := os.Rename(tmp, fimScanStatePath()); err != nil {
+		_ = os.Remove(tmp)
+	}
 }
 
 // fimPriorityRoots 是"人会动、且安全上最该看"的目录，排在整盘之前先扫。

@@ -603,7 +603,8 @@ func (m *forwardManager) createRule(hostID, hostname string, targetPort, localPo
 	}
 	// Non-loopback bind exposes a raw TCP/UDP tunnel with no session auth on accept.
 	// Require an explicit source-IP whitelist so operators cannot accidentally open 0.0.0.0.
-	if listenHost != "" && listenHost != "127.0.0.1" && listenHost != "localhost" && listenHost != "::1" {
+	// Must stay in lockstep with updateRuleWhitelist — edit used to strip this gate.
+	if forwardListenNeedsWhitelist(listenHost) {
 		if !wlEnabled || len(wl) == 0 {
 			return nil, fmt.Errorf("非本机监听地址 %s 必须启用源 IP 白名单（whitelist_enabled + whitelist）", listenHost)
 		}
@@ -656,7 +657,7 @@ func (m *forwardManager) createRule(hostID, hostname string, targetPort, localPo
 	// 安全提示：绑定到非回环地址（如 Docker 部署常用的 0.0.0.0）时，任何能访问该端口的
 	// 客户端都可经隧道直达目标主机 localhost 的内网服务（Redis/MySQL/SSH）。转发是裸 TCP
 	// 隧道、无法对任意 TCP 客户端做票据握手，故此暴露必须靠防火墙/网络隔离控制——这里显式告警。
-	if listenHost != "127.0.0.1" && listenHost != "localhost" && listenHost != "::1" {
+	if forwardListenNeedsWhitelist(listenHost) {
 		slog.Warn("端口转发监听在非回环地址，暴露面较大：请确保有防火墙/网络隔离限制来源", "addr", actualAddr, "host", hostname, "operator", operator)
 	}
 	now := time.Now().Unix()
@@ -846,13 +847,35 @@ func (m *forwardManager) updateRule(id, hostID, hostname string, targetPort, loc
 	return r, nil
 }
 
+// ruleWhitelistOKForListen returns an error when a non-loopback rule would accept
+// connections without a source-IP allowlist. Shared by edit / toggle / restore.
+func ruleWhitelistOKForListen(r *forwardRule) error {
+	if r == nil || !forwardListenNeedsWhitelist(ruleListenHost(r)) {
+		return nil
+	}
+	on, list, _ := r.whitelistSnapshot()
+	if !on || len(list) == 0 {
+		return fmt.Errorf("非本机监听地址 %s 必须启用源 IP 白名单（whitelist_enabled + whitelist）", ruleListenHost(r))
+	}
+	return nil
+}
+
 // updateRuleWhitelist hot-updates the source IP whitelist without rebinding the listener.
+//
+// Non-loopback listeners (Docker's AIOPS_FORWARD_LISTEN=0.0.0.0) cannot drop the
+// allowlist: accept() has no session auth, so disabling whitelist_enabled is
+// equivalent to publishing an unauthenticated tunnel into the agent host.
 func (m *forwardManager) updateRuleWhitelist(id string, enabled bool, list []string) (*forwardRule, error) {
 	m.mu.Lock()
 	r, ok := m.rules[id]
 	if !ok {
 		m.mu.Unlock()
 		return nil, fmt.Errorf("rule not found")
+	}
+	if forwardListenNeedsWhitelist(ruleListenHost(r)) && (!enabled || len(list) == 0) {
+		host := ruleListenHost(r)
+		m.mu.Unlock()
+		return nil, fmt.Errorf("非本机监听地址 %s 必须启用源 IP 白名单（whitelist_enabled + whitelist）", host)
 	}
 	r.setWhitelist(enabled, list)
 	m.mu.Unlock()
@@ -915,6 +938,34 @@ func (m *forwardManager) restoreRules(srv *Server) {
 		} else {
 			actualPort = ln.Addr().(*net.TCPAddr).Port
 			actualAddr = ln.Addr().String()
+		}
+		// Refuse to bring up an unauthenticated non-loopback tunnel that was
+		// persisted after a prior whitelist-disable edit (see updateRuleWhitelist).
+		hostPart, _, _ := net.SplitHostPort(actualAddr)
+		if hostPart == "" {
+			hostPart, _, _ = net.SplitHostPort(pr.ListenAddr)
+		}
+		if forwardListenNeedsWhitelist(hostPart) && (!pr.WhitelistEnabled || len(pr.Whitelist) == 0) {
+			if ln != nil {
+				_ = ln.Close()
+			}
+			if pc != nil {
+				_ = pc.Close()
+			}
+			slog.Error("转发规则监听非本机地址但无源 IP 白名单，拒绝恢复监听",
+				"id", pr.ID, "addr", actualAddr, "hint", "请编辑该规则启用 whitelist 后再启用")
+			dr := &forwardRule{
+				id: pr.ID, hostID: pr.HostID, hostname: pr.Hostname,
+				targetPort: pr.TargetPort, localPort: actualPort,
+				listenAddr: actualAddr, operator: pr.Operator,
+				createdAt: pr.CreatedAt, enabled: false, protocol: proto, groupID: pr.GroupID,
+				remoteTarget: pr.RemoteTarget,
+			}
+			dr.setWhitelist(pr.WhitelistEnabled, pr.Whitelist)
+			m.mu.Lock()
+			m.rules[pr.ID] = dr
+			m.mu.Unlock()
+			continue
 		}
 		r := &forwardRule{
 			id: pr.ID, hostID: pr.HostID, hostname: pr.Hostname,

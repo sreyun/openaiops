@@ -575,11 +575,15 @@ func fimSaveBaseline(path string, cur map[string]fimEntry) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	// Unique temp name: a fixed path+".tmp" races when two host_security_scan
+	// exec sessions (multi-server / overlapping playbooks) save at once —
+	// interleaved gzip bytes then load as "no baseline" and silently re-seed,
+	// absorbing every real change that happened since the last good save.
+	f, err := os.CreateTemp(filepath.Dir(path), "fim_baseline-*.tmp")
 	if err != nil {
 		return err
 	}
+	tmp := f.Name()
 	zw := gzip.NewWriter(f)
 	bw := bufio.NewWriterSize(zw, 256<<10)
 	writeErr := func() error {
@@ -618,9 +622,14 @@ func fimModeString(m fs.FileMode) string {
 	return fmt.Sprintf("%04o", uint32(m.Perm()))
 }
 
-// collectFIMChanges walks every in-scope directory, diffs against the local
-// baseline and returns metadata-only changes plus content diffs for whitelisted
-// paths. The baseline is rewritten so the next scan reports only new deltas.
+// fimScanMu serializes full-scope FIM walks that mutate the on-disk baseline and
+// resume cursor. Multi-server agents run one exec channel per panel; two
+// host_security_scan jobs overlapping on the same host corrupt those files
+// (shared "*.tmp" path) or last-writer-win away each other's merges — the next
+// load then treats a corrupt/partial file as "no baseline" and silently
+// re-seeds, permanently absorbing real adds/modifies/deletes.
+var fimScanMu sync.Mutex
+
 // fimWalkOutcome 是一个卷（一组根）走完之后的产物。
 // 每个卷各走各的，最后统一并起来——并发只发生在卷之间，卷内仍是顺序遍历
 // （"要害目录优先 + 同一棵子树不重复走"这套去重依赖顺序）。
@@ -766,6 +775,8 @@ func fimWalkVolume(group []string, opts fimOptions, excl *fimExcluder, patterns 
 }
 
 func collectFIMChanges(opts fimOptions) ([]hostSecFileChange, hostSecFIMStats) {
+	fimScanMu.Lock()
+	defer fimScanMu.Unlock()
 	start := time.Now()
 	stats := hostSecFIMStats{Mode: "full"}
 

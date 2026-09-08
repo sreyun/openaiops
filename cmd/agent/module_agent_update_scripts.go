@@ -57,6 +57,11 @@ ulog() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG" 2>/dev/null || true;
 // 进程，它的清理逻辑（stopWorker）根本来不及跑，于是 worker 会残留。裸 `pgrep -x
 // aiops-agent` 会把这个残留当成"agent 活着"，让看门狗误判升级成功并跳过回滚——
 // 新二进制起不来的机器就这样静默变砖。必须按命令行把 worker 排除掉。
+//
+// 第二关：网关机可以同时装着 aiops-agent 与 aiops-relay（两个 unit、同一个
+// 进程名 `aiops-agent`）。升级其中一个时，另一个仍在跑——若把兄弟进程当成
+// "换版成功"，看门狗会跳过回滚，被换的那个 unit 就永久停在失败状态（中继挂了
+// 则整网内网 Agent 全 502）。UNIT 有值时要求进程落在该 unit 的 cgroup 里。
 const agentProcAliveSh = `
 agent_proc_alive() {
   for p in $(pgrep -x aiops-agent 2>/dev/null) $(pgrep -f '[/]aiops-agent( |$)' 2>/dev/null); do
@@ -64,6 +69,9 @@ agent_proc_alive() {
       *--desktop-worker*) continue ;;
       "") continue ;;
     esac
+    if [ -n "${UNIT:-}" ] && [ -r "/proc/$p/cgroup" ]; then
+      grep -q "[/-]${UNIT}\.service" "/proc/$p/cgroup" 2>/dev/null || continue
+    fi
     return 0
   done
   return 1
@@ -101,7 +109,9 @@ host_run() {
 
 # Shared body: unlock units (must execute inside host mount ns).
 # 只改写单元文件，绝不 stop —— stop 会连助手一起杀掉（见 cgroupEscapeSh 注释）。
-UNLOCK_SH='for u in aiops-agent aiops-monitor-agent; do
+# 必须包含 aiops-relay：网关 unit 同样可能带着 ProtectSystem，漏解锁则 rename/
+# restart 在只读挂载里失败，而下面的兄弟 unit 探测又会把失败掩盖成"成功"。
+UNLOCK_SH='for u in aiops-agent aiops-monitor-agent aiops-relay; do
   for base in /etc/systemd/system /run/systemd/system /lib/systemd/system /usr/lib/systemd/system; do
     rm -rf "$base/${u}.service.d" 2>/dev/null || true
   done
@@ -135,17 +145,19 @@ systemctl daemon-reload 2>/dev/null || true'
 
 unit_file_exists() {
   for base in /etc/systemd/system /run/systemd/system /lib/systemd/system /usr/lib/systemd/system; do
-    for u in "$UNIT" aiops-agent aiops-monitor-agent; do
+    for u in "$UNIT" aiops-agent aiops-monitor-agent aiops-relay; do
       [ -f "$base/${u}.service" ] && return 0
     done
   done
   return 1
 }
 
+# 只认我们正在换版的那个 unit。aiops-agent 与 aiops-relay 常共机，把兄弟
+# unit 的 is-active 当成成功会跳过回滚，被换的服务永久停死。
 agent_alive() {
-  for u in "$UNIT" aiops-agent aiops-monitor-agent; do
-    systemctl is-active --quiet "$u" 2>/dev/null && return 0
-  done
+  if [ -n "$UNIT" ] && systemctl is-active --quiet "$UNIT" 2>/dev/null; then
+    return 0
+  fi
   agent_proc_alive
 }
 
@@ -164,14 +176,14 @@ wait_alive() {
   return 1
 }
 
+# 只 restart 目标 unit。以前的回落链（relay 失败 → restart aiops-agent）会在
+# 双 unit 主机上把"兄弟起来了"当成换版成功，网关死透却 exit 0。
 start_units() {
   systemctl daemon-reload 2>/dev/null || true
-  for u in "$UNIT" aiops-agent aiops-monitor-agent; do
-    if systemctl restart "$u" 2>/dev/null; then
-      return 0
-    fi
-  done
-  return 1
+  if [ -z "$UNIT" ]; then
+    return 1
+  fi
+  systemctl restart "$UNIT" 2>/dev/null
 }
 
 ulog "update helper start: exe=$EXE unit=$UNIT cfg=$CFG"
