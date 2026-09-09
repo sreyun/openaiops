@@ -518,7 +518,7 @@ func (s *Server) handleApprovePlaybookExecution(w http.ResponseWriter, r *http.R
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid id"})
 		return
 	}
-	exec, ok := s.playbooks.GetExecution(id)
+	exec, ok := s.resolvePlaybookExecution(id)
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "execution not found"})
 		return
@@ -563,7 +563,7 @@ func (s *Server) handleRejectPlaybookExecution(w http.ResponseWriter, r *http.Re
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid id"})
 		return
 	}
-	exec, ok := s.playbooks.GetExecution(id)
+	exec, ok := s.resolvePlaybookExecution(id)
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "execution not found"})
 		return
@@ -1030,4 +1030,26 @@ func (s *Server) persistPlaybookExecution(id int64) {
 	if e, ok := s.playbooks.GetExecution(id); ok {
 		s.pg.upsertPlaybookExecution(e)
 	}
+}
+
+// resolvePlaybookExecution loads an execution by ID from memory, falling back to
+// PG and re-hydrating the in-memory ring when the soft-capped history dropped it.
+// Mutating paths (approve / reject / cancel) must use this — GetExecution alone
+// 404s on a PG-visible pending_approval and leaves schedBusy stuck forever.
+func (s *Server) resolvePlaybookExecution(id int64) (PlaybookExecution, bool) {
+	if s == nil || s.playbooks == nil {
+		return PlaybookExecution{}, false
+	}
+	if exec, ok := s.playbooks.GetExecution(id); ok {
+		return exec, true
+	}
+	if s.pg == nil {
+		return PlaybookExecution{}, false
+	}
+	e, found := s.pg.getPlaybookExecution(id)
+	if !found {
+		return PlaybookExecution{}, false
+	}
+	s.playbooks.ensureExecution(e)
+	return s.playbooks.GetExecution(id)
 }
