@@ -257,7 +257,7 @@ exit 1
 // buildDarwinAgentRestartScript returns the detached helper that kickstarts the
 // launchd job and rolls back to .bak if the agent stays down.
 func buildDarwinAgentRestartScript(exe, dir, cfgPath string) string {
-	return fmt.Sprintf(`%s%s%s
+	return fmt.Sprintf(`%s%s
 sleep 2
 EXE=%s
 DIR=%s
@@ -266,15 +266,36 @@ BAK="$EXE.bak"
 xattr -dr com.apple.quarantine "$EXE" 2>/dev/null || true
 RESTARTED=0
 
-# launchd job state is authoritative; the process scan is only a fallback for
-# plain (non-launchd) installs and already excludes the GUI desktop worker.
+# launchd job state is authoritative only when the job's ProgramArguments name
+# *this* EXE. AGENT_LABELS covers both install.sh (com.aiops.agent) and
+# --install-service (com.aiops.monitor.agent), root LaunchDaemon and per-user
+# LaunchAgent — a machine can legitimately have more than one leftover label.
+# Treating "any label running" / bare pgrep as success is the Darwin cousin of
+# the Linux sibling-unit false success: swap path A, path B's old job stays up,
+# helper exits 0, .bak rollback is skipped, the updated install is bricked.
+label_owns_exe() {
+  label="$1"
+  out=$(launchctl print "$label" 2>/dev/null) || return 1
+  echo "$out" | grep -F "$EXE" >/dev/null 2>&1
+}
 agent_alive() {
   for label in $AGENT_LABELS; do
+    label_owns_exe "$label" || continue
     if launchctl print "$label" 2>/dev/null | grep -q "state = running"; then
       return 0
     fi
   done
-  agent_proc_alive
+  for p in $(pgrep -x aiops-agent 2>/dev/null) $(pgrep -f '[/]aiops-agent( |$)' 2>/dev/null); do
+    args=$(ps -o args= -p "$p" 2>/dev/null)
+    case "$args" in
+      *--desktop-worker*) continue ;;
+      "") continue ;;
+    esac
+    case "$args" in
+      *"$EXE"*) return 0 ;;
+    esac
+  done
+  return 1
 }
 wait_alive() {
   waited=0
@@ -289,6 +310,16 @@ wait_alive() {
   return 1
 }
 kickstart() {
+  kicked=0
+  for label in $AGENT_LABELS; do
+    label_owns_exe "$label" || continue
+    if launchctl kickstart -k "$label" 2>/dev/null; then
+      kicked=1
+    fi
+  done
+  [ "$kicked" -eq 1 ] && return 0
+  # No label advertised our EXE (plist not loaded / print failed) — fall back
+  # to kicking every known label so first-time and odd installs still recover.
   for label in $AGENT_LABELS; do
     launchctl kickstart -k "$label" 2>/dev/null && return 0
   done
@@ -310,7 +341,11 @@ if [ "$RESTARTED" -eq 0 ]; then
       [ -f "$c" ] && CFG="$c" && break
     done
   fi
-  pkill -x aiops-agent 2>/dev/null || true
+  for p in $(pgrep -x aiops-agent 2>/dev/null) $(pgrep -f '[/]aiops-agent( |$)' 2>/dev/null); do
+    case "$(ps -o args= -p "$p" 2>/dev/null)" in
+      *"$EXE"*) kill "$p" 2>/dev/null || true ;;
+    esac
+  done
   sleep 1
   if [ -n "$CFG" ]; then
     nohup "$EXE" --config "$CFG" >/dev/null 2>&1 &
@@ -330,7 +365,11 @@ if [ -f "$BAK" ]; then
   cp -f "$BAK" "$EXE" 2>/dev/null || true
   chmod +x "$EXE" 2>/dev/null || true
   kickstart || {
-    pkill -x aiops-agent 2>/dev/null || true
+    for p in $(pgrep -x aiops-agent 2>/dev/null) $(pgrep -f '[/]aiops-agent( |$)' 2>/dev/null); do
+      case "$(ps -o args= -p "$p" 2>/dev/null)" in
+        *"$EXE"*) kill "$p" 2>/dev/null || true ;;
+      esac
+    done
     sleep 1
     if [ -n "$CFG" ]; then
       nohup "$EXE" --config "$CFG" >/dev/null 2>&1 &
@@ -346,7 +385,7 @@ if [ -f "$BAK" ]; then
 fi
 echo "agent restart failed" >&2
 exit 1
-`, agentUpdateLogSh, darwinAgentLabelsSh, agentProcAliveSh,
+`, agentUpdateLogSh, darwinAgentLabelsSh,
 		shellQuote(exe), shellQuote(dir), shellQuote(cfgPath))
 }
 
@@ -506,15 +545,30 @@ function Test-AgentRunning {
   if ($all.Count -eq 0) {
     # CIM unavailable (hardened / legacy hosts, often the same ones that wrap
     # process creation). Command lines are unreadable here, so a leftover
-    # --desktop-worker is indistinguishable from a real agent. Session id still
-    # is: a service daemon lives in session 0, a desktop worker is spawned into
-    # the interactive session. Prefer that evidence, and record when the answer
-    # had to be a guess -- silently trusting it is how a stopped service passed
-    # for a healthy agent.
+    # --desktop-worker is indistinguishable from a real agent by name alone.
+    # Session id still is: a service daemon lives in session 0, a desktop
+    # worker is spawned into the interactive session.
     $svc0 = $procs | Where-Object { $_.Id -ne $helperPid -and $_.SessionId -eq 0 } | Select-Object -First 1
     if ($null -ne $svc0) { return $true }
-    Write-Log 'CIM unavailable and no session-0 agent process; running state is unverified'
-    return $true
+    $hasSvc = $false
+    foreach ($name in (Get-AgentServiceNames)) {
+      if (Get-Service -Name $name -ErrorAction SilentlyContinue) { $hasSvc = $true; break }
+    }
+    if ($hasSvc) {
+      # A registered Windows service install that is not Running and has no
+      # session-0 process is DOWN. Returning $true here (the old behaviour)
+      # let a leftover interactive --desktop-worker fake a healthy upgrade and
+      # suppress .bak rollback - the service stayed Stopped forever.
+      Write-Log 'CIM unavailable: service registered but no session-0 agent; treating as not running'
+      return $false
+    }
+    # Pure user-mode install: an interactive-session process is expected.
+    $any = $procs | Where-Object { $_.Id -ne $helperPid } | Select-Object -First 1
+    if ($null -ne $any) {
+      Write-Log 'CIM unavailable: user-mode install; accepting non-session-0 agent process'
+      return $true
+    }
+    return $false
   }
   $daemon = $all | Where-Object {
     $_.Name -match '^aiops-agent' -and $_.ProcessId -ne $helperPid -and

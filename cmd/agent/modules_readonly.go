@@ -251,8 +251,9 @@ func agentOwnSecretPath(norm string) bool {
 					return true
 				}
 			}
-			// 兜底：即使拿不到自身路径，默认安装目录也必须挡住。
-			if strings.Contains(norm, "/aiops-agent/") || strings.Contains(norm, "/.aiops-agent/") {
+			// 兜底：即使拿不到自身路径，凡路径里带 aiops 的安装目录也必须挡住
+			// （含 Windows 默认 "AIOps Agent"、自定义 AIOPS_DIR）。
+			if strings.Contains(norm, "aiops") {
 				return true
 			}
 		}

@@ -296,7 +296,7 @@ func (a *Agent) runExecSession(server, sid, command string) {
 	// CommandContext kills the local process. No kill scripts are pushed to the host.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	go a.watchExecSessionCancel(server, sid, cancel)
+	go a.watchExecSessionCancel(ctx, server, sid, cancel)
 
 	// 关键：先开 tx POST（用管道作为请求体），让请求头立刻到达服务端，从而服务端 tx 处理器的
 	// markAgentUp 立即触发（标记「已接单」）。此前本函数是「跑完命令才 POST」，服务端 Phase1
@@ -306,8 +306,9 @@ func (a *Agent) runExecSession(server, sid, command string) {
 	posted := make(chan struct{})
 	go func() {
 		defer close(posted)
-		req, err := http.NewRequest("POST", server+"/api/v1/agent/terminal/tx?session="+sid, pr)
+		req, err := http.NewRequestWithContext(ctx, "POST", server+"/api/v1/agent/terminal/tx?session="+sid, pr)
 		if err != nil {
+			_ = pr.Close()
 			return
 		}
 		req.Header.Set("Content-Type", "application/octet-stream")
@@ -338,22 +339,43 @@ func (a *Agent) runExecSession(server, sid, command string) {
 	body := append(out, []byte(fmt.Sprintf("\n[AIOPS_EXIT]%d\n", exit))...)
 	_, _ = pw.Write(body)
 	_ = pw.Close()
-	<-posted
+	// termHTTP has no client Timeout (interactive streams are long-lived). Bound
+	// the wait on the exec tx POST so a half-open proxy / dead peer cannot pin
+	// this goroutine — and its alive-poll sibling — forever after the command
+	// already finished.
+	select {
+	case <-posted:
+	case <-ctx.Done():
+		_ = pr.CloseWithError(ctx.Err())
+		select {
+		case <-posted:
+		case <-time.After(5 * time.Second):
+			slog.Warn("剧本命令 tx 上报在取消后仍未结束，放弃等待", "session", sid)
+		}
+	}
 }
 
 // watchExecSessionCancel polls session liveness; when the server cancelled/removed
 // the session, cancel the local command context so the process stops promptly.
-func (a *Agent) watchExecSessionCancel(server, sid string, cancel context.CancelFunc) {
+// ctx is required: without it, a streak of transport errors (ok=false) or a
+// session that never flips to Gone would loop the ticker forever after the
+// exec goroutine returned — one leaked poller per playbook step.
+func (a *Agent) watchExecSessionCancel(ctx context.Context, server, sid string, cancel context.CancelFunc) {
 	ticker := time.NewTicker(1500 * time.Millisecond)
 	defer ticker.Stop()
-	for range ticker.C {
-		alive, ok := a.termSessionAlive(server, sid)
-		if !ok {
-			continue // transient network — keep waiting
-		}
-		if !alive {
-			cancel()
+	for {
+		select {
+		case <-ctx.Done():
 			return
+		case <-ticker.C:
+			alive, ok := a.termSessionAlive(server, sid)
+			if !ok {
+				continue // transient network — keep waiting until ctx ends
+			}
+			if !alive {
+				cancel()
+				return
+			}
 		}
 	}
 }

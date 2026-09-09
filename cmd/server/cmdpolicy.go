@@ -42,8 +42,11 @@ func evaluateDiagCommand(command string) (bool, string) {
 	if cmdTrim == "" {
 		return false, "请指定诊断命令"
 	}
-	if strings.ContainsAny(cmdTrim, ";&$<>\n\r\\(){}`") {
-		return false, "诊断命令含被禁止的字符（; & $ < > ` 等），仅允许只读命令与管道过滤"
+	// Shell metacharacters + glob wildcards. Globs must be banned here: the command
+	// runs under /bin/sh -c on the agent, so cat /etc/shado* expands after our
+	// literal path denylist and would exfiltrate the real file.
+	if strings.ContainsAny(cmdTrim, ";&$<>\n\r\\(){}`*?[") {
+		return false, "诊断命令含被禁止的字符（; & $ < > ` * ? [ 等），仅允许只读命令与管道过滤"
 	}
 	allow := []string{
 		"top", "df", "iostat", "vmstat", "mpstat", "sar", "pidstat", "netstat", "ss", "free",
@@ -51,15 +54,6 @@ func evaluateDiagCommand(command string) (bool, string) {
 		"journalctl", "systemctl status", "docker ps", "docker logs", "docker stats",
 		"kubectl get", "kubectl describe", "wc", "sort", "uniq", "cut", "tr", "nl", "tac",
 		"column", "date", "hostname", "uname", "who", "w",
-	}
-	// 保留这份子串清单只为给出"命中了哪一条"的可读理由；真正的判定用
-	// deniedSensitivePath——它会先把路径规范化。少了规范化，cat /etc//shadow 与
-	// cat /etc/../etc/shadow 都能一路走过去：只读诊断通道读到 /etc/shadow，
-	// 比读不到更糟的是没人知道它读过。
-	deniedPaths := []string{
-		"/etc/shadow", "/etc/gshadow", "/etc/master.passwd",
-		".ssh/", ".gnupg/", ".aws/", ".kube/config",
-		"/etc/sudoers", "/root/.bash_history",
 	}
 	segOK := func(seg string) bool {
 		seg = strings.ToLower(strings.TrimSpace(seg))
@@ -74,25 +68,62 @@ func evaluateDiagCommand(command string) (bool, string) {
 		if !segOK(seg) {
 			return false, fmt.Sprintf("诊断命令 %q 含非白名单命令，仅允许只读诊断命令（top/df/free/ps/ss/cat/grep/journalctl 等）及其管道过滤", command)
 		}
-		segLower := strings.ToLower(seg)
-		for _, dp := range deniedPaths {
-			if strings.Contains(segLower, dp) {
-				return false, fmt.Sprintf("诊断命令包含敏感路径 %q，已拦截", dp)
-			}
-		}
-		// 逐个"看起来像路径"的参数做规范化判定：等价写法（/etc//shadow、
-		// /etc/../etc/shadow）、私钥文件、/proc/<pid>/environ，以及 Agent 自己的
-		// config.yaml（内含安装 token 与 relay_secret，读走即可让任意机器注册进面板）。
-		for _, tok := range strings.Fields(seg) {
-			if !strings.ContainsAny(tok, `/\`) {
-				continue
-			}
-			if deniedSensitivePath(strings.Trim(tok, `"'`)) {
-				return false, fmt.Sprintf("诊断命令包含敏感路径 %q，已拦截", tok)
-			}
+		// Sensitive-path gate: scan the whole segment (quote-stripped) so spaced
+		// Windows paths like "C:/Program Files/AIOps Agent/config.yaml" cannot
+		// slip past strings.Fields tokenization, then also check each path token
+		// via deniedSensitivePath (Clean / ../ normalization).
+		if hit, label := diagSegmentSensitiveHit(seg); hit {
+			return false, fmt.Sprintf("诊断命令包含敏感路径 %q，已拦截", label)
 		}
 	}
 	return true, ""
+}
+
+// diagSegmentSensitiveHit reports whether a diagnostic pipeline segment touches a
+// sensitive path. Returns the matched label for the error message.
+func diagSegmentSensitiveHit(seg string) (bool, string) {
+	// Quote-stripped flat scan catches paths with spaces (Windows Program Files).
+	flat := strings.ToLower(strings.ReplaceAll(seg, `\`, `/`))
+	flat = strings.Map(func(r rune) rune {
+		if r == '"' || r == '\'' {
+			return -1
+		}
+		return r
+	}, flat)
+	deniedSubs := []string{
+		"/etc/shadow", "/etc/gshadow", "/etc/master.passwd",
+		".ssh/", ".gnupg/", ".aws/", ".kube/config",
+		"/etc/sudoers", "/root/.bash_history",
+		"/system32/config/sam", "/system32/config/security",
+	}
+	for _, dp := range deniedSubs {
+		if strings.Contains(flat, dp) {
+			return true, dp
+		}
+	}
+	if strings.Contains(flat, "/proc/") && strings.Contains(flat, "/environ") {
+		return true, "/proc/*/environ"
+	}
+	// Agent install credentials: match any aiops* install dir, including the
+	// Windows default "AIOps Agent" (space, no hyphen) that the old
+	// /aiops-agent/ substring missed.
+	if strings.Contains(flat, "aiops") {
+		for _, f := range []string{"config.yaml", "config.json", "agent_state.json"} {
+			if strings.Contains(flat, f) {
+				return true, f
+			}
+		}
+	}
+	for _, tok := range strings.Fields(seg) {
+		if !strings.ContainsAny(tok, `/\`) {
+			continue
+		}
+		trimmed := strings.Trim(tok, `"'`)
+		if deniedSensitivePath(trimmed) {
+			return true, trimmed
+		}
+	}
+	return false, ""
 }
 
 // evaluatePlaybookCommand checks a playbook/remediation shell command.

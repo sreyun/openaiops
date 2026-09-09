@@ -515,9 +515,7 @@ func (pm *playbookManager) importExecutions(execs []PlaybookExecution) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	pm.executions = execs
-	if len(pm.executions) > 100 {
-		pm.executions = pm.executions[len(pm.executions)-100:]
-	}
+	pm.trimExecutionsLocked()
 	// Restore nextExecID to max seen so new IDs are monotonically increasing.
 	for i := range pm.executions {
 		e := &pm.executions[i]
@@ -592,11 +590,46 @@ func (pm *playbookManager) startExecution(pb Playbook, operator string, hosts []
 	}
 	pm.executions = append(pm.executions, exec)
 	// Trim in-memory ring (PG table keeps full history via upsertPlaybookExecution).
-	if len(pm.executions) > 100 {
-		pm.executions = pm.executions[len(pm.executions)-100:]
-	}
+	// Must not drop running/pending_approval rows: schedBusy for scheduled runs is
+	// only cleared on approve/reject/finish, and those paths look up the execution
+	// in this ring. Evicting a pending_approval here leaves the schedule stuck
+	// forever (UI/PG still show it; approve returns 404).
+	pm.trimExecutionsLocked()
 	pm.mu.Unlock()
 	return &exec
+}
+
+// playbookExecRingCap is the soft cap for finished executions kept in memory.
+const playbookExecRingCap = 100
+
+// trimExecutionsLocked drops the oldest *terminal* executions when the ring is
+// over capacity. Non-terminal rows (running / pending_approval) are always kept:
+// they own schedBusy / live runners and must remain addressable by ID.
+//
+// Caller must hold pm.mu.
+func (pm *playbookManager) trimExecutionsLocked() {
+	if len(pm.executions) <= playbookExecRingCap {
+		return
+	}
+	var live, done []PlaybookExecution
+	for _, e := range pm.executions {
+		if playbookTerminalStatus(e.Status) {
+			done = append(done, e)
+		} else {
+			live = append(live, e)
+		}
+	}
+	budget := playbookExecRingCap - len(live)
+	if budget < 0 {
+		// Pathological: more in-flight than the soft cap. Prefer not losing any
+		// of them over enforcing the cap (they clear as they finish).
+		pm.executions = live
+		return
+	}
+	if len(done) > budget {
+		done = done[len(done)-budget:]
+	}
+	pm.executions = append(live, done...)
 }
 
 // SetExecutionStatus updates status (and optionally end time for terminal states).

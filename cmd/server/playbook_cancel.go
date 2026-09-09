@@ -71,14 +71,7 @@ func (s *Server) handleCancelPlaybookExecution(w http.ResponseWriter, r *http.Re
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "common.invalid_id")})
 		return
 	}
-	exec, ok := s.playbooks.GetExecution(id)
-	if !ok && s.pg != nil {
-		if e, found := s.pg.getPlaybookExecution(id); found {
-			exec, ok = e, true
-			// Stale PG-only row: import into memory so Finish/CancelUnfinished apply.
-			s.playbooks.ensureExecution(e)
-		}
-	}
+	exec, ok := s.resolvePlaybookExecution(id)
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "playbook.exec_not_found")})
 		return
@@ -163,7 +156,8 @@ func (pm *playbookManager) CancelUnfinishedHosts(execID int64) {
 	}
 }
 
-// ensureExecution upserts an execution into the in-memory ring (for cancel of PG-only rows).
+// ensureExecution upserts an execution into the in-memory ring (for cancel /
+// approve / reject of PG-only rows that fell out of the soft-capped history).
 func (pm *playbookManager) ensureExecution(e PlaybookExecution) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -177,7 +171,5 @@ func (pm *playbookManager) ensureExecution(e PlaybookExecution) {
 	if e.ID >= pm.nextExecID {
 		pm.nextExecID = e.ID + 1
 	}
-	if len(pm.executions) > 100 {
-		pm.executions = pm.executions[len(pm.executions)-100:]
-	}
+	pm.trimExecutionsLocked()
 }

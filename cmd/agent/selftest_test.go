@@ -156,3 +156,30 @@ func TestSelfTestFollowsHTTPToHTTPSStyleRedirect(t *testing.T) {
 		t.Fatalf("expected redirect info:\n%s", out.String())
 	}
 }
+
+func TestUpgradeConfigServerURLUsesTempThenRename(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "config.yaml")
+	body := "server: http://panel.example.com\ntoken: secret-tok\n"
+	if err := os.WriteFile(cfg, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	upgradeConfigServerURL(cfg, "http://panel.example.com", "https://panel.example.com", &out)
+	got, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "https://panel.example.com") {
+		t.Fatalf("server not upgraded: %s", got)
+	}
+	if strings.Contains(string(got), "http://panel.example.com") {
+		t.Fatalf("old http URL still present: %s", got)
+	}
+	if !strings.Contains(string(got), "secret-tok") {
+		t.Fatal("token must survive the rewrite")
+	}
+	if _, err := os.Stat(cfg + ".tmp"); !os.IsNotExist(err) {
+		t.Fatalf("temp file should be gone after rename, err=%v", err)
+	}
+}
