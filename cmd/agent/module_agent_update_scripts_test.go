@@ -150,19 +150,65 @@ func TestUpdateHelpersIgnoreDesktopWorkerProcess(t *testing.T) {
 	if !strings.Contains(win, "--desktop-worker") {
 		t.Fatal("windows Test-AgentRunning must exclude the desktop worker")
 	}
-	for name, script := range map[string]string{
-		"linux":  buildLinuxAgentRestartScript("/opt/aiops-agent/aiops-agent", "/opt/aiops-agent", "/opt/aiops-agent/config.yaml", "aiops-agent"),
-		"darwin": buildDarwinAgentRestartScript("/opt/aiops-agent/aiops-agent", "/opt/aiops-agent", "/opt/aiops-agent/config.yaml"),
+	linux := buildLinuxAgentRestartScript("/opt/aiops-agent/aiops-agent", "/opt/aiops-agent", "/opt/aiops-agent/config.yaml", "aiops-agent")
+	if !strings.Contains(linux, "agent_proc_alive()") {
+		t.Fatal("linux helper must define agent_proc_alive")
+	}
+	if !strings.Contains(linux, "*--desktop-worker*) continue ;;") {
+		t.Fatal("linux helper must skip --desktop-worker processes when probing liveness")
+	}
+	if strings.Contains(linux, "agent_alive() {\n  pgrep -x aiops-agent") {
+		t.Fatal("linux helper must not treat a bare pgrep hit as a healthy agent")
+	}
+	darwin := buildDarwinAgentRestartScript("/opt/aiops-agent/aiops-agent", "/opt/aiops-agent", "/opt/aiops-agent/config.yaml")
+	if !strings.Contains(darwin, "*--desktop-worker*) continue ;;") {
+		t.Fatal("darwin helper must skip --desktop-worker processes when probing liveness")
+	}
+	if !strings.Contains(darwin, `*"$EXE"*) return 0 ;;`) {
+		t.Fatal("darwin agent_alive must require the process args to name $EXE")
+	}
+	if strings.Contains(darwin, "agent_alive() {\n  pgrep -x aiops-agent") {
+		t.Fatal("darwin helper must not treat a bare pgrep hit as a healthy agent")
+	}
+}
+
+func TestDarwinRestartScriptScopesLivenessToExe(t *testing.T) {
+	script := buildDarwinAgentRestartScript("/opt/aiops-agent/aiops-agent", "/opt/aiops-agent",
+		"/opt/aiops-agent/config.yaml")
+	for _, want := range []string{
+		"label_owns_exe()",
+		`grep -F "$EXE"`,
+		`*"$EXE"*) return 0 ;;`,
 	} {
-		if !strings.Contains(script, "agent_proc_alive()") {
-			t.Fatalf("%s helper must define agent_proc_alive", name)
+		if !strings.Contains(script, want) {
+			t.Fatalf("darwin restart script missing %q", want)
 		}
-		if !strings.Contains(script, "*--desktop-worker*) continue ;;") {
-			t.Fatalf("%s helper must skip --desktop-worker processes when probing liveness", name)
-		}
-		if strings.Contains(script, "agent_alive() {\n  pgrep -x aiops-agent") {
-			t.Fatalf("%s helper must not treat a bare pgrep hit as a healthy agent", name)
-		}
+	}
+	// Must not treat "any known label running" as success (dual install.sh +
+	// --install-service leftover at a different path).
+	aliveIdx := strings.Index(script, "agent_alive() {")
+	kickIdx := strings.Index(script, "kickstart() {")
+	if aliveIdx < 0 || kickIdx < 0 {
+		t.Fatal("missing agent_alive/kickstart")
+	}
+	aliveBody := script[aliveIdx:kickIdx]
+	if !strings.Contains(aliveBody, "label_owns_exe") {
+		t.Fatal("agent_alive must filter launchd labels by EXE path")
+	}
+}
+
+func TestWindowsTestAgentRunningRejectsUnverifiedServiceInstall(t *testing.T) {
+	script := buildWindowsUpdateHelperScript(`C:\a\aiops-agent.exe`, `C:\a\.new.exe`, `C:\a\config.yaml`,
+		`C:\l`, `C:\r`, `C:\r2`)
+	if !strings.Contains(script, "service registered but no session-0 agent; treating as not running") {
+		t.Fatal("CIM-down service installs must not treat leftover interactive workers as healthy")
+	}
+	if !strings.Contains(script, "user-mode install; accepting non-session-0 agent process") {
+		t.Fatal("pure user-mode installs must still accept interactive-session processes")
+	}
+	// The old footgun: unverified → return $true even with a registered service.
+	if strings.Contains(script, "running state is unverified") {
+		t.Fatal("must not silently trust unverified running state for service installs")
 	}
 }
 
@@ -221,6 +267,7 @@ func TestBuildDarwinAgentRestartScript(t *testing.T) {
 		"com.apple.quarantine",
 		"rolling back to $BAK",
 		"state = running",
+		"label_owns_exe",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("darwin restart script missing %q", want)

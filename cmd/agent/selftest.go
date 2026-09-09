@@ -235,9 +235,23 @@ func upgradeConfigServerURL(cfgPath, from, to string, out io.Writer) {
 	if bytes.Equal(b, nb) {
 		return
 	}
-	if err := os.WriteFile(cfgPath, nb, 0o644); err != nil {
+	// Atomic replace: os.WriteFile opens O_TRUNC then writes — a crash/SIGKILL
+	// between those steps leaves an empty config.yaml. The next start then
+	// falls back to localhost:8529 while the service looks healthy, and the
+	// host stays offline forever. Same pattern as persistHostID.
+	tmp := cfgPath + ".tmp"
+	if err := os.WriteFile(tmp, nb, 0o644); err != nil {
 		fmt.Fprintf(out, "[selftest] WARN 未能自动把 config 中的 server 改成 %s: %v\n", to, err)
 		return
+	}
+	if err := os.Rename(tmp, cfgPath); err != nil {
+		_ = os.Remove(tmp)
+		// Windows cannot always rename over an existing target; fall back but
+		// never truncate-first into the live path on the primary attempt.
+		if err2 := os.WriteFile(cfgPath, nb, 0o644); err2 != nil {
+			fmt.Fprintf(out, "[selftest] WARN 未能自动把 config 中的 server 改成 %s: %v\n", to, err2)
+			return
+		}
 	}
 	fmt.Fprintf(out, "[selftest] INFO 已将 config 中的 server 更新为 %s（避免每次 http→https 跳转）\n", to)
 }
