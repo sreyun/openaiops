@@ -156,8 +156,12 @@ func deniedSensitivePath(p string) bool {
 	if strings.HasPrefix(norm, "/proc/") && strings.HasSuffix(norm, "/environ") {
 		return true
 	}
+	// Agent install credentials live next to the binary. Match any path that
+	// looks like an AIOps install dir — including Windows
+	// "C:/Program Files/AIOps Agent/config.yaml" (space, no hyphen) and custom
+	// AIOPS_DIR values that still contain "aiops".
 	for _, f := range []string{"config.yaml", "config.json", "agent_state.json"} {
-		if base == f && (strings.Contains(norm, "/aiops-agent/") || strings.Contains(norm, "/.aiops-agent/")) {
+		if base == f && strings.Contains(norm, "aiops") {
 			return true
 		}
 	}
