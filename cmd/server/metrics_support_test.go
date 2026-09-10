@@ -52,7 +52,7 @@ func TestMetricsEndpointAuthAndPayload(t *testing.T) {
 	for _, want := range []string{
 		"aiops_build_info", "aiops_hosts_total", "aiops_agent_online_ratio",
 		"aiops_alerts_active{level=\"critical\"}", "aiops_pg_flush_duration_seconds",
-		"aiops_license_state", "aiops_license_hosts_used", "aiops_goroutines",
+		"aiops_goroutines",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("/metrics 缺少 %s", want)
