@@ -18,6 +18,33 @@ func TestRoutesRegister(t *testing.T) {
 	(&Server{}).Routes()
 }
 
+// Classic console SQL Run/Export and host batch-folder must stay registered.
+// v0.20.38 Vue cleanup accidentally dropped these HandleFunc lines while leaving
+// handlers + sql-toolkit.js / hosts.js callers intact → HTTP 405 against GET /.
+func TestClassicSQLAndBatchFolderRoutesRegistered(t *testing.T) {
+	mux, ok := (&Server{}).Routes().(*http.ServeMux)
+	if !ok {
+		t.Fatal("Routes() did not return *http.ServeMux")
+	}
+	cases := []struct {
+		method, path, wantPattern string
+	}{
+		{http.MethodPost, "/api/v1/sql/connections/c1/query/stream", "POST /api/v1/sql/connections/{id}/query/stream"},
+		{http.MethodPost, "/api/v1/sql/connections/c1/query/export", "POST /api/v1/sql/connections/{id}/query/export"},
+		{http.MethodPost, "/api/v1/hosts/folder/batch", "POST /api/v1/hosts/folder/batch"},
+		{http.MethodGet, "/api/v1/resource-notes", "GET /api/v1/resource-notes"},
+		{http.MethodPut, "/api/v1/resource-notes/host:h1", "PUT /api/v1/resource-notes/{key}"},
+		{http.MethodPost, "/api/v1/chat", "POST /api/v1/chat"},
+	}
+	for _, tc := range cases {
+		_, pattern := mux.Handler(httptest.NewRequest(tc.method, tc.path, nil))
+		if pattern != tc.wantPattern {
+			t.Errorf("%s %s matched %q, want %q (missing registration falls through to GET / → 405)",
+				tc.method, tc.path, pattern, tc.wantPattern)
+		}
+	}
+}
+
 // 不存在的 API 路径必须回 404，且**任何方法都一样**。
 //
 // 这条不是形式主义：`GET /` 是根子树模式，在 Go 的 ServeMux 里匹配任意路径。没有
