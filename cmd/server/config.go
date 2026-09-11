@@ -706,12 +706,13 @@ func (c ServerConfig) Validate() error {
 
 // ConfigStore wraps ServerConfig with disk persistence and thread safety.
 type ConfigStore struct {
-	mu      sync.RWMutex
-	path    string
-	cfg     ServerConfig
-	prev    ServerConfig // snapshot before the last Set(), for Revert()
-	hasPrev bool         // whether prev holds a valid snapshot
-	pg      *pgStore     // when set, config persists to PostgreSQL instead of the JSON file
+	mu        sync.RWMutex
+	persistMu sync.Mutex // serializes save() so a stale snapshot cannot clobber a newer mutation
+	path      string
+	cfg       ServerConfig
+	prev      ServerConfig // snapshot before the last Set(), for Revert()
+	hasPrev   bool         // whether prev holds a valid snapshot
+	pg        *pgStore     // when set, config persists to PostgreSQL instead of the JSON file
 }
 
 func NewConfigStore(path string, pg *pgStore) (*ConfigStore, error) {
@@ -719,29 +720,38 @@ func NewConfigStore(path string, pg *pgStore) (*ConfigStore, error) {
 	loaded := false
 	var rawBlob []byte
 	if pg != nil { // PostgreSQL is the source of truth in dual-DB mode
-		if raw, ok, err := pg.loadConfigBlob(); err == nil && ok {
+		if raw, ok, err := pg.loadConfigBlob(); err != nil {
+			return nil, fmt.Errorf("load config blob: %w", err)
+		} else if ok {
 			var c ServerConfig
-			if json.Unmarshal(raw, &c) == nil {
-				if c.Categories == nil {
-					c.Categories = map[string]string{}
-				}
-				cs.cfg = c
-				rawBlob = raw
-				loaded = true
+			if err := json.Unmarshal(raw, &c); err != nil {
+				return nil, fmt.Errorf("load config blob: %w (refusing to overwrite with defaults)", err)
 			}
+			if c.Categories == nil {
+				c.Categories = map[string]string{}
+			}
+			cs.cfg = c
+			rawBlob = raw
+			loaded = true
 		}
 	}
 	if !loaded {
 		// 文件配置按扩展名支持 JSON 或 YAML/YML（PG blob 恒为 JSON，服务端自序列化）。
 		if b, err := os.ReadFile(path); err == nil {
 			var c ServerConfig
-			if shared.DecodeConfig(path, b, &c) == nil {
-				if c.Categories == nil {
-					c.Categories = map[string]string{}
-				}
-				cs.cfg = c
-				rawBlob = b
+			if derr := shared.DecodeConfig(path, b, &c); derr != nil {
+				// Existing file is unreadable (truncation mid-write, partial JSON, etc.).
+				// Refuse to start rather than silently replace production secrets/tokens
+				// with factory defaults on the subsequent dirty save.
+				return nil, fmt.Errorf("load config %s: %w (refusing to overwrite with defaults)", path, derr)
 			}
+			if c.Categories == nil {
+				c.Categories = map[string]string{}
+			}
+			cs.cfg = c
+			rawBlob = b
+		} else if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("read config %s: %w", path, err)
 		}
 	}
 	// Decrypt any at-rest-encrypted secrets into plaintext for in-memory use
@@ -1402,9 +1412,18 @@ func (cs *ConfigStore) CategoryOverride(hostID string) (string, bool) {
 }
 
 func (cs *ConfigStore) save() error {
+	// Mutators release cs.mu before calling save(). Without persistMu, two
+	// overlapping saves can each snapshot under RLock then WriteFile/UPSERT out
+	// of order — the earlier snapshot silently clobbers a newer in-memory
+	// mutation (e.g. login hash upgrade vs playbook/settings save).
+	cs.persistMu.Lock()
+	defer cs.persistMu.Unlock()
+
 	cs.mu.RLock()
 	// Value copy so field-level secret encryption below can't mutate the live,
 	// plaintext in-memory config. Deep-copy Users (a slice) for the same reason.
+	// Snapshot AFTER persistMu so we always persist the latest committed cfg
+	// when our turn to write arrives.
 	c := cs.cfg
 	if len(c.Users) > 0 {
 		users := make([]AccountConfig, len(c.Users))
@@ -1430,6 +1449,7 @@ func (cs *ConfigStore) save() error {
 		c.ScrapeTargets = deepCopyScrapeTargets(c.ScrapeTargets)
 	}
 	pg := cs.pg
+	path := cs.path
 	cs.mu.RUnlock()
 	// Encrypt reversible secrets at rest (no-op unless AIOPS_SECRET_KEY is set).
 	encryptConfigSecrets(&c)
@@ -1444,15 +1464,52 @@ func (cs *ConfigStore) save() error {
 		cs.writeInstallTokenFile()
 		return nil
 	}
-	// 0o600: this file holds password hashes, MFA secrets and the install token —
-	// it must not be world-readable on a shared host.
-	if err := os.WriteFile(cs.path, b, 0o600); err != nil {
+	// Atomic replace: os.WriteFile truncates in place (O_TRUNC). A crash/kill
+	// between truncate and completed write leaves an empty/partial config that
+	// used to be silently replaced with factory defaults on the next start.
+	if err := writeConfigFileAtomic(path, b); err != nil {
 		return err
 	}
-	// WriteFile keeps the existing mode when the file already exists, so force
-	// 0o600 to also tighten configs written by earlier (0o644) versions.
-	_ = os.Chmod(cs.path, 0o600)
 	cs.writeInstallTokenFile()
+	return nil
+}
+
+// writeConfigFileAtomic writes b to path via tmp+Rename so readers never see a
+// truncated config and a crash mid-write cannot empty the live file.
+func writeConfigFileAtomic(path string, b []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".server_config-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	ok := false
+	defer func() {
+		if !ok {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	// 0o600: password hashes, MFA secrets and the install token must not be world-readable.
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(b); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	ok = true
+	_ = os.Chmod(path, 0o600)
 	return nil
 }
 
