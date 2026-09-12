@@ -186,6 +186,14 @@ func ForbiddenWrite(sql string) bool {
 			return true
 		}
 	}
+	// SELECT-shaped wrappers that still execute arbitrary SQL / mutate state.
+	// Matched with optional whitespace before '(' and optional schema qualifier
+	// (pg_catalog.query_to_xml / public.dblink_exec).
+	for _, fn := range mutatingSelectFuncs {
+		if containsFuncCall(s, fn) {
+			return true
+		}
+	}
 	kw := FirstKeyword(sql)
 	switch kw {
 	case "insert", "update", "delete", "drop", "alter", "create", "truncate", "replace", "grant", "revoke", "call", "load",
@@ -193,6 +201,50 @@ func ForbiddenWrite(sql string) bool {
 		return true
 	}
 	return false
+}
+
+// mutatingSelectFuncs look like read-only SELECT calls but execute attacker-chosen
+// SQL or mutate server state. Used by ForbiddenWrite and StrictReadOnly*.
+var mutatingSelectFuncs = []string{
+	"query_to_xml", // runs the query text argument
+	"dblink_exec",  // executes a command string
+	"dblink",       // can run any SQL on the linked connection
+	"setval",       // mutates sequence state
+}
+
+// containsFuncCall reports whether flat (already lowercased / comment-stripped /
+// space-compacted) contains a call to funcName, allowing an optional schema
+// qualifier and optional whitespace before '('.
+func containsFuncCall(flat, funcName string) bool {
+	name := strings.ToLower(funcName)
+	flat = strings.ToLower(flat)
+	idx := 0
+	for {
+		i := strings.Index(flat[idx:], name)
+		if i < 0 {
+			return false
+		}
+		i += idx
+		if i > 0 {
+			prev := flat[i-1]
+			// Allow schema.func; reject identifier prefixes (my_query_to_xml).
+			if isIdentByte(prev) {
+				idx = i + len(name)
+				continue
+			}
+		}
+		after := i + len(name)
+		for after < len(flat) && flat[after] == ' ' {
+			after++
+		}
+		if after < len(flat) && flat[after] == '(' {
+			return true
+		}
+		idx = i + len(name)
+		if idx >= len(flat) {
+			return false
+		}
+	}
 }
 
 // IsAllowedIndexDDL reports whether sql is a single, narrowly-scoped index DDL

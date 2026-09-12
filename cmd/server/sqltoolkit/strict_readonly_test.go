@@ -75,6 +75,12 @@ func TestStrictReadOnlyPostgresRejects(t *testing.T) {
 		"COPY t TO STDOUT",
 		"SELECT lo_export(123, '/tmp/x')",
 		"SELECT 1; DROP TABLE t",
+		"SELECT query_to_xml('DELETE FROM t', true, true, '')",
+		"SELECT query_to_xml ('DROP TABLE t', true, true, '')",
+		"SELECT pg_catalog.query_to_xml('DELETE FROM t',true,true,'')",
+		"SELECT dblink_exec('dbname=postgres','DELETE FROM t')",
+		"SELECT * FROM dblink('dbname=postgres','DELETE FROM t RETURNING 1') AS t(x int)",
+		"SELECT setval('my_seq', 1)",
 	}
 	for _, sql := range rejected {
 		if reason := StrictReadOnlyPostgres(sql); reason == "" {

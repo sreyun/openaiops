@@ -70,6 +70,13 @@ func strictReadOnly(sql string, mysql bool) string {
 			return "forbidden function: " + strings.TrimSuffix(d, "(")
 		}
 	}
+	// SELECT wrappers that execute arbitrary SQL or mutate state (see mutatingSelectFuncs).
+	// Use whitespace-tolerant matching so `query_to_xml ('…')` cannot slip through.
+	for _, fn := range mutatingSelectFuncs {
+		if containsFuncCall(flat, fn) {
+			return "forbidden function: " + fn
+		}
+	}
 	if strings.HasPrefix(flat, "set ") {
 		return "SET not allowed"
 	}
