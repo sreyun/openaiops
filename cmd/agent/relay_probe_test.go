@@ -277,6 +277,9 @@ func TestAgentDeniedPathCoversOwnSecretsAndEquivalents(t *testing.T) {
 		"/home/u/.ssh/id_rsa",
 		"/tmp/backup/server.key",
 		`C:\Windows\..\Windows\System32\config\SAM`,
+		// config.yml 与 config.yaml 同权；漏掉这一项换个后缀就能读走安装 token。
+		"/opt/aiops-agent/config.yml",
+		"/root/.aiops-agent/config.yml",
 	} {
 		if !agentDeniedPath(p) {
 			t.Errorf("敏感路径未被拦截: %s", p)

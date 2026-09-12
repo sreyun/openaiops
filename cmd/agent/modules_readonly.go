@@ -243,7 +243,9 @@ func agentDeniedPathLiteral(p string) bool {
 // 取当前进程可执行文件所在目录，而不是写死 /opt/aiops-agent —— 安装目录可被
 // AIOPS_DIR 改写，非 root 安装还会落在 $HOME/.aiops-agent 下。
 func agentOwnSecretPath(norm string) bool {
-	for _, f := range []string{"config.yaml", "config.json", "agent_state.json"} {
+	// config.yml 与 config.yaml 同权：启动探测、升级助手、文档都认它，漏掉等于
+	// 换个后缀就能用 file_head / java_exception_scan 把安装 token 读走。
+	for _, f := range []string{"config.yaml", "config.yml", "config.json", "agent_state.json"} {
 		if strings.HasSuffix(norm, "/"+f) || norm == f {
 			if exe, err := os.Executable(); err == nil {
 				dir := strings.ToLower(filepath.ToSlash(filepath.Dir(exe)))

@@ -156,7 +156,8 @@ func deniedSensitivePath(p string) bool {
 	if strings.HasPrefix(norm, "/proc/") && strings.HasSuffix(norm, "/environ") {
 		return true
 	}
-	for _, f := range []string{"config.yaml", "config.json", "agent_state.json"} {
+	// config.yml 与 config.yaml 同权（Agent 启动探测 / 升级助手 / 文档均支持）。
+	for _, f := range []string{"config.yaml", "config.yml", "config.json", "agent_state.json"} {
 		if base == f && (strings.Contains(norm, "/aiops-agent/") || strings.Contains(norm, "/.aiops-agent/")) {
 			return true
 		}
