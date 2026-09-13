@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -270,7 +272,10 @@ func TestCappedBufferTruncatesWithNotice(t *testing.T) {
 func TestAgentDeniedPathCoversOwnSecretsAndEquivalents(t *testing.T) {
 	for _, p := range []string{
 		"/opt/aiops-agent/config.yaml",
+		"/opt/aiops-agent/config.yml",
 		"/root/.aiops-agent/agent_state.json",
+		"/etc/aiops/config.yaml",
+		"/etc/aiops/config.yml",
 		"/etc/./shadow",
 		"/proc/self/environ",
 		"/proc/1234/environ",
@@ -286,6 +291,36 @@ func TestAgentDeniedPathCoversOwnSecretsAndEquivalents(t *testing.T) {
 		if agentDeniedPath(p) {
 			t.Errorf("普通路径被误伤: %s", p)
 		}
+	}
+}
+
+// --config 完全可以落在安装目录之外。unit_heal 回归里就有
+// `/usr/local/bin/aiops-agent --config /etc/aiops/config.yaml`：exe 目录前缀
+// 对不上，"/aiops-agent/" 子串也对不上。闸门必须认 agentActiveConfigPath，
+// 否则 file_head 直接把装机 token 读走。
+func TestAgentDeniedPathCoversActiveConfigOutsideInstallDir(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "monitor.yaml") // 故意不用标准文件名，逼闸门走 active-path 分支
+	state := filepath.Join(dir, "agent_state.json")
+	if err := os.WriteFile(cfg, []byte("server: http://x\ntoken: SECRET\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(state, []byte(`{"host_id":"h1"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prev := agentActiveConfigPath
+	t.Cleanup(func() { agentActiveConfigPath = prev })
+	agentActiveConfigPath = cfg
+
+	for _, p := range []string{cfg, state} {
+		if !agentDeniedPath(p) {
+			t.Errorf("本进程正在用的凭据路径必须被拦截: %s", p)
+		}
+	}
+	// 同目录下的普通日志仍可读。
+	logPath := filepath.Join(dir, "agent.log")
+	if agentDeniedPath(logPath) {
+		t.Errorf("同目录非凭据文件被误伤: %s", logPath)
 	}
 }
 

@@ -10,6 +10,8 @@ func TestDiagCommandBlocksSensitivePathVariants(t *testing.T) {
 		"cat /etc//shadow",
 		"cat /etc/../etc/shadow",
 		"tail -n 50 /opt/aiops-agent/config.yaml",
+		"tail -n 50 /opt/aiops-agent/config.yml",
+		"cat /etc/aiops/config.yaml",
 		"cat /proc/self/environ",
 		"head /home/u/.ssh/id_rsa",
 		"cat /srv/certs/server.key",
@@ -42,6 +44,8 @@ func TestDeniedSensitivePathNormalizes(t *testing.T) {
 		"/etc/./shadow",
 		`C:\Windows\..\Windows\System32\config\SAM`,
 		"/opt/aiops-agent/config.yaml",
+		"/opt/aiops-agent/config.yml",
+		"/etc/aiops/config.yaml",
 		"/proc/1/environ",
 		"/data/backup/id_ed25519",
 	} {

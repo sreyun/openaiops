@@ -156,8 +156,11 @@ func deniedSensitivePath(p string) bool {
 	if strings.HasPrefix(norm, "/proc/") && strings.HasSuffix(norm, "/environ") {
 		return true
 	}
-	for _, f := range []string{"config.yaml", "config.json", "agent_state.json"} {
-		if base == f && (strings.Contains(norm, "/aiops-agent/") || strings.Contains(norm, "/.aiops-agent/")) {
+	// config.yml 是文档推荐格式；/aiops/ 覆盖 /etc/aiops/config.yaml 这类
+	// 二进制在 /usr/local/bin、配置在 /etc/aiops 的布局（见 agent unit_heal 回归）。
+	for _, f := range []string{"config.yaml", "config.yml", "config.json", "agent_state.json"} {
+		if base == f && (strings.Contains(norm, "/aiops-agent/") || strings.Contains(norm, "/.aiops-agent/") ||
+			strings.Contains(norm, "/aiops/")) {
 			return true
 		}
 	}

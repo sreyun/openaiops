@@ -239,11 +239,40 @@ func agentDeniedPathLiteral(p string) bool {
 	return false
 }
 
-// agentOwnSecretPath 判断路径是否落在 Agent 自己的安装目录里。
+// agentOwnSecretPath 判断路径是否落在 Agent 自己的安装目录里，或就是本进程正在用的配置。
+//
 // 取当前进程可执行文件所在目录，而不是写死 /opt/aiops-agent —— 安装目录可被
 // AIOPS_DIR 改写，非 root 安装还会落在 $HOME/.aiops-agent 下。
+//
+// 更关键的是：`--config` 完全可以指到安装目录之外（unit_heal 回归用例里就有
+// `/usr/local/bin/aiops-agent --config /etc/aiops/config.yaml`）。那种布局下
+// exe 目录前缀与 "/aiops-agent/" 兜底都对不上，只认文件名会把装机 token /
+// relay_secret 从"只读" file_head 里漏出去。进程启动时已经把真实配置路径记在
+// agentActiveConfigPath 里——闸门必须认它，以及它旁边的 agent_state.json。
 func agentOwnSecretPath(norm string) bool {
-	for _, f := range []string{"config.yaml", "config.json", "agent_state.json"} {
+	secretName := func(base string) bool {
+		switch base {
+		case "config.yaml", "config.yml", "config.json", "agent_state.json":
+			return true
+		}
+		return false
+	}
+	if active := strings.TrimSpace(agentActiveConfigPath); active != "" {
+		activeNorm := strings.ToLower(filepath.ToSlash(filepath.Clean(strings.ReplaceAll(active, "\\", "/"))))
+		if activeNorm != "" && activeNorm != "." {
+			if norm == activeNorm {
+				return true
+			}
+			// resolveConfigRelativePaths 把 state_file 锚到配置目录：同目录下的
+			// agent_state.json / 其它配置名同样是凭据。
+			if dir := path.Dir(activeNorm); dir != "" && dir != "." && strings.HasPrefix(norm, dir+"/") {
+				if secretName(path.Base(norm)) {
+					return true
+				}
+			}
+		}
+	}
+	for _, f := range []string{"config.yaml", "config.yml", "config.json", "agent_state.json"} {
 		if strings.HasSuffix(norm, "/"+f) || norm == f {
 			if exe, err := os.Executable(); err == nil {
 				dir := strings.ToLower(filepath.ToSlash(filepath.Dir(exe)))
@@ -252,7 +281,9 @@ func agentOwnSecretPath(norm string) bool {
 				}
 			}
 			// 兜底：即使拿不到自身路径，默认安装目录也必须挡住。
-			if strings.Contains(norm, "/aiops-agent/") || strings.Contains(norm, "/.aiops-agent/") {
+			// "/aiops/" 覆盖 /etc/aiops/config.yaml 这类显式 --config 布局（见 unit_heal）。
+			if strings.Contains(norm, "/aiops-agent/") || strings.Contains(norm, "/.aiops-agent/") ||
+				strings.Contains(norm, "/aiops/") {
 				return true
 			}
 		}
