@@ -7,7 +7,12 @@ import (
 )
 
 // StripCommentsAndStrings replaces string/comment contents with spaces (length-preserving
-// for position-insensitive scans). Used by audit/optimize heuristics.
+// for position-insensitive scans). Used by audit/optimize heuristics and by the
+// read-only SQL gates (ForbiddenWrite / StrictReadOnly*).
+//
+// MySQL executable versioned comments (`/*! … */` / `/*!NNNNN … */`) keep their
+// body: the server runs that text, so blanking it would hide INTO OUTFILE / SLEEP
+// / FOR UPDATE from every denylist that scans the stripped form.
 func StripCommentsAndStrings(sql string) string {
 	var b strings.Builder
 	b.Grow(len(sql))
@@ -30,8 +35,26 @@ func StripCommentsAndStrings(sql string) string {
 			}
 			continue
 		}
-		// block comment /* */
+		// block comment /* */ — but MySQL "versioned" comments /*!…*/ (and
+		// /*!NNNNN …*/) are *executable*: the server strips the wrapper and runs
+		// the body. Blanking them here lets ForbiddenWrite / StrictReadOnly miss
+		// INTO OUTFILE / SLEEP / FOR UPDATE hidden inside the wrapper.
 		if i+1 < n && runes[i] == '/' && runes[i+1] == '*' {
+			if i+2 < n && runes[i+2] == '!' {
+				// Keep the executable body; drop only the /*! [version] */ wrapper.
+				i += 3
+				for i < n && runes[i] >= '0' && runes[i] <= '9' {
+					i++
+				}
+				for i+1 < n && !(runes[i] == '*' && runes[i+1] == '/') {
+					b.WriteRune(runes[i])
+					i++
+				}
+				if i+1 < n {
+					i += 2
+				}
+				continue
+			}
 			b.WriteByte(' ')
 			b.WriteByte(' ')
 			i += 2
