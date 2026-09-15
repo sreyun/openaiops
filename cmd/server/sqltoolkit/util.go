@@ -174,7 +174,10 @@ func ForbiddenWrite(sql string) bool {
 	bad := []string{
 		" insert ", " update ", " delete ", " drop ", " alter ", " create ",
 		" truncate ", " replace ", " grant ", " revoke ", " rename ",
-		" into outfile", " into dumpfile", " load data", " call ",
+		// Bare " into " catches PostgreSQL `SELECT … INTO new_table` (CREATE TABLE AS)
+		// and MySQL `SELECT … INTO @var`. OUTFILE/DUMPFILE are listed too for clarity;
+		// they are already matched by the bare form.
+		" into ", " into outfile", " into dumpfile", " load data", " call ",
 		" lock tables", " unlock tables", " set global", " set @@",
 		" copy ", " \\copy ", " execute ", " prepare ", " deallocate ",
 		" do ", " listen ", " notify ", " vacuum ", " reindex ",

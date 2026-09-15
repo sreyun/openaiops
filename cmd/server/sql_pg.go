@@ -404,16 +404,19 @@ func pgKillSession(c MySQLConnection, pid int64) error {
 }
 
 // pgQueryReadOnly runs a single SELECT/WITH/VALUES and returns columns + row maps.
+//
+// Guard must match the SQL workbench (prepareSQLRead / StrictReadOnlyPostgres):
+// ForbiddenWrite alone historically missed CTE-embedded DML after "(" and, until
+// the bare " into " denylist entry, PostgreSQL `SELECT … INTO new_table` which
+// creates a table. Dashboard / datasource / SREyun panels all share this helper
+// and have no SESSION READ ONLY transaction to catch what the denylist misses.
 func pgQueryReadOnly(c MySQLConnection, sqlText string, limit int) (cols []string, rows []map[string]any, err error) {
 	sqlText = strings.TrimSpace(sqlText)
 	if sqlText == "" {
 		return nil, nil, fmt.Errorf("sql required")
 	}
-	if !sqltoolkit.IsReadOnlyQuery(sqlText) {
-		return nil, nil, fmt.Errorf("仅允许单条只读 SELECT/WITH")
-	}
-	if sqltoolkit.ForbiddenWrite(sqlText) {
-		return nil, nil, fmt.Errorf("禁止写操作")
+	if reason := sqltoolkit.StrictReadOnlyPostgres(sqlText); reason != "" {
+		return nil, nil, fmt.Errorf("仅允许只读查询：%s", reason)
 	}
 	kw := sqltoolkit.FirstKeyword(sqlText)
 	if kw != "select" && kw != "with" && kw != "values" && kw != "show" && kw != "table" {
