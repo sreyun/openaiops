@@ -589,6 +589,9 @@ func (s *Server) handleAckIncident(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "common.invalid_id")})
 		return
 	}
+	if _, ok := s.requireIncidentByID(w, r, id); !ok {
+		return
+	}
 	inc, found := s.incidents.Ack(id, s.actorName(r))
 	if !found {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "incident.not_found")})
@@ -603,6 +606,9 @@ func (s *Server) handleResolveIncident(w http.ResponseWriter, r *http.Request) {
 	id, ok := sreParseID(r)
 	if !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "common.invalid_id")})
+		return
+	}
+	if _, ok := s.requireIncidentByID(w, r, id); !ok {
 		return
 	}
 	// 可选解决说明（写入时间线并传入结案卡；缺省留空，向后兼容旧前端）
@@ -630,6 +636,9 @@ func (s *Server) handleCommentIncident(w http.ResponseWriter, r *http.Request) {
 	id, ok := sreParseID(r)
 	if !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "common.invalid_id")})
+		return
+	}
+	if _, ok := s.requireIncidentByID(w, r, id); !ok {
 		return
 	}
 	var in struct {
@@ -816,19 +825,25 @@ func (s *Server) handleDeleteRemediationRule(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) handleListRemediationRuns(w http.ResponseWriter, r *http.Request) {
+	var list []RemediationRun
 	if s.pg != nil {
-		if list := s.pg.listRemediationRuns(1000); len(list) > 0 {
-			writeJSON(w, http.StatusOK, list)
-			return
+		if pgList := s.pg.listRemediationRuns(1000); len(pgList) > 0 {
+			list = pgList
 		}
 	}
-	writeJSON(w, http.StatusOK, s.remediation.Runs())
+	if list == nil {
+		list = s.remediation.Runs()
+	}
+	writeJSON(w, http.StatusOK, s.filterRemediationRunsForUser(r, list))
 }
 
 func (s *Server) handleApproveRemediation(w http.ResponseWriter, r *http.Request) {
 	id, ok := sreParseID(r)
 	if !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "common.invalid_id")})
+		return
+	}
+	if _, ok := s.requireRemediationRunAccess(w, r, id); !ok {
 		return
 	}
 	if err := s.remediation.Approve(id, s.actorName(r)); err != nil {
@@ -842,6 +857,9 @@ func (s *Server) handleRejectRemediation(w http.ResponseWriter, r *http.Request)
 	id, ok := sreParseID(r)
 	if !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "common.invalid_id")})
+		return
+	}
+	if _, ok := s.requireRemediationRunAccess(w, r, id); !ok {
 		return
 	}
 	if err := s.remediation.Reject(id, s.actorName(r)); err != nil {
@@ -1063,7 +1081,7 @@ func (s *Server) handleSLOTrend(w http.ResponseWriter, r *http.Request) {
 // ----------------------------------------------------------------------------
 
 func (s *Server) handleListTickets(w http.ResponseWriter, r *http.Request) {
-	rows := ticketListRows(s.tickets.List(r.URL.Query().Get("kind")))
+	rows := ticketListRows(s.filterTicketsForUser(r, s.tickets.List(r.URL.Query().Get("kind"))))
 	limit, offset, paged := parsePageLimitOffset(r, 50, 500)
 	if !paged {
 		writeJSON(w, http.StatusOK, rows)
@@ -1093,6 +1111,9 @@ func (s *Server) handleGetTicket(w http.ResponseWriter, r *http.Request) {
 	tk, found := s.tickets.Get(id)
 	if !found {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "ticket.not_found")})
+		return
+	}
+	if !s.requireTicketAccess(w, r, tk) {
 		return
 	}
 	// Enrich with linked incident info for traceability
@@ -1159,6 +1180,11 @@ func (s *Server) handleCreateTicket(w http.ResponseWriter, r *http.Request) {
 			in.Source = firstNonEmptyOrDash(in.Source, "manual")
 		}
 	}
+	// 工单可挂 incident_id / host 链接；不校验的话，主机组受限账号能建一张指向范围外
+	// 主机的单，再靠 resolve 自动结案把范围外事件关掉。
+	if !s.requireTicketHostBindings(w, r, in.IncidentID, in.Links) {
+		return
+	}
 	tk, err := s.tickets.Create(in, s.actorName(r))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -1177,12 +1203,23 @@ func (s *Server) handleTicketLink(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "common.invalid_id")})
 		return
 	}
+	tk, found := s.tickets.Get(id)
+	if !found {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "ticket.not_found")})
+		return
+	}
+	if !s.requireTicketAccess(w, r, tk) {
+		return
+	}
 	var in struct {
 		Add    []OpsLink `json:"add"`
 		Remove *OpsLink  `json:"remove"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "common.invalid_json")})
+		return
+	}
+	if !s.requireTicketHostBindings(w, r, 0, in.Add) {
 		return
 	}
 	rmType, rmID, rmRole := "", "", ""
@@ -1209,7 +1246,19 @@ func (s *Server) handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "common.invalid_json")})
 		return
 	}
-	prev, _ := s.tickets.Get(id)
+	prev, found := s.tickets.Get(id)
+	if !found {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "ticket.not_found")})
+		return
+	}
+	if !s.requireTicketAccess(w, r, prev) {
+		return
+	}
+	// 更新可追加 Links；新挂的主机/事件同样要在授权范围内，否则等于用一张自己有权的工单
+	// 去结案范围外的事件（handleUpdateTicket 在 resolved/closed 时会自动 Resolve 关联事件）。
+	if !s.requireTicketHostBindings(w, r, 0, in.Links) {
+		return
+	}
 	tk, err := s.tickets.Update(id, in, s.actorName(r))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -1233,13 +1282,17 @@ func (s *Server) handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 		// Auto-resolve the linked incident when the ticket is resolved/closed.
 		if tk.IncidentID > 0 {
 			if inc, found := s.incidents.Get(tk.IncidentID); found && inc.Status != "resolved" {
-				note := "关联工单 #" + strconv.FormatInt(tk.ID, 10) + " 已" + label + "：" + tk.Title
-				s.incidents.AddEvent(tk.IncidentID, "note", "system", "解决说明："+note)
-				resolved, ok := s.incidents.Resolve(tk.IncidentID, "工单 #"+strconv.FormatInt(tk.ID, 10)+" 已"+label)
-				if ok {
-					s.incidents.AddEvent(tk.IncidentID, "note", "system",
-						fmt.Sprintf("关联工单 #%d 已%s，事件自动标记为已解决", tk.ID, label))
-					go s.learnFromResolution(resolved, note)
+				// 纵深防御：工单已更新，但结案关联事件仍须主机在授权范围内。
+				u, uOK := s.currentUser(r)
+				if uOK && (inc.HostID == "" || s.userCanAccessHost(u, inc.HostID)) {
+					note := "关联工单 #" + strconv.FormatInt(tk.ID, 10) + " 已" + label + "：" + tk.Title
+					s.incidents.AddEvent(tk.IncidentID, "note", "system", "解决说明："+note)
+					resolved, ok := s.incidents.Resolve(tk.IncidentID, "工单 #"+strconv.FormatInt(tk.ID, 10)+" 已"+label)
+					if ok {
+						s.incidents.AddEvent(tk.IncidentID, "note", "system",
+							fmt.Sprintf("关联工单 #%d 已%s，事件自动标记为已解决", tk.ID, label))
+						go s.learnFromResolution(resolved, note)
+					}
 				}
 			}
 		}
@@ -1251,6 +1304,14 @@ func (s *Server) handleCommentTicket(w http.ResponseWriter, r *http.Request) {
 	id, ok := sreParseID(r)
 	if !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "common.invalid_id")})
+		return
+	}
+	prev, found := s.tickets.Get(id)
+	if !found {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "ticket.not_found")})
+		return
+	}
+	if !s.requireTicketAccess(w, r, prev) {
 		return
 	}
 	var in struct {
@@ -1274,6 +1335,14 @@ func (s *Server) handleDeleteTicket(w http.ResponseWriter, r *http.Request) {
 	id, ok := sreParseID(r)
 	if !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "common.invalid_id")})
+		return
+	}
+	prev, found := s.tickets.Get(id)
+	if !found {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "ticket.not_found")})
+		return
+	}
+	if !s.requireTicketAccess(w, r, prev) {
 		return
 	}
 	s.tickets.Delete(id)
@@ -3587,6 +3656,9 @@ func (s *Server) handleGetDiagnosisChatHistory(w http.ResponseWriter, r *http.Re
 	id, ok := sreParseID(r)
 	if !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "common.invalid_id")})
+		return
+	}
+	if _, ok := s.requireIncidentByID(w, r, id); !ok {
 		return
 	}
 	var history []diagnosisChatMessage

@@ -185,6 +185,169 @@ func (s *Server) requireIncidentAccess(w http.ResponseWriter, r *http.Request, h
 	return s.requireHostAccess(w, r, hostID)
 }
 
+// requireIncidentByID loads an incident and enforces host scope on it.
+// Used by mutate paths (ack/resolve/comment) that previously only looked up by id.
+func (s *Server) requireIncidentByID(w http.ResponseWriter, r *http.Request, id int64) (Incident, bool) {
+	inc, found := s.incidents.Get(id)
+	if !found {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "incident.not_found")})
+		return Incident{}, false
+	}
+	if !s.requireIncidentAccess(w, r, inc.HostID) {
+		return Incident{}, false
+	}
+	return inc, true
+}
+
+// ticketHostIDs returns every host this ticket is bound to: linked incident host
+// plus any OpsLink of type "host". Empty means platform-level (no host scope).
+func (s *Server) ticketHostIDs(tk Ticket) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			return
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	if tk.IncidentID > 0 {
+		if inc, ok := s.incidents.Get(tk.IncidentID); ok {
+			add(inc.HostID)
+		}
+	}
+	for _, l := range tk.Links {
+		if strings.EqualFold(l.Type, "host") {
+			add(l.ID)
+		}
+		if strings.EqualFold(l.Type, "incident") {
+			if id := parseOpsLinkInt(l.ID); id > 0 {
+				if inc, ok := s.incidents.Get(id); ok {
+					add(inc.HostID)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// userCanAccessTicket reports whether every host bound to the ticket is in scope.
+// Tickets with no host binding stay visible (same rule as host-less incidents).
+func (s *Server) userCanAccessTicket(u AccountConfig, tk Ticket) bool {
+	if roleRank(u.Role) >= roleRank(RoleAdmin) || !u.hostScopeRestricted() {
+		return true
+	}
+	hosts := s.ticketHostIDs(tk)
+	if len(hosts) == 0 {
+		return true
+	}
+	for _, h := range hosts {
+		if !s.userCanAccessHost(u, h) {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Server) requireTicketAccess(w http.ResponseWriter, r *http.Request, tk Ticket) bool {
+	u, ok := s.currentUser(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return false
+	}
+	if s.userCanAccessTicket(u, tk) {
+		return true
+	}
+	writeJSON(w, http.StatusForbidden, map[string]string{"error": "无权访问该主机（主机组/标签授权）"})
+	return false
+}
+
+// requireTicketHostBindings enforces host scope on incident_id / host|incident links
+// a caller is about to attach (create / update / link).
+func (s *Server) requireTicketHostBindings(w http.ResponseWriter, r *http.Request, incidentID int64, links []OpsLink) bool {
+	if incidentID > 0 {
+		if inc, ok := s.incidents.Get(incidentID); ok {
+			if !s.requireIncidentAccess(w, r, inc.HostID) {
+				return false
+			}
+		}
+	}
+	for _, l := range links {
+		switch strings.ToLower(strings.TrimSpace(l.Type)) {
+		case "host":
+			if id := strings.TrimSpace(l.ID); id != "" && !s.requireHostAccess(w, r, id) {
+				return false
+			}
+		case "incident":
+			if id := parseOpsLinkInt(l.ID); id > 0 {
+				if inc, ok := s.incidents.Get(id); ok && !s.requireIncidentAccess(w, r, inc.HostID) {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
+func (s *Server) filterTicketsForUser(r *http.Request, list []Ticket) []Ticket {
+	u, ok := s.currentUser(r)
+	if !ok || !u.hostScopeRestricted() || roleRank(u.Role) >= roleRank(RoleAdmin) {
+		return list
+	}
+	out := make([]Ticket, 0, len(list))
+	for _, tk := range list {
+		if s.userCanAccessTicket(u, tk) {
+			out = append(out, tk)
+		}
+	}
+	return out
+}
+
+// requireRemediationRunAccess enforces host scope before approve/reject.
+// Approving a pending run launches a playbook on run.HostID — without this check,
+// a folder-scoped operator can execute change modules on out-of-scope hosts.
+func (s *Server) requireRemediationRunAccess(w http.ResponseWriter, r *http.Request, runID int64) (RemediationRun, bool) {
+	var run RemediationRun
+	found := false
+	for _, rr := range s.remediation.Runs() {
+		if rr.ID == runID {
+			run, found = rr, true
+			break
+		}
+	}
+	if !found && s.pg != nil {
+		for _, rr := range s.pg.listRemediationRuns(1000) {
+			if rr.ID == runID {
+				run, found = rr, true
+				break
+			}
+		}
+	}
+	if !found {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "remediation.run_not_found")})
+		return RemediationRun{}, false
+	}
+	if !s.requireHostAccess(w, r, run.HostID) {
+		return RemediationRun{}, false
+	}
+	return run, true
+}
+
+func (s *Server) filterRemediationRunsForUser(r *http.Request, list []RemediationRun) []RemediationRun {
+	u, ok := s.currentUser(r)
+	if !ok || !u.hostScopeRestricted() || roleRank(u.Role) >= roleRank(RoleAdmin) {
+		return list
+	}
+	out := make([]RemediationRun, 0, len(list))
+	for _, run := range list {
+		if run.HostID == "" || s.userCanAccessHost(u, run.HostID) {
+			out = append(out, run)
+		}
+	}
+	return out
+}
+
 // filterIncidentsForUser drops host-bound incidents outside the caller's scope.
 func (s *Server) filterIncidentsForUser(r *http.Request, list []Incident) []Incident {
 	u, ok := s.currentUser(r)
