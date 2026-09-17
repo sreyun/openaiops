@@ -406,7 +406,9 @@ func (s *Server) handleAgentUpdateStart(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "confirm=true required for agent fleet update"})
 		return
 	}
-	hosts := s.resolveAgentUpdateTargets(req)
+	// Fleet OTA replaces agent binaries — host-scoped operators must not push
+	// updates (or all:true) onto hosts outside AllowedHostIDs / folders.
+	hosts := s.filterHostsForUser(r, s.resolveAgentUpdateTargets(req))
 	if len(hosts) == 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no matching hosts"})
 		return

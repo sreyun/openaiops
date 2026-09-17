@@ -527,12 +527,17 @@ func (s *Server) handleApprovePlaybookExecution(w http.ResponseWriter, r *http.R
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "仅待审批的执行可批准"})
 		return
 	}
+	if !s.requirePlaybookExecutionHostAccess(w, r, exec) {
+		return
+	}
 	pb, ok := s.playbooks.Get(exec.PlaybookID)
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "playbook.not_found")})
 		return
 	}
-	hosts := s.onlinePlaybookTargets(pb)
+	// Mirror handleExecutePlaybook: never launch change modules on hosts outside
+	// the caller's AllowedHostIDs / folder scope.
+	hosts := s.filterHostsForUser(r, s.onlinePlaybookTargets(pb))
 	if len(hosts) == 0 {
 		s.playbooks.FinishExecution(id, "failed")
 		s.persistPlaybookExecution(id)
@@ -570,6 +575,9 @@ func (s *Server) handleRejectPlaybookExecution(w http.ResponseWriter, r *http.Re
 	}
 	if exec.Status != "pending_approval" {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "仅待审批的执行可拒绝"})
+		return
+	}
+	if !s.requirePlaybookExecutionHostAccess(w, r, exec) {
 		return
 	}
 	s.playbooks.FinishExecution(id, "rejected")

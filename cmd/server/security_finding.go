@@ -298,11 +298,6 @@ func (s *Server) handleUpdateSecurityFindingState(w http.ResponseWriter, r *http
 		writeSecErr(w, http.StatusServiceUnavailable, "finding store unavailable")
 		return
 	}
-	// 标记"已忽略/已修复"会改变这台主机的安全结论，属于写操作：
-	// 主机组授权受限的账号不能替范围外的主机下这个结论。
-	if strings.TrimSpace(req.HostID) != "" && !s.requireHostAccess(w, r, req.HostID) {
-		return
-	}
 	key := strings.TrimSpace(req.Key)
 	if key == "" {
 		switch strings.TrimSpace(req.Scope) {
@@ -318,6 +313,18 @@ func (s *Server) handleUpdateSecurityFindingState(w http.ResponseWriter, r *http
 			writeSecErr(w, http.StatusBadRequest, "scope or key required")
 			return
 		}
+	}
+	// 标记"已忽略/已修复"会改变这台主机的安全结论，属于写操作：
+	// 主机组授权受限的账号不能替范围外的主机下这个结论。
+	// Keys are "host:{hostID}:…" — omitting host_id must not bypass the gate.
+	hostID := strings.TrimSpace(req.HostID)
+	if hostID == "" {
+		if parts := strings.SplitN(key, ":", 3); len(parts) >= 2 && parts[0] == "host" {
+			hostID = parts[1]
+		}
+	}
+	if hostID != "" && !s.requireHostAccess(w, r, hostID) {
+		return
 	}
 	st, err := s.secFindings.upsert(key, req.Scope, req.Status, req.Note, s.actorName(r))
 	if err != nil {

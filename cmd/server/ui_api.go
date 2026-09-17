@@ -405,6 +405,11 @@ func (s *Server) handleAlertClear(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "common.invalid_json")})
 		return
 	}
+	// Same host-scope gate as ack/silence — b9e35f3 dropped this check while
+	// leaving the regression test (TestAlertClearRespectsHostScope) intact.
+	if req.HostID != "" && !s.requireHostAccess(w, r, req.HostID) {
+		return
+	}
 	key := req.HostID + "/" + req.Type + "/" + req.Scope
 	s.store.ClearAlertState(key)
 	label := s.hostLabelForID(req.HostID)

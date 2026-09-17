@@ -185,6 +185,31 @@ func (s *Server) requireIncidentAccess(w http.ResponseWriter, r *http.Request, h
 	return s.requireHostAccess(w, r, hostID)
 }
 
+// requirePlaybookExecutionHostAccess denies approve/reject when any host recorded
+// on the pending execution is outside the caller's scope. Manual execute already
+// filters via filterHostsForUser; schedule-approval previously launched the full
+// unfiltered online target set.
+func (s *Server) requirePlaybookExecutionHostAccess(w http.ResponseWriter, r *http.Request, exec PlaybookExecution) bool {
+	u, ok := s.currentUser(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return false
+	}
+	if !u.hostScopeRestricted() || roleRank(u.Role) >= roleRank(RoleAdmin) {
+		return true
+	}
+	for hid := range exec.HostResults {
+		if strings.TrimSpace(hid) == "" {
+			continue
+		}
+		if !s.userCanAccessHost(u, hid) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "无权访问该主机（主机组/标签授权）"})
+			return false
+		}
+	}
+	return true
+}
+
 // filterIncidentsForUser drops host-bound incidents outside the caller's scope.
 func (s *Server) filterIncidentsForUser(r *http.Request, list []Incident) []Incident {
 	u, ok := s.currentUser(r)
