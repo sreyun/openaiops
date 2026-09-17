@@ -18,6 +18,30 @@ func TestRoutesRegister(t *testing.T) {
 	(&Server{}).Routes()
 }
 
+// v0.20.39 shipped full-backup + support-bundle handlers/UI/docs but never
+// registered them in Routes(). Settings "整套备份" and "下载诊断包" then fell
+// through to GET / → HTTP 405, so VM/recording disaster-recovery backups never
+// ran from the panel.
+func TestFullBackupAndSupportBundleRoutesRegistered(t *testing.T) {
+	mux, ok := (&Server{}).Routes().(*http.ServeMux)
+	if !ok {
+		t.Fatal("Routes() did not return *http.ServeMux")
+	}
+	cases := []struct {
+		method, path, wantPattern string
+	}{
+		{http.MethodPost, "/api/v1/admin/backups/full", "POST /api/v1/admin/backups/full"},
+		{http.MethodGet, "/api/v1/admin/support-bundle", "GET /api/v1/admin/support-bundle"},
+	}
+	for _, tc := range cases {
+		_, pattern := mux.Handler(httptest.NewRequest(tc.method, tc.path, nil))
+		if pattern != tc.wantPattern {
+			t.Errorf("%s %s matched %q, want %q (missing registration falls through to GET / → 405)",
+				tc.method, tc.path, pattern, tc.wantPattern)
+		}
+	}
+}
+
 // 不存在的 API 路径必须回 404，且**任何方法都一样**。
 //
 // 这条不是形式主义：`GET /` 是根子树模式，在 Go 的 ServeMux 里匹配任意路径。没有
