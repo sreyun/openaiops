@@ -10,10 +10,15 @@ import (
 )
 
 func (s *Server) handleHosts(w http.ResponseWriter, r *http.Request) {
-	hosts := s.filterHostsForUser(r, s.store.ListHosts())
-	if s.cfg.ensureHostFoldersMigrated(hosts) {
+	// First-time folder migration rebuilds HostFolders/HostFolderAssign from the
+	// host list it is given. Always migrate from the full fleet — a scoped
+	// operator's filtered view must not decide (and permanently drop) other
+	// hosts' category folders. See TestMigrationRebuildsFromEveryHostNotJustVisibleOnes.
+	allHosts := s.store.ListHosts()
+	if s.cfg.ensureHostFoldersMigrated(allHosts) {
 		_ = s.cfg.save()
 	}
+	hosts := s.filterHostsForUser(r, allHosts)
 	now := time.Now().Unix()
 	offline := int64(s.cfg.Thresholds().OfflineAfter.Seconds())
 	// staleAfter 是"数据滞后但主机尚未判离线"的阈值。它必须高于正常上报节奏（默认 30s），

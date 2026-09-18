@@ -233,6 +233,41 @@ func (s *Server) filterAlertRecordsForUser(r *http.Request, records []AlertRecor
 	return out
 }
 
+// filterDeskSessionsForUser drops desktop session metadata outside the caller's
+// host scope. List/replay previously returned every host's sessions while
+// open/WS already required requireHostAccess.
+func (s *Server) filterDeskSessionsForUser(r *http.Request, sessions []deskSessionInfo) []deskSessionInfo {
+	u, ok := s.currentUser(r)
+	if !ok || !u.hostScopeRestricted() || roleRank(u.Role) >= roleRank(RoleAdmin) {
+		return sessions
+	}
+	can := s.hostAccessFor(u)
+	out := make([]deskSessionInfo, 0, len(sessions))
+	for _, sess := range sessions {
+		if sess.HostID == "" || can(sess.HostID) {
+			out = append(out, sess)
+		}
+	}
+	return out
+}
+
+// filterTermSessionsForUser drops terminal session metadata outside the caller's
+// host scope. Live open already gates; list/replay/observe must match.
+func (s *Server) filterTermSessionsForUser(r *http.Request, sessions []termSessionInfo) []termSessionInfo {
+	u, ok := s.currentUser(r)
+	if !ok || !u.hostScopeRestricted() || roleRank(u.Role) >= roleRank(RoleAdmin) {
+		return sessions
+	}
+	can := s.hostAccessFor(u)
+	out := make([]termSessionInfo, 0, len(sessions))
+	for _, sess := range sessions {
+		if sess.HostID == "" || can(sess.HostID) {
+			out = append(out, sess)
+		}
+	}
+	return out
+}
+
 // filterInventoryRows keeps only inventory maps whose host_id the caller may access.
 func (s *Server) filterInventoryRows(r *http.Request, rows []map[string]any) []map[string]any {
 	u, ok := s.currentUser(r)

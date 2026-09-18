@@ -1093,6 +1093,46 @@ func (m *termManager) listSessions() []termSessionInfo {
 	return out
 }
 
+// sessionHostID resolves the host bound to a terminal session (live, memory
+// archive, on-disk archive, or PG metadata index). Used so list/replay/observe
+// can enforce the same host-scope gate as opening a live shell.
+func (m *termManager) sessionHostID(sessionID string) (string, bool) {
+	if sessionID == "" || m == nil {
+		return "", false
+	}
+	m.mu.Lock()
+	if s, ok := m.sessions[sessionID]; ok && s != nil && s.hostID != "" {
+		hid := s.hostID
+		m.mu.Unlock()
+		return hid, true
+	}
+	for _, a := range m.archived {
+		if a.info.ID == sessionID && a.info.HostID != "" {
+			hid := a.info.HostID
+			m.mu.Unlock()
+			return hid, true
+		}
+	}
+	pg := m.pg
+	m.mu.Unlock()
+	if m.recDir != "" {
+		if b, err := os.ReadFile(m.recordingPath(sessionID)); err == nil {
+			var d dbTermArchive
+			if json.Unmarshal(b, &d) == nil && d.Info.HostID != "" {
+				return d.Info.HostID, true
+			}
+		}
+	}
+	if pg != nil {
+		for _, info := range pg.listTermRecordings(500) {
+			if info.ID == sessionID && info.HostID != "" {
+				return info.HostID, true
+			}
+		}
+	}
+	return "", false
+}
+
 // getRecording returns the recorded frames for a session (for replay). Live
 // sessions come from memory; ended sessions come from the in-memory archive if
 // still loaded, otherwise from the persisted file (survives restart / eviction).

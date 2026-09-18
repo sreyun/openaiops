@@ -157,12 +157,58 @@ func (m *deskManager) getRecording(id string) []deskRecordFrame {
 	return a.Recording
 }
 
+// sessionHostID resolves the host bound to a desktop session (live, memory
+// archive, or on-disk archive). Used to enforce host-scope RBAC on list/replay
+// the same way open/WS already call requireHostAccess.
+func (m *deskManager) sessionHostID(id string) (string, bool) {
+	if id == "" || m == nil {
+		return "", false
+	}
+	m.mu.Lock()
+	if s := m.sessions[id]; s != nil && s.hostID != "" {
+		hid := s.hostID
+		m.mu.Unlock()
+		return hid, true
+	}
+	for _, a := range m.archived {
+		if a.Info.ID == id && a.Info.HostID != "" {
+			hid := a.Info.HostID
+			m.mu.Unlock()
+			return hid, true
+		}
+	}
+	dir := m.recDir
+	m.mu.Unlock()
+	if dir == "" {
+		return "", false
+	}
+	b, err := os.ReadFile(filepath.Join(dir, id+".json"))
+	if err != nil {
+		return "", false
+	}
+	var a deskArchive
+	if json.Unmarshal(b, &a) != nil || a.Info.HostID == "" {
+		return "", false
+	}
+	return a.Info.HostID, true
+}
+
 func (s *Server) handleListDesktopSessions(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.desk.listSessions())
+	writeJSON(w, http.StatusOK, s.filterDeskSessionsForUser(r, s.desk.listSessions()))
 }
 
 func (s *Server) handleDesktopReplay(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	hostID, ok := s.desk.sessionHostID(id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "common.session_gone")})
+		return
+	}
+	// Live open/WS already requireHostAccess; replay must too — otherwise a
+	// scoped operator can pull screen frames for any host by session id.
+	if !s.requireHostAccess(w, r, hostID) {
+		return
+	}
 	frames := s.desk.getRecording(id)
 	if frames == nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "common.session_gone")})

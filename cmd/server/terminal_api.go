@@ -7,7 +7,7 @@ import "net/http"
 // -----------------------------------------------------------------------
 
 func (s *Server) handleListTerminalSessions(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.term.listSessions())
+	writeJSON(w, http.StatusOK, s.filterTermSessionsForUser(r, s.term.listSessions()))
 }
 
 func (s *Server) handleTerminalReplay(w http.ResponseWriter, r *http.Request) {
@@ -19,6 +19,16 @@ func (s *Server) handleTerminalReplay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sid := r.PathValue("id")
+	hostID, ok := s.term.sessionHostID(sid)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "terminal.session_not_found")})
+		return
+	}
+	// Live open requires requireHostAccess; replay must too — terminal verify
+	// alone must not let a scoped operator stream foreign hosts' shell I/O.
+	if !s.requireHostAccess(w, r, hostID) {
+		return
+	}
 	frames := s.term.getRecording(sid)
 	if frames == nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "terminal.session_not_found")})
@@ -39,6 +49,14 @@ func (s *Server) handleTerminalObserve(w http.ResponseWriter, r *http.Request) {
 	// secondary verification, same as opening a shell.
 	if verified, _ := s.auth.isTerminalVerified(r); !verified {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": Tr(r, "terminal_auth.terminal_verify_required"), "code": "terminal_verify_required"})
+		return
+	}
+	live := s.term.get(sid)
+	if live == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "terminal.session_not_found")})
+		return
+	}
+	if !s.requireHostAccess(w, r, live.hostID) {
 		return
 	}
 	obs, ok := s.term.addObserver(sid)
