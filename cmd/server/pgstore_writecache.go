@@ -46,6 +46,16 @@ func newPGWriteCache() *pgWriteCache {
 	}
 }
 
+// resetWriteCache drops every remembered hash / id set so the next flush
+// re-seeds from PostgreSQL. Required after an online DROP+pg_restore: the
+// process keeps running with a cache that still describes the pre-restore DB.
+func (p *pgStore) resetWriteCache() {
+	if p == nil {
+		return
+	}
+	p.wc = newPGWriteCache()
+}
+
 // isChanged reports whether raw differs from the last value remembered for key.
 // It does NOT record anything — call remember only after a successful commit.
 func (c *pgWriteCache) isChanged(key string, raw []byte) bool {

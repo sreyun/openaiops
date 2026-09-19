@@ -251,6 +251,15 @@ func (s *Server) listBackupsFS() ([]BackupMeta, error) {
 }
 
 func (s *Server) createPGBackup(operator, note string) (BackupMeta, error) {
+	return s.createPGBackupProtect(operator, note, "")
+}
+
+// createPGBackupProtect is createPGBackup with a restore-target id that prune
+// must never delete. Used by restorePGBackup: the safety dump is a new file that
+// can push the fleet over RetainCount, and without protection the dump about to
+// be restored is the oldest postgres artifact — prune would os.Remove it, then
+// DROP DATABASE succeeds and pg_restore fails on a missing path (empty DB).
+func (s *Server) createPGBackupProtect(operator, note, protectID string) (BackupMeta, error) {
 	dsn := strings.TrimSpace(os.Getenv("AIOPS_POSTGRES_DSN"))
 	if dsn == "" {
 		s.cfg.mu.RLock()
@@ -298,16 +307,23 @@ func (s *Server) createPGBackup(operator, note string) (BackupMeta, error) {
 			meta.Note += ";remote_ok"
 		}
 	}
-	s.pruneBackups(cfg.RetainCount)
+	s.pruneBackupsExcept(cfg.RetainCount, protectID)
 	return meta, nil
 }
 
 // pruneBackups 按**种类**各留 retain 份。混在一起排序会出现"新做的 VM 备份被一串
 // PG 备份挤出保留窗口"——那等于时序备份开了等于没开。
 func (s *Server) pruneBackups(retain int) {
+	s.pruneBackupsExcept(retain, "")
+}
+
+// pruneBackupsExcept is pruneBackups with an optional id that must survive even
+// when it falls outside the retain window (the dump a restore is about to read).
+func (s *Server) pruneBackupsExcept(retain int, protectID string) {
 	if retain <= 0 {
 		return
 	}
+	protectID = strings.TrimSpace(protectID)
 	list, err := s.listBackups()
 	if err != nil {
 		// 台账读不到（PG 未就绪/表还没建）不该让保留策略整个失效——
@@ -318,6 +334,9 @@ func (s *Server) pruneBackups(retain int) {
 	}
 	kept := map[string]int{}
 	for _, m := range list { // listBackups 已按 created_at 倒序
+		if protectID != "" && m.ID == protectID {
+			continue
+		}
 		kind := backupKindOf(m.ID)
 		kept[kind]++
 		if kept[kind] <= retain {
@@ -373,9 +392,15 @@ func (s *Server) restorePGBackup(id, operator string) error {
 		return fmt.Errorf("未配置 PostgreSQL DSN")
 	}
 	// 1) 破坏性操作前先打一份保护性备份，还原失败也能找回当前状态。
-	safety, err := s.createPGBackup(operator, "pre-restore safety backup")
+	//    Protect the restore target id: safety dump + RetainCount prune must not
+	//    delete the file we are about to feed to pg_restore (see createPGBackupProtect).
+	safety, err := s.createPGBackupProtect(operator, "pre-restore safety backup", id)
 	if err != nil {
 		return fmt.Errorf("还原前保护性备份失败（已中止还原）: %w", err)
+	}
+	// Re-check after prune: if the target vanished we must abort BEFORE drop.
+	if _, err := os.Stat(meta.Path); err != nil {
+		return fmt.Errorf("还原目标备份在保护性备份后不可读（已中止删库）: %w", err)
 	}
 	// 2) 连接维护库 postgres，删除并重建目标库（FORCE 断开存量连接，含服务端自身连接池）。
 	if err := pgRecreateDatabase(dsn); err != nil {
@@ -392,7 +417,14 @@ func (s *Server) restorePGBackup(id, operator string) error {
 		_, _ = s.pg.db.Exec(`INSERT INTO backup_meta(id, created_at, size_bytes, sha256, operator, path, note)
 			VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (id) DO UPDATE SET size_bytes=EXCLUDED.size_bytes, sha256=EXCLUDED.sha256`,
 			safety.ID, safety.CreatedAt, safety.SizeBytes, safety.SHA256, safety.Operator, safety.Path, safety.Note)
+		// 5) Online restore leaves the process's write-dedup cache and in-memory
+		//    host set pointing at the pre-restore world. The next pgFlush would
+		//    either skip re-inserting post-backup hosts (stale hashes → silent
+		//    loss on later restart) or rewrite memory over the restored rows.
+		//    Drop the cache and hold flushes until the operator restarts.
+		s.pg.resetWriteCache()
 	}
+	suspendPGFlushAfterRestore()
 	slog.Info("PostgreSQL restore completed (drop-and-recreate)", "backup", id, "operator", operator)
 	s.store.AddLog(LogEntry{Kind: KindOperation, Level: "warning", Actor: operator, Message: "从备份还原 PostgreSQL（删库重建）：" + id})
 	return nil
@@ -594,7 +626,7 @@ func (s *Server) handleRestoreBackup(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "hint": "还原已执行（删库重建模式，还原前已自动创建保护性备份），建议重启服务端进程以重新加载内存状态"})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "hint": "还原已执行（删库重建模式，还原前已自动创建保护性备份）。PG 周期刷写已暂停，请立即重启服务端进程以重新加载内存状态并恢复刷写"})
 }
 
 func (s *Server) handleGetRetention(w http.ResponseWriter, r *http.Request) {

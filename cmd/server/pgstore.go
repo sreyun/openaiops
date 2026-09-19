@@ -2752,11 +2752,25 @@ const (
 	pgFlushHeavyEveryNth = 20 // 20 × 15s = 5min
 )
 
+// pgFlushSuspended is set after an online DROP+pg_restore. Continuing to flush
+// the pre-restore in-memory mirrors would either skip durable re-inserts (stale
+// write-cache hashes) or overwrite the restored rows. Cleared only by process
+// restart (fresh openPGStore + BindPG).
+var pgFlushSuspended atomic.Bool
+
+func suspendPGFlushAfterRestore() {
+	pgFlushSuspended.Store(true)
+}
+
 // pgFlush persists the current relational state to PostgreSQL (also called on
 // shutdown for a final flush). heavy gates the writes whose payload is large or
 // changes every cycle — the aggregated-log blob and the metric-carrying half of
 // the hosts rows — so the 15s flush does not rewrite them every time.
 func (s *Server) pgFlush(ps *pgStore, heavy bool) {
+	if pgFlushSuspended.Load() {
+		slog.Warn("跳过 PG 刷写：刚完成在线还原，请重启服务端以重新加载内存并恢复刷写")
+		return
+	}
 	defer observePGFlush(time.Now(), heavy) // 刷写延迟是 PG 撑不撑得住最早的信号，见 metrics_prom.go
 	if err := ps.saveIncidents(s.incidents.Export()); err != nil {
 		slog.Warn("PG 同步事件失败", "err", err)
