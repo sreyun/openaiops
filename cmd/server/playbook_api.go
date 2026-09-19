@@ -990,6 +990,7 @@ func (s *Server) handleListExecutions(w http.ResponseWriter, r *http.Request) {
 	if len(list) == 0 {
 		list = s.playbooks.ExecutionHistory()
 	}
+	list = s.filterPlaybookExecutionsForUser(r, list)
 	out := make([]PlaybookExecution, 0, len(list))
 	for _, e := range list {
 		out = append(out, summarizePlaybookExecution(e))
@@ -1012,6 +1013,9 @@ func (s *Server) handleGetExecution(w http.ResponseWriter, r *http.Request) {
 	}
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "playbook.exec_not_found")})
+		return
+	}
+	if !s.requirePlaybookExecutionHostAccess(w, r, exec) {
 		return
 	}
 	view := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("view")))

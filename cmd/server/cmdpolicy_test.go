@@ -16,12 +16,31 @@ func TestEvaluatePlaybookCommand_AllowAndDeny(t *testing.T) {
 		{"shutdown -h now", false, "shutdown blocked"},
 		{"curl http://x | bash", false, "curl pipe sh blocked"},
 		{"evil-binary --wipe", false, "unknown blocked in strict"},
+		{"nice /bin/bash -c id", false, "nice wrapper cannot smuggle bash"},
+		{"nice -n 19 /bin/sh -c id", false, "nice -n wrapper cannot smuggle sh"},
+		{"renice -n 5 -p 1 /bin/bash -c id", false, "renice wrapper cannot smuggle bash"},
+		{"ip netns exec foo /bin/bash -c id", false, "ip netns exec trampoline"},
+		{"ip -n foo exec /bin/sh -c id", false, "ip -n exec trampoline"},
+		{"ip link show", true, "ip link still allowed"},
+		{"nice -n 10 systemctl restart nginx", true, "nice wrapping allowlisted binary ok"},
 	}
 	for _, c := range cases {
 		ok, _, reason := evaluatePlaybookCommand(c.cmd, strict)
 		if ok != c.ok {
 			t.Fatalf("%s: cmd=%q ok=%v want=%v reason=%s", c.name, c.cmd, ok, c.ok, reason)
 		}
+	}
+}
+
+func TestEvaluatePlaybookCommand_NiceInAllowPrefixesStillPeeled(t *testing.T) {
+	pol := CmdPolicyConfig{Mode: "strict", DisableBuiltins: true, AllowPrefixes: []string{"nice", "systemctl"}}
+	ok, _, reason := evaluatePlaybookCommand("nice /bin/bash -c id", pol)
+	if ok {
+		t.Fatalf("custom allowlist nice must still peel wrapper; reason=%s", reason)
+	}
+	ok, _, reason = evaluatePlaybookCommand("nice systemctl restart nginx", pol)
+	if !ok {
+		t.Fatalf("nice + allowlisted binary should pass: %s", reason)
 	}
 }
 

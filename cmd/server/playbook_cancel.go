@@ -83,6 +83,9 @@ func (s *Server) handleCancelPlaybookExecution(w http.ResponseWriter, r *http.Re
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "playbook.exec_not_found")})
 		return
 	}
+	if !s.requirePlaybookExecutionHostAccess(w, r, exec) {
+		return
+	}
 	switch exec.Status {
 	case "cancelled":
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": "cancelled", "already": true})

@@ -185,6 +185,57 @@ func (s *Server) requireIncidentAccess(w http.ResponseWriter, r *http.Request, h
 	return s.requireHostAccess(w, r, hostID)
 }
 
+// requirePlaybookExecutionHostAccess denies get/cancel (and approve on the 352e
+// branch) when any host recorded on the execution is outside the caller's scope.
+// Manual execute already filters via filterHostsForUser; list/get/cancel previously
+// returned full HostResults (including command Output) for foreign hosts.
+func (s *Server) requirePlaybookExecutionHostAccess(w http.ResponseWriter, r *http.Request, exec PlaybookExecution) bool {
+	u, ok := s.currentUser(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return false
+	}
+	if !u.hostScopeRestricted() || roleRank(u.Role) >= roleRank(RoleAdmin) {
+		return true
+	}
+	for hid := range exec.HostResults {
+		if strings.TrimSpace(hid) == "" {
+			continue
+		}
+		if !s.userCanAccessHost(u, hid) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "无权访问该主机（主机组/标签授权）"})
+			return false
+		}
+	}
+	return true
+}
+
+// filterPlaybookExecutionsForUser drops executions that touch any out-of-scope host.
+// Partial redaction would still leak that foreign hosts were targeted; hide the row.
+func (s *Server) filterPlaybookExecutionsForUser(r *http.Request, list []PlaybookExecution) []PlaybookExecution {
+	u, ok := s.currentUser(r)
+	if !ok || !u.hostScopeRestricted() || roleRank(u.Role) >= roleRank(RoleAdmin) {
+		return list
+	}
+	out := make([]PlaybookExecution, 0, len(list))
+	for _, e := range list {
+		allowed := true
+		for hid := range e.HostResults {
+			if strings.TrimSpace(hid) == "" {
+				continue
+			}
+			if !s.userCanAccessHost(u, hid) {
+				allowed = false
+				break
+			}
+		}
+		if allowed {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // filterIncidentsForUser drops host-bound incidents outside the caller's scope.
 func (s *Server) filterIncidentsForUser(r *http.Request, list []Incident) []Incident {
 	u, ok := s.currentUser(r)

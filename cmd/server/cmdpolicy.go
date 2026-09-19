@@ -128,9 +128,11 @@ func evaluatePlaybookCommand(command string, pol CmdPolicyConfig) (ok bool, forc
 
 	allow := append([]string{}, pol.AllowPrefixes...)
 	if !pol.DisableBuiltins {
+		// Intentionally omit nice/renice: they are pure argv wrappers and would
+		// let any binary past a first-word allowlist (nice /bin/bash -c …).
 		allow = append(allow,
 			"systemctl", "service", "docker", "kubectl", "nginx", "apachectl",
-			"supervisorctl", "pm2", "kill", "pkill", "nice", "renice",
+			"supervisorctl", "pm2", "kill", "pkill",
 			"ip", "iptables", "nft", "sysctl", "echo", "printf", "true", ":",
 			"sleep", "logger", "date", "hostname", "uname", "cat",
 			"sed", "awk", "grep", "head", "tail", "ls", "df", "free", "ps",
@@ -151,14 +153,23 @@ func evaluatePlaybookCommand(command string, pol CmdPolicyConfig) (ok bool, forc
 		if seg == "" {
 			continue
 		}
-		first := firstShellWord(seg)
+		// Peel argv wrappers (nice/renice/…) so the real binary is checked.
+		// Also reject ip netns/namespace exec, which is an intentional exec trampoline.
+		checkSeg := peelPlaybookArgvWrappers(seg)
+		if ipNamespaceExec(checkSeg) {
+			if pol.Mode == "advisory" {
+				return true, true, "ip netns/namespace exec 可启动任意命令，建议人工审批后执行"
+			}
+			return false, true, "ip netns/namespace exec 可绕过命令白名单（strict 模式拒绝）"
+		}
+		first := firstShellWord(checkSeg)
 		hit := false
 		for _, p := range allow {
 			p = strings.ToLower(strings.TrimSpace(p))
 			if p == "" {
 				continue
 			}
-			low := strings.ToLower(seg)
+			low := strings.ToLower(checkSeg)
 			if first == p || strings.HasPrefix(low, p+" ") || strings.HasPrefix(low, p+"\t") {
 				hit = true
 				break
@@ -196,6 +207,96 @@ func firstShellWord(cmd string) string {
 		}
 		return strings.ToLower(tok)
 	}
+}
+
+// peelPlaybookArgvWrappers strips leading nice/renice/nohup/time (and their
+// flags) so allowlist checks see the wrapped binary. Without this, a first-word
+// hit on "nice" would accept `nice /bin/bash -c id` under Mode=strict.
+func peelPlaybookArgvWrappers(cmd string) string {
+	wrappers := map[string]bool{
+		"nice": true, "renice": true, "nohup": true, "time": true,
+	}
+	for {
+		cmd = strings.TrimSpace(cmd)
+		first := firstShellWord(cmd)
+		if !wrappers[first] {
+			return cmd
+		}
+		rest := skipShellWord(cmd)
+		// Consume leading option tokens (-n 19, -p PID, -- …) after the wrapper.
+		for {
+			rest = strings.TrimSpace(rest)
+			if rest == "" {
+				return ""
+			}
+			tok, after := splitFirstShellToken(rest)
+			if tok == "" {
+				return rest
+			}
+			if tok == "--" {
+				rest = after
+				break
+			}
+			if strings.HasPrefix(tok, "-") {
+				// Flags that take a separate argument: nice -n 19, renice -p 1234.
+				if tok == "-n" || tok == "-p" || tok == "-u" || tok == "-g" ||
+					strings.HasPrefix(tok, "--adjustment") || strings.HasPrefix(tok, "--pid") ||
+					strings.HasPrefix(tok, "--user") || strings.HasPrefix(tok, "--group") {
+					if !strings.Contains(tok, "=") {
+						rest = after
+						_, rest = splitFirstShellToken(rest)
+						continue
+					}
+				}
+				rest = after
+				continue
+			}
+			break
+		}
+		if rest == "" || rest == cmd {
+			return cmd
+		}
+		cmd = rest
+	}
+}
+
+func skipShellWord(cmd string) string {
+	_, rest := splitFirstShellToken(strings.TrimSpace(cmd))
+	return rest
+}
+
+func splitFirstShellToken(cmd string) (tok, rest string) {
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" {
+		return "", ""
+	}
+	sp := strings.IndexAny(cmd, " \t")
+	if sp < 0 {
+		return cmd, ""
+	}
+	return cmd[:sp], strings.TrimSpace(cmd[sp:])
+}
+
+// ipNamespaceExec reports whether cmd uses `ip` as an arbitrary-exec trampoline
+// (`ip netns exec …` or `ip -n NAME exec …` / `ip --namespace NAME exec …`).
+func ipNamespaceExec(cmd string) bool {
+	fields := strings.Fields(strings.ToLower(strings.TrimSpace(cmd)))
+	if len(fields) < 3 || fields[0] != "ip" {
+		return false
+	}
+	// ip netns exec <ns> <cmd>…
+	for i := 1; i+1 < len(fields); i++ {
+		if fields[i] == "netns" && fields[i+1] == "exec" {
+			return true
+		}
+	}
+	// ip -n|--namespace <name> exec <cmd>…
+	for i := 1; i+2 < len(fields); i++ {
+		if (fields[i] == "-n" || fields[i] == "--namespace") && fields[i+2] == "exec" {
+			return true
+		}
+	}
+	return false
 }
 
 // validatePlaybookCommands / playbookNeedsForcedApproval → playbook_modules.go
