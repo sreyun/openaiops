@@ -138,6 +138,18 @@ func (s *Server) handleAIFollowup(w http.ResponseWriter, r *http.Request) {
 		if title == "" {
 			title = "AI 结论 · " + trimLine(firstNonEmptyOrDash(run.Task, "运维分析"), 40)
 		}
+		// 工单可挂 incident_id：不校验的话，主机组受限账号能把范围外事件绑进自己的工单，
+		// 再靠 resolve 自动结案把范围外事件关掉（与 /tickets 创建路径同一类洞）。
+		if req.IncidentID > 0 {
+			inc, found := s.incidents.Get(req.IncidentID)
+			if !found {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "事件不存在"})
+				return
+			}
+			if !s.requireIncidentAccess(w, r, inc.HostID) {
+				return
+			}
+		}
 		tk, err := s.tickets.Create(Ticket{
 			Title:       title,
 			Description: answer + aiFollowupProvenance(runID),
@@ -167,8 +179,12 @@ func (s *Server) handleAIFollowup(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少 incident_id"})
 			return
 		}
-		if _, ok := s.incidents.Get(req.IncidentID); !ok {
+		inc, ok := s.incidents.Get(req.IncidentID)
+		if !ok {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "事件不存在"})
+			return
+		}
+		if !s.requireIncidentAccess(w, r, inc.HostID) {
 			return
 		}
 		s.incidents.AddEvent(req.IncidentID, "ai_analysis", actor, answer+aiFollowupProvenance(runID))
@@ -183,9 +199,18 @@ func (s *Server) handleAIFollowup(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少 incident_id 或 change_id"})
 			return
 		}
-		if _, ok := s.incidents.Get(req.IncidentID); !ok {
+		inc, ok := s.incidents.Get(req.IncidentID)
+		if !ok {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "事件不存在"})
 			return
+		}
+		if !s.requireIncidentAccess(w, r, inc.HostID) {
+			return
+		}
+		if ch, found := s.changes.Get(req.ChangeID); found {
+			if !s.requireChangeAccess(w, r, ch) {
+				return
+			}
 		}
 		rec, err := s.changes.LinkIncident(req.ChangeID, req.IncidentID)
 		if err != nil {

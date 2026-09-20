@@ -235,6 +235,9 @@ func (s *Server) handleUpsertChangeWindow(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "common.invalid_json")})
 		return
 	}
+	if !s.requireChangeWindowHosts(w, r, in.HostIDs, in.Categories) {
+		return
+	}
 	out, err := s.cfg.UpsertChangeWindow(in)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -243,12 +246,21 @@ func (s *Server) handleUpsertChangeWindow(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, out)
 }
 func (s *Server) handleDeleteChangeWindow(w http.ResponseWriter, r *http.Request) {
-	_ = s.cfg.DeleteChangeWindow(r.PathValue("id"))
+	id := strings.TrimSpace(r.PathValue("id"))
+	for _, wdw := range s.cfg.ChangeWindows() {
+		if wdw.ID == id {
+			if !s.requireChangeWindowHosts(w, r, wdw.HostIDs, wdw.Categories) {
+				return
+			}
+			break
+		}
+	}
+	_ = s.cfg.DeleteChangeWindow(id)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (s *Server) handleListChanges(w http.ResponseWriter, r *http.Request) {
-	rows := changeListRows(s.changes.List())
+	rows := changeListRows(s.filterChangesForUser(r, s.changes.List()))
 	limit, offset, paged := parsePageLimitOffset(r, 50, 500)
 	if !paged {
 		writeJSON(w, http.StatusOK, rows)
@@ -271,6 +283,24 @@ func (s *Server) handleUpsertChange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in.Status = normalizeChangeStatus(in.Status)
+	// Preserve prior host bindings on partial updates before scope checks, so a
+	// scoped caller cannot "edit title only" on a foreign-host change.
+	if in.ID > 0 {
+		if prev, ok := s.changes.Get(in.ID); ok {
+			if !s.requireChangeAccess(w, r, prev) {
+				return
+			}
+			if len(in.HostIDs) == 0 {
+				in.HostIDs = prev.HostIDs
+			}
+			if len(in.Links) == 0 {
+				in.Links = prev.Links
+			}
+		}
+	}
+	if !s.requireChangeAccess(w, r, in) {
+		return
+	}
 	// Prevent bypassing the approval gate by writing status=in_progress directly.
 	if in.Status == ChangeInProgress {
 		hosts := in.HostIDs
@@ -320,15 +350,34 @@ func (s *Server) handleGetChange(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		return
 	}
+	if !s.requireChangeAccess(w, r, rec) {
+		return
+	}
 	writeJSON(w, http.StatusOK, rec)
 }
 func (s *Server) handleLinkChangeIncident(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	rec, ok := s.changes.Get(id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return
+	}
+	if !s.requireChangeAccess(w, r, rec) {
+		return
+	}
 	var in struct {
 		IncidentID int64 `json:"incident_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.IncidentID == 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "incident_id required"})
+		return
+	}
+	inc, found := s.incidents.Get(in.IncidentID)
+	if !found {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": Tr(r, "incident.not_found")})
+		return
+	}
+	if !s.requireIncidentAccess(w, r, inc.HostID) {
 		return
 	}
 	rec, err := s.changes.LinkIncident(id, in.IncidentID)
@@ -343,6 +392,14 @@ func (s *Server) handleLinkChangeIncident(w http.ResponseWriter, r *http.Request
 
 func (s *Server) handleChangeLink(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	prev, ok := s.changes.Get(id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return
+	}
+	if !s.requireChangeAccess(w, r, prev) {
+		return
+	}
 	var in struct {
 		Add    []OpsLink `json:"add"`
 		Remove *OpsLink  `json:"remove"`
@@ -350,6 +407,13 @@ func (s *Server) handleChangeLink(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "common.invalid_json")})
 		return
+	}
+	for _, l := range in.Add {
+		if strings.EqualFold(strings.TrimSpace(l.Type), "host") && strings.TrimSpace(l.ID) != "" {
+			if !s.requireHostAccess(w, r, l.ID) {
+				return
+			}
+		}
 	}
 	rmType, rmID, rmRole := "", "", ""
 	if in.Remove != nil {
@@ -369,6 +433,9 @@ func (s *Server) handleChangeAction(w http.ResponseWriter, r *http.Request, acti
 	rec, ok := s.changes.Get(id)
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return
+	}
+	if !s.requireChangeAccess(w, r, rec) {
 		return
 	}
 	_, freeze := s.cfg.activeFreezeForHosts(rec.HostIDs, time.Now().Unix())

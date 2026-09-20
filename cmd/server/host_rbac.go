@@ -280,6 +280,112 @@ func (cs *ConfigStore) FolderDescendantIDs(root string) []string {
 	return out
 }
 
+// requireHostIDsAccess enforces host scope on every non-empty host id in the list.
+// 变更单 / 冻结窗把 host_ids 当成作用范围：只要有一台落在授权范围外，整单拒绝——
+// 否则受限账号可以给范围外主机伪造「已批准」变更，从而打开 remoteGateCheck 的冻结/高危闸门。
+func (s *Server) requireHostIDsAccess(w http.ResponseWriter, r *http.Request, hostIDs []string) bool {
+	for _, id := range hostIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if !s.requireHostAccess(w, r, id) {
+			return false
+		}
+	}
+	return true
+}
+
+// changeRecordHostIDs collects HostIDs plus any host-typed OpsLink targets.
+func changeRecordHostIDs(rec ChangeRecord) []string {
+	out := make([]string, 0, len(rec.HostIDs)+len(rec.Links))
+	seen := map[string]bool{}
+	add := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			return
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	for _, id := range rec.HostIDs {
+		add(id)
+	}
+	for _, l := range rec.Links {
+		if strings.EqualFold(strings.TrimSpace(l.Type), "host") {
+			add(l.ID)
+		}
+	}
+	return out
+}
+
+func (s *Server) userCanAccessAllHosts(u AccountConfig, hostIDs []string) bool {
+	for _, id := range hostIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if !s.userCanAccessHost(u, id) {
+			return false
+		}
+	}
+	return true
+}
+
+// requireChangeAccess enforces host scope on an existing change record.
+func (s *Server) requireChangeAccess(w http.ResponseWriter, r *http.Request, rec ChangeRecord) bool {
+	return s.requireHostIDsAccess(w, r, changeRecordHostIDs(rec))
+}
+
+// filterChangesForUser drops change records that bind any out-of-scope host.
+// 无主机绑定的平台级变更对受限账号仍可见（与无主机事件一致）；一旦挂了 host_id，
+// 必须全部在授权范围内才返回——避免列表本身泄露「范围外主机正在做变更」。
+func (s *Server) filterChangesForUser(r *http.Request, list []ChangeRecord) []ChangeRecord {
+	u, ok := s.currentUser(r)
+	if !ok || !u.hostScopeRestricted() || roleRank(u.Role) >= roleRank(RoleAdmin) {
+		return list
+	}
+	out := make([]ChangeRecord, 0, len(list))
+	for _, rec := range list {
+		ids := changeRecordHostIDs(rec)
+		if len(ids) == 0 || s.userCanAccessAllHosts(u, ids) {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
+
+// requireChangeWindowHosts gates freeze-window mutate: global windows (no host_ids
+// and no categories) are admin-only; otherwise every listed host must be in scope.
+func (s *Server) requireChangeWindowHosts(w http.ResponseWriter, r *http.Request, hostIDs, categories []string) bool {
+	u, ok := s.currentUser(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return false
+	}
+	hasHosts, hasCats := false, false
+	for _, id := range hostIDs {
+		if strings.TrimSpace(id) != "" {
+			hasHosts = true
+			break
+		}
+	}
+	for _, c := range categories {
+		if strings.TrimSpace(c) != "" {
+			hasCats = true
+			break
+		}
+	}
+	if !hasHosts && !hasCats {
+		if roleRank(u.Role) < roleRank(RoleAdmin) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "全局变更窗口仅管理员可配置"})
+			return false
+		}
+		return true
+	}
+	return s.requireHostIDsAccess(w, r, hostIDs)
+}
+
 // hostLogVisibility 返回一个"这台主机的日志能不能给这个人看"的谓词，不受限时返回 nil
 // （调用方据此跳过过滤，零开销）。
 //
