@@ -145,6 +145,16 @@ func TestChangeWindowGlobalRequiresAdmin(t *testing.T) {
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("foreign window: got %d want 403 body=%s", rr.Code, rr.Body.String())
 	}
+
+	// Categories OR-match every host in that category; host-id-only scoped ops must not set them.
+	body = `{"name":"cat-freeze","freeze":true,"categories":["db"],"start":1,"end":9999999999}`
+	req = withScopedSession(httptest.NewRequest(http.MethodPost, "/api/v1/changes/windows", strings.NewReader(body)), tok)
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	s.handleUpsertChangeWindow(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("category window for host-id scope: got %d want 403 body=%s", rr.Code, rr.Body.String())
+	}
 }
 
 func TestAIFollowupRespectsHostScope(t *testing.T) {

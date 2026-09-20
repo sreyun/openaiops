@@ -356,7 +356,9 @@ func (s *Server) filterChangesForUser(r *http.Request, list []ChangeRecord) []Ch
 }
 
 // requireChangeWindowHosts gates freeze-window mutate: global windows (no host_ids
-// and no categories) are admin-only; otherwise every listed host must be in scope.
+// and no categories) are admin-only; listed hosts must be in scope; categories expand
+// freeze to every host in that category (OR-matched with host_ids in activeFreezeWindow),
+// so they require a matching AllowedTags entry (or admin).
 func (s *Server) requireChangeWindowHosts(w http.ResponseWriter, r *http.Request, hostIDs, categories []string) bool {
 	u, ok := s.currentUser(r)
 	if !ok {
@@ -370,10 +372,12 @@ func (s *Server) requireChangeWindowHosts(w http.ResponseWriter, r *http.Request
 			break
 		}
 	}
+	cats := make([]string, 0, len(categories))
 	for _, c := range categories {
-		if strings.TrimSpace(c) != "" {
+		c = strings.TrimSpace(c)
+		if c != "" {
 			hasCats = true
-			break
+			cats = append(cats, c)
 		}
 	}
 	if !hasHosts && !hasCats {
@@ -383,7 +387,26 @@ func (s *Server) requireChangeWindowHosts(w http.ResponseWriter, r *http.Request
 		}
 		return true
 	}
-	return s.requireHostIDsAccess(w, r, hostIDs)
+	if hasCats && roleRank(u.Role) < roleRank(RoleAdmin) {
+		if len(u.AllowedTags) == 0 {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "分类范围变更窗口仅管理员或标签授权账号可配置"})
+			return false
+		}
+		allowed := map[string]bool{}
+		for _, t := range u.AllowedTags {
+			allowed[strings.ToLower(strings.TrimSpace(t))] = true
+		}
+		for _, c := range cats {
+			if !allowed[strings.ToLower(c)] {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "无权配置该分类的变更窗口"})
+				return false
+			}
+		}
+	}
+	if hasHosts && !s.requireHostIDsAccess(w, r, hostIDs) {
+		return false
+	}
+	return true
 }
 
 // hostLogVisibility 返回一个"这台主机的日志能不能给这个人看"的谓词，不受限时返回 nil
