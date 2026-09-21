@@ -96,7 +96,7 @@ func (s *Server) findDuplicateHosts() []dupGroupView {
 
 // handleHostDuplicates lists duplicate host records (same machine, different id).
 func (s *Server) handleHostDuplicates(w http.ResponseWriter, r *http.Request) {
-	groups := s.findDuplicateHosts()
+	groups := s.filterDupGroupsForUser(r, s.findDuplicateHosts())
 	stale := 0
 	for _, g := range groups {
 		stale += g.Stale
@@ -107,17 +107,62 @@ func (s *Server) handleHostDuplicates(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"groups": groups, "stale_total": stale})
 }
 
+// filterDupGroupsForUser drops hosts outside the caller's scope from duplicate
+// groups. Groups that no longer have 2+ visible members are removed entirely —
+// a scoped operator must not learn about foreign reinstall identities.
+func (s *Server) filterDupGroupsForUser(r *http.Request, groups []dupGroupView) []dupGroupView {
+	u, ok := s.currentUser(r)
+	if !ok || !u.hostScopeRestricted() || roleRank(u.Role) >= roleRank(RoleAdmin) {
+		return groups
+	}
+	can := s.hostAccessFor(u)
+	out := make([]dupGroupView, 0, len(groups))
+	for _, g := range groups {
+		hosts := make([]dupHostView, 0, len(g.Hosts))
+		stale := 0
+		for _, h := range g.Hosts {
+			if !can(h.ID) {
+				continue
+			}
+			hosts = append(hosts, h)
+			if h.Stale {
+				stale++
+			}
+		}
+		if len(hosts) < 2 {
+			continue
+		}
+		g.Hosts = hosts
+		g.Stale = stale
+		out = append(out, g)
+	}
+	for i := range out {
+		out[i].Group = i + 1
+	}
+	return out
+}
+
 // handleCleanupDuplicates deletes stale duplicate host records.
 //
 // 只删"同指纹 + 非当前身份 + 已离线"的记录 —— 三个条件同时满足才动手。
 // 这是**不可逆**操作，所以判据必须严到不可能误伤：正在上报的主机、
 // 没有指纹的主机、组里唯一的主机，一律不碰。
+// 主机范围授权的 operator 只能清理自己有权的 host_id（与 DELETE /hosts/{id} 同尺）。
 func (s *Server) handleCleanupDuplicates(w http.ResponseWriter, r *http.Request) {
+	u, ok := s.currentUser(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	can := s.hostAccessFor(u)
 	groups := s.findDuplicateHosts()
 	var deleted []string
 	for _, g := range groups {
 		for _, h := range g.Hosts {
 			if !h.Stale {
+				continue
+			}
+			if !can(h.ID) {
 				continue
 			}
 			if s.store.DeleteHost(h.ID) {

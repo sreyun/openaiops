@@ -170,6 +170,9 @@ func (s *Server) handleDeleteHyperV(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hostID required"})
 		return
 	}
+	if !s.requireHostAccess(w, r, hostID) {
+		return
+	}
 	label := s.hostLabelForID(hostID)
 	s.removeHyperVForHost(hostID)
 	slog.Info("删除 Hyper-V 清单", "host", hostID, "actor", s.clientIP(r))
@@ -180,11 +183,18 @@ func (s *Server) handleDeleteHyperV(w http.ResponseWriter, r *http.Request) {
 // handleCleanupHyperVDuplicates permanently deletes orphan Hyper-V inventories
 // (same physical host, old host_id after Agent reinstall). Only non-live losers
 // are removed; the currently reporting identity is kept.
+// 主机范围授权的 operator 只能清自己有权的宿主机清单（与 DELETE /hyperv/{hostID} 同尺）。
 func (s *Server) handleCleanupHyperVDuplicates(w http.ResponseWriter, r *http.Request) {
 	if s.pg == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"deleted": []string{}, "count": 0})
 		return
 	}
+	u, ok := s.currentUser(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	can := s.hostAccessFor(u)
 	rows, err := s.pg.getAllHyperVInventories()
 	if err != nil {
 		slog.Warn("查询 Hyper-V 清单失败", "err", err)
@@ -194,6 +204,9 @@ func (s *Server) handleCleanupHyperVDuplicates(w http.ResponseWriter, r *http.Re
 	_, stale := s.splitHyperVInventories(rows)
 	deleted := make([]string, 0, len(stale))
 	for _, id := range stale {
+		if !can(id) {
+			continue
+		}
 		s.removeHyperVForHost(id)
 		deleted = append(deleted, id)
 	}

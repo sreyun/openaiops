@@ -824,12 +824,57 @@ func (s *Server) handlePutHostFolders(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "common.invalid_json")})
 		return
 	}
+	// setHostFoldersTree drops HostFolderAssign/Categories for any host whose
+	// folder id is missing from the new tree. A scoped operator PUTting
+	// {"folders":[]} (or omitting folders that hold foreign hosts) would wipe
+	// fleet-wide assignments and defeat AllowedFolderIDs. Refuse when any
+	// out-of-scope host would lose its folder.
+	if !s.requireFolderTreePutAccess(w, r, req.Folders) {
+		return
+	}
 	if err := s.cfg.setHostFoldersTree(req.Folders); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	s.store.AddLog(LogEntry{Kind: KindOperation, Level: "info", Actor: s.actorName(r), IP: s.clientIP(r), Message: "host folders tree saved"})
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
+}
+
+// requireFolderTreePutAccess ensures a host-scoped caller cannot drop folder
+// assignments for hosts outside their scope via PUT /host-folders.
+func (s *Server) requireFolderTreePutAccess(w http.ResponseWriter, r *http.Request, folders []HostFolderNode) bool {
+	u, ok := s.currentUser(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return false
+	}
+	if !u.hostScopeRestricted() || roleRank(u.Role) >= roleRank(RoleAdmin) {
+		return true
+	}
+	valid := map[string]struct{}{}
+	var mark func([]HostFolderNode)
+	mark = func(list []HostFolderNode) {
+		for _, n := range list {
+			valid[n.ID] = struct{}{}
+			mark(n.Children)
+		}
+	}
+	mark(folders)
+	can := s.hostAccessFor(u)
+	_, assign := s.cfg.hostFoldersSnapshot()
+	for hid, fid := range assign {
+		if fid == "" || fid == HostFolderUngroupedID {
+			continue
+		}
+		if _, ok := valid[fid]; ok {
+			continue
+		}
+		if !can(hid) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "无权访问该主机（主机组/标签授权）"})
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) handlePostHostFolder(w http.ResponseWriter, r *http.Request) {
@@ -1021,6 +1066,12 @@ func (s *Server) handleSetHostFolderBatch(w http.ResponseWriter, r *http.Request
 
 func (s *Server) handleDeleteHostFolder(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	// deleteHostFolder reassigns every host in the folder subtree to the parent
+	// (or ungrouped). Scoped operators must own all affected hosts — otherwise
+	// DELETE becomes a cross-scope assignment mutate.
+	if !s.requireFolderDeleteAccess(w, r, id) {
+		return
+	}
 	if err := s.cfg.deleteHostFolder(id); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -1028,6 +1079,40 @@ func (s *Server) handleDeleteHostFolder(w http.ResponseWriter, r *http.Request) 
 	s.store.AddLog(LogEntry{Kind: KindOperation, Level: "warning", Actor: s.actorName(r), IP: s.clientIP(r),
 		Message: "delete host folder: " + id})
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
+}
+
+// requireFolderDeleteAccess gates DELETE /host-folders/{id} on host scope for
+// every host currently assigned to the folder or its descendants.
+func (s *Server) requireFolderDeleteAccess(w http.ResponseWriter, r *http.Request, folderID string) bool {
+	u, ok := s.currentUser(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return false
+	}
+	if !u.hostScopeRestricted() || roleRank(u.Role) >= roleRank(RoleAdmin) {
+		return true
+	}
+	folders, assign := s.cfg.hostFoldersSnapshot()
+	n := findFolderNode(folders, folderID)
+	if n == nil {
+		// Let deleteHostFolder return the same "not found" error.
+		return true
+	}
+	drop := map[string]struct{}{}
+	for _, sid := range folderSubtreeIDs(*n) {
+		drop[sid] = struct{}{}
+	}
+	can := s.hostAccessFor(u)
+	for hid, fid := range assign {
+		if _, hit := drop[fid]; !hit {
+			continue
+		}
+		if !can(hid) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "无权访问该主机（主机组/标签授权）"})
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) handleSetHostFolder(w http.ResponseWriter, r *http.Request) {
