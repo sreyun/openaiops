@@ -83,6 +83,23 @@ func (s *Server) handleUpsertAPISystem(w http.ResponseWriter, r *http.Request) {
 		sys.Level = "critical"
 	}
 	sys.Env = strings.ToLower(strings.TrimSpace(sys.Env)) // 环境标签规整（prod/staging/dev 或自定义）
+	// 承载主机关联会经 /apimon/systems/{id}/hosts 回传 CPU/内存等实时指标——
+	// 受限账号不能把范围外主机绑进来当指标旁路。
+	if !s.requireHostIDsAccess(w, r, sys.HostIDs) {
+		return
+	}
+	// 分布式探测任务会随每次 agent report 下发到**整支舰队**（含授权范围外主机），
+	// 等同于让外机去访问探测 URL。主机范围受限的账号不得开启。
+	if u, ok := s.currentUser(r); ok && u.hostScopeRestricted() && roleRank(u.Role) < roleRank(RoleAdmin) {
+		for _, ep := range sys.Endpoints {
+			if ep.Distributed {
+				writeJSON(w, http.StatusForbidden, map[string]string{
+					"error": "主机范围受限账号不能启用分布式探测（会下发到授权范围外的 Agent）",
+				})
+				return
+			}
+		}
+	}
 	// 清洗接口：去空名/空 URL，规整方法
 	cleaned := make([]APIEndpoint, 0, len(sys.Endpoints))
 	for _, ep := range sys.Endpoints {
@@ -117,6 +134,14 @@ func (s *Server) handleUpsertAPISystem(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDeleteAPISystem(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	for _, sys := range s.cfg.APISystems() {
+		if sys.ID == id {
+			if !s.requireHostIDsAccess(w, r, sys.HostIDs) {
+				return
+			}
+			break
+		}
+	}
 	_ = s.cfg.DeleteAPISystem(id)
 	s.addAuditLog(r, LogEntry{Kind: KindOperation, Level: "warning", Message: "删除 API 监控业务系统：" + id})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -300,6 +325,9 @@ func (s *Server) handleAPISystemHosts(w http.ResponseWriter, r *http.Request) {
 			hostIDs = sys.HostIDs
 			break
 		}
+	}
+	if !s.requireHostIDsAccess(w, r, hostIDs) {
+		return
 	}
 	now := time.Now().Unix()
 	out := []map[string]any{}

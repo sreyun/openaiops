@@ -944,6 +944,11 @@ func (s *Server) handleUpsertTopologyEdge(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "common.invalid_json")})
 		return
 	}
+	// 拓扑边是 RCA 扩散的输入：挂一条 host-a→host-b / cat:X 边，随后 /topology/rca
+	// 就会把范围外主机的未决事件与硬件变更翻出来。
+	if !s.requireTopologyEdgeAccess(w, r, e) {
+		return
+	}
 	saved, err := s.cfg.UpsertTopologyEdge(e)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -953,7 +958,16 @@ func (s *Server) handleUpsertTopologyEdge(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleDeleteTopologyEdge(w http.ResponseWriter, r *http.Request) {
-	_ = s.cfg.DeleteTopologyEdge(r.PathValue("id"))
+	id := r.PathValue("id")
+	for _, e := range s.cfg.TopologyEdges() {
+		if e.ID == id {
+			if !s.requireTopologyEdgeAccess(w, r, e) {
+				return
+			}
+			break
+		}
+	}
+	_ = s.cfg.DeleteTopologyEdge(id)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -977,7 +991,7 @@ func (s *Server) handleTopologyRCA(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	days, _ := strconv.Atoi(r.URL.Query().Get("days"))
-	writeJSON(w, http.StatusOK, s.computeTopologyRCA(hostID, days))
+	writeJSON(w, http.StatusOK, s.filterTopologyRCAForUser(r, s.computeTopologyRCA(hostID, days)))
 }
 
 // ----------------------------------------------------------------------------

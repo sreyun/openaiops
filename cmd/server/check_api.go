@@ -89,6 +89,14 @@ func (s *Server) handleUpsertCheck(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "check_api.invalid_params")})
 		return
 	}
+	// process 拨测格式 hostID/processName，会读该主机上报的进程表——等同于对主机做持续存在性探测。
+	if c.Type == "process" {
+		if i := strings.IndexByte(c.Target, '/'); i > 0 {
+			if !s.requireHostAccess(w, r, c.Target[:i]) {
+				return
+			}
+		}
+	}
 	if c.IntervalSec < 5 {
 		c.IntervalSec = 30
 	}

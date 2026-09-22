@@ -38,7 +38,6 @@ func (cs *ConfigStore) UpsertBusinessService(in BusinessService) (BusinessServic
 	}
 	in.UpdatedAt = time.Now().Unix()
 	cs.mu.Lock()
-	defer cs.mu.Unlock()
 	if in.ID == "" {
 		in.ID = "svc_" + genToken()[:10]
 		cs.cfg.BusinessServices = append(cs.cfg.BusinessServices, in)
@@ -55,6 +54,9 @@ func (cs *ConfigStore) UpsertBusinessService(in BusinessService) (BusinessServic
 			cs.cfg.BusinessServices = append(cs.cfg.BusinessServices, in)
 		}
 	}
+	// save() 自己再拿 RLock 做快照；这里必须先 Unlock，否则写锁+读锁同协程死锁，
+	// 整个 ConfigStore（含登录/设置/任何配置读写）一并挂死。
+	cs.mu.Unlock()
 	return in, cs.save()
 }
 
@@ -165,6 +167,11 @@ func (s *Server) handleUpsertBusinessService(w http.ResponseWriter, r *http.Requ
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "common.invalid_json")})
 		return
 	}
+	// 业务服务把 host_ids 写进 CMDB 并自动挂拓扑边；受限账号不能绑定范围外主机，
+	// 否则随后 /services/{id}/impact 会把外机未决事件/变更一并翻出来。
+	if !s.requireHostIDsAccess(w, r, in.HostIDs) {
+		return
+	}
 	out, err := s.cfg.UpsertBusinessService(in)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -187,7 +194,13 @@ func (s *Server) handleUpsertBusinessService(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) handleDeleteBusinessService(w http.ResponseWriter, r *http.Request) {
-	_ = s.cfg.DeleteBusinessService(r.PathValue("id"))
+	id := r.PathValue("id")
+	if svc, ok := s.cfg.FindBusinessService(id); ok {
+		if !s.requireHostIDsAccess(w, r, svc.HostIDs) {
+			return
+		}
+	}
+	_ = s.cfg.DeleteBusinessService(id)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -195,6 +208,9 @@ func (s *Server) handleBusinessServiceImpact(w http.ResponseWriter, r *http.Requ
 	svc, ok := s.cfg.FindBusinessService(r.PathValue("id"))
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "service not found"})
+		return
+	}
+	if !s.requireHostIDsAccess(w, r, svc.HostIDs) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.computeServiceImpact(svc))

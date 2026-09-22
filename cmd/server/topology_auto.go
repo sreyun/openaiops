@@ -127,6 +127,12 @@ func (s *Server) handleDiscoverAutoTopology(w http.ResponseWriter, r *http.Reque
 	apply := r.URL.Query().Get("apply") == "1" || r.URL.Query().Get("apply") == "true"
 	added := 0
 	if apply && r.Method == http.MethodPost {
+		u, okUser := s.currentUser(r)
+		scoped := okUser && u.hostScopeRestricted() && roleRank(u.Role) < roleRank(RoleAdmin)
+		can := func(string) bool { return true }
+		if scoped {
+			can = s.hostAccessFor(u)
+		}
 		existing := map[string]bool{}
 		for _, e := range s.cfg.TopologyEdges() {
 			existing[e.From+"|"+e.To+"|"+e.Kind] = true
@@ -135,6 +141,20 @@ func (s *Server) handleDiscoverAutoTopology(w http.ResponseWriter, r *http.Reque
 			key := e.From + "|" + e.To + "|" + e.Kind
 			if existing[key] {
 				continue // 手工边优先：同 from/to/kind 不覆盖
+			}
+			if scoped {
+				// 自动发现会扫全舰队；受限账号只允许落自己授权范围内的边，
+				// 否则 POST ?apply=1 等于给范围外主机批量建 RCA 通道。
+				okEdge := true
+				for _, hid := range s.topologyRefsHostIDs(e.From, e.To) {
+					if !can(hid) {
+						okEdge = false
+						break
+					}
+				}
+				if !okEdge {
+					continue
+				}
 			}
 			e.ID = ""
 			if note := strings.TrimSpace(e.Note); note != "" && !strings.HasPrefix(note, "[auto] ") {

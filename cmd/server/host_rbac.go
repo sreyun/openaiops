@@ -280,6 +280,94 @@ func (cs *ConfigStore) FolderDescendantIDs(root string) []string {
 	return out
 }
 
+// requireHostIDsAccess enforces host scope on every non-empty host id in the list.
+// CMDB / 拓扑 / API 监控等把 host_ids 当成作用范围：只要有一台落在授权范围外就整单拒绝。
+func (s *Server) requireHostIDsAccess(w http.ResponseWriter, r *http.Request, hostIDs []string) bool {
+	for _, id := range hostIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if !s.requireHostAccess(w, r, id) {
+			return false
+		}
+	}
+	return true
+}
+
+// topologyRefsHostIDs extracts concrete host ids referenced by topology node refs
+// (host:<id> or bare id). Category refs expand to every host currently in that
+// category — binding a cat: node is equivalent to binding that whole set.
+func (s *Server) topologyRefsHostIDs(refs ...string) []string {
+	cats := s.hostCategorySnapshot()
+	seen := map[string]bool{}
+	var out []string
+	add := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			return
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	for _, raw := range refs {
+		ref := normalizeTopoRef(raw)
+		if ref == "" {
+			continue
+		}
+		switch topoRefKind(ref) {
+		case "host":
+			add(topoRefValue(ref))
+		case "cat":
+			for _, hid := range s.expandTopoRefToHosts(ref, cats) {
+				add(hid)
+			}
+		}
+	}
+	return out
+}
+
+// requireTopologyEdgeAccess gates creating/updating a topology edge so a scoped
+// operator cannot attach out-of-scope hosts (directly or via cat: expansion).
+func (s *Server) requireTopologyEdgeAccess(w http.ResponseWriter, r *http.Request, e TopologyEdge) bool {
+	return s.requireHostIDsAccess(w, r, s.topologyRefsHostIDs(e.From, e.To))
+}
+
+// filterTopologyRCAForUser drops related hosts / incidents / changes outside the
+// caller's host scope. RCA already gates the seed host; without this filter,
+// same_category soft links and crafted edges disclose foreign host timelines.
+func (s *Server) filterTopologyRCAForUser(r *http.Request, rca TopologyRCA) TopologyRCA {
+	u, ok := s.currentUser(r)
+	if !ok || !u.hostScopeRestricted() || roleRank(u.Role) >= roleRank(RoleAdmin) {
+		return rca
+	}
+	can := s.hostAccessFor(u)
+	hosts := rca.RelatedHosts[:0]
+	kept := map[string]bool{rca.HostID: true}
+	for _, h := range rca.RelatedHosts {
+		if can(h.HostID) {
+			hosts = append(hosts, h)
+			kept[h.HostID] = true
+		}
+	}
+	rca.RelatedHosts = hosts
+	incs := rca.OpenIncidents[:0]
+	for _, inc := range rca.OpenIncidents {
+		if kept[inc.HostID] || can(inc.HostID) {
+			incs = append(incs, inc)
+		}
+	}
+	rca.OpenIncidents = incs
+	chs := rca.RecentChanges[:0]
+	for _, c := range rca.RecentChanges {
+		if kept[c.HostID] || can(c.HostID) {
+			chs = append(chs, c)
+		}
+	}
+	rca.RecentChanges = chs
+	return rca
+}
+
 // hostLogVisibility 返回一个"这台主机的日志能不能给这个人看"的谓词，不受限时返回 nil
 // （调用方据此跳过过滤，零开销）。
 //
