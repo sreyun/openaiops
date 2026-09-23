@@ -194,6 +194,12 @@ func (s *Server) handleUpsertPlaybook(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "common.invalid_json")})
 		return
 	}
+	// Host-scoped operators must not bind (or schedule) targets outside their
+	// AllowedHostIDs: fireScheduledPlaybook has no user context and would otherwise
+	// auto-run on foreign agents. Manual execute already filters; upsert did not.
+	if !s.requirePlaybookTargetsAccess(w, r, p) {
+		return
+	}
 	saved, err := s.playbooks.Upsert(p)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})

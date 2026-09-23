@@ -185,6 +185,75 @@ func (s *Server) requireIncidentAccess(w http.ResponseWriter, r *http.Request, h
 	return s.requireHostAccess(w, r, hostID)
 }
 
+// requireHostIDsAccess enforces host scope on every non-empty host id in the list.
+func (s *Server) requireHostIDsAccess(w http.ResponseWriter, r *http.Request, hostIDs []string) bool {
+	for _, id := range hostIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if !s.requireHostAccess(w, r, id) {
+			return false
+		}
+	}
+	return true
+}
+
+// requirePlaybookTargetsAccess denies saving a playbook whose step targets bind
+// hosts outside the caller's AllowedHostIDs / folder / tag scope.
+//
+// Manual execute already filters via filterHostsForUser, but upsert + schedule
+// did not: a scoped operator could POST target=host:<foreign> (or "all") with
+// schedule.enabled and the server-side scheduler would fire read-only modules
+// (gather_facts / file_head / …) on unauthorized agents with no approval gate.
+func (s *Server) requirePlaybookTargetsAccess(w http.ResponseWriter, r *http.Request, pb Playbook) bool {
+	u, ok := s.currentUser(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return false
+	}
+	if !u.hostScopeRestricted() || roleRank(u.Role) >= roleRank(RoleAdmin) {
+		return true
+	}
+	if s.playbooks == nil {
+		return true
+	}
+	allHosts := s.store.ListHosts()
+	seen := map[string]bool{}
+	var ids []string
+	add := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			return
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	for _, step := range pb.Steps {
+		parts := splitPlaybookTargets(step.Target)
+		if len(parts) == 0 {
+			parts = []string{"all"}
+		}
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+			if part == "" || part == "all" {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "主机范围授权账号不能将剧本目标设为全部主机"})
+				return false
+			}
+			if strings.HasPrefix(part, "host:") {
+				add(part[len("host:"):])
+				continue
+			}
+			for _, h := range s.playbooks.resolveOneTarget(part, allHosts) {
+				if h != nil {
+					add(h.ID)
+				}
+			}
+		}
+	}
+	return s.requireHostIDsAccess(w, r, ids)
+}
+
 // filterIncidentsForUser drops host-bound incidents outside the caller's scope.
 func (s *Server) filterIncidentsForUser(r *http.Request, list []Incident) []Incident {
 	u, ok := s.currentUser(r)

@@ -162,6 +162,9 @@ func (s *Server) handleRestorePlaybookRevision(w http.ResponseWriter, r *http.Re
 	}
 	pb := snap.Snapshot
 	pb.ID = id
+	if !s.requirePlaybookTargetsAccess(w, r, pb) {
+		return
+	}
 	saved, err := s.playbooks.Upsert(pb)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})

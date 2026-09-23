@@ -138,6 +138,13 @@ func (s *Server) handleListPlaybookPacks(w http.ResponseWriter, r *http.Request)
 // POST /api/v1/playbooks/packs/import  {id:"selfheal"} or {ids:[...]}
 func (s *Server) handleImportPlaybookPacks(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 32<<10)
+	// Embedded packs target "all". Importing them via Upsert would let a
+	// host-scoped operator plant fleet-wide playbooks (and later enable a
+	// schedule) without ever passing requirePlaybookTargetsAccess.
+	if u, ok := s.currentUser(r); ok && u.hostScopeRestricted() && roleRank(u.Role) < roleRank(RoleAdmin) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "主机范围授权账号不能导入全量目标剧本包"})
+		return
+	}
 	var req struct {
 		ID  string   `json:"id"`
 		IDs []string `json:"ids"`
