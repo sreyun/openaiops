@@ -102,7 +102,7 @@ func (c *darwinCollector) Collect() (shared.Metrics, error) {
 	m.ProcCount = darwinProcCount()
 	m.ProcessNames = darwinProcNames()
 	m.Uptime = darwinUptime()
-	m.GPUs = cachedGPUs(darwinGPUs)
+	m.GPUs = gpuSnapshot(darwinGPUReadings, nil)
 
 	c.primed = true
 	return m, nil
@@ -171,11 +171,21 @@ func darwinGPUs() []shared.GPUInfo {
 		util, _ := strconv.ParseFloat(out[p:j], 64)
 		gpus = append(gpus, shared.GPUInfo{
 			Name:        darwinGPUModel(out[:idx+i]),
+			Index:       strconv.Itoa(len(gpus)), // ioreg 枚举顺序；多块同名卡靠它区分
 			UtilPercent: round1(util),
 		})
 		idx = j
 	}
 	return gpus
+}
+
+func darwinGPUReadings() []gpuReading {
+	gs := darwinGPUs()
+	rs := make([]gpuReading, len(gs))
+	for i, g := range gs {
+		rs[i].info = g
+	}
+	return rs
 }
 
 // darwinGPUModel finds the nearest preceding `"model"=<"NAME">` (or

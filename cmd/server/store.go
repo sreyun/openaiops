@@ -366,7 +366,8 @@ func (s *Store) UpsertAuthenticated(r shared.Report, fingerprint string) (*Host,
 	}
 
 	sample := shared.Sample{Timestamp: now, Metrics: r.Metrics}
-	sample.ProcessNames = nil // history never stores process lists (only Latest keeps them)
+	sample.ProcessNames = nil                          // history never stores process lists (only Latest keeps them)
+	sample.GPUs = gpusWithoutProcesses(r.Metrics.GPUs) // 同理：GPU 进程表只随 Latest，历史只留进程数
 
 	// ---- Time-series history (multi-tier downsampling) ----
 	// Tier 1: Raw samples (5s interval, ~1.5h)
@@ -402,6 +403,7 @@ func (s *Store) UpsertAuthenticated(r shared.Report, fingerprint string) (*Host,
 
 	latest := sample
 	latest.ProcessNames = r.Metrics.ProcessNames // Latest alone carries the process list
+	latest.GPUs = r.Metrics.GPUs                 // …and the per-GPU process tables
 	h.Latest = &latest
 	if len(r.Custom) > 0 {
 		h.Custom = r.Custom
@@ -574,47 +576,10 @@ func (h *Host) aggregateSamples(samples []shared.Sample, from, to, interval int6
 		}
 	}
 
-	// Per-GPU info: aggregate each GPU by name (average util / VRAM)
-	if len(window) > 0 && len(window[0].GPUs) > 0 {
-		type gacc struct {
-			util, memUsed, memFree, memTotal, temp, n float64
-		}
-		order := []string{}
-		gmap := map[string]*gacc{}
-		for _, s := range window {
-			for _, g := range s.GPUs {
-				a := gmap[g.Name]
-				if a == nil {
-					a = &gacc{}
-					gmap[g.Name] = a
-					order = append(order, g.Name)
-				}
-				a.util += g.UtilPercent
-				a.memUsed += float64(g.MemUsed)
-				a.memFree += float64(g.MemFree)
-				a.memTotal += float64(g.MemTotal)
-				a.temp += g.Temp
-				a.n++
-			}
-		}
-		for _, name := range order {
-			a := gmap[name]
-			if a.n == 0 {
-				continue
-			}
-			gi := shared.GPUInfo{
-				Name:        name,
-				UtilPercent: a.util / a.n,
-				MemUsed:     uint64(a.memUsed / a.n),
-				MemFree:     uint64(a.memFree / a.n),
-				MemTotal:    uint64(a.memTotal / a.n),
-				Temp:        a.temp / a.n,
-			}
-			if gi.MemTotal > 0 {
-				gi.MemPercent = float64(gi.MemUsed) / float64(gi.MemTotal) * 100
-			}
-			agg.GPUs = append(agg.GPUs, gi)
-		}
+	// Per-GPU info: aggregate each GPU by identity (UUID/index/name) — see
+	// aggregateGPUWindow. Keying by name merged identical cards into one.
+	if gpus := aggregateGPUWindow(window); len(gpus) > 0 {
+		agg.GPUs = gpus
 	}
 
 	// Network rates (average)

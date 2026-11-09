@@ -33,6 +33,44 @@
 
 ---
 
+## [v0.20.52] — 2026-11-09
+
+### GPU 资源监控（近期趋势）
+
+**原有不足**
+- **同型号多卡只剩一条线**：时序标签只有 `gpu=<型号名>`，8 块 A100 在同一时间戳写出 8 条同标签样本，VictoriaMetrics 去重后只剩 1 条；RAM 降采样、趋势图（按名 `find()`）、告警（`Scope=型号名`）同样把多卡并成一块，最热的那块卡可能根本报不出告警。
+- **单点快照 + 缓存相位错位**：每 30s 跑一次 nvidia-smi 并缓存 30s，`utilization.gpu` 只代表最近约 1 秒，脉冲负载的峰值大概率漏掉；缓存 TTL 与上报周期相同，ticker 抖动即隔轮上报过期值，`report_interval` 调到 10s 时同一值重复上报 3 次。
+- **维度过少**：仅有利用率 / 温度 / 显存；缺功耗与上限、显存带宽、SM 频率、降频原因、风扇、ECC、进程占用，"为什么慢、谁在用"无从回答。
+- **AMD 漏卡**：只扫 `card0..card7`，带 BMC 显卡（占 card0）的 8 卡 MI 服务器漏掉第 8 块。
+- **hold-forward 只并不删**：掉卡/换卡后旧卡被一直续到窗口末尾，画成一条平直假线。
+
+**采集（Agent）**
+- 后台采样器：默认 `report_interval/3`（夹在 5~15s，默认配置即 10s 一次），可用 `gpu_sample_interval_sec`（2~300s）覆盖；采集不再阻塞上报协程，驱动挂死时超过 3 个采样周期即报"无 GPU"而非过期数据。
+- 按上报窗口聚合：利用率 = 均值 + 峰值（`util_max`），温度取峰值，功耗/频率/显存带宽取均值，降频取时间占比（温度 / 功耗封顶 / 硬件降频），显存、上限、ECC、风扇取最新值。
+- NVIDIA 新增：`index`/`uuid`、显存控制器繁忙度、功耗与功耗上限、风扇、SM 当前/最高频率、降频原因位图、不可纠正 ECC；按 UUID 关联 `--query-compute-apps`，上报每卡计算进程数与按显存排序的 Top 8 进程。
+- nvidia-smi 字段协商：不同驱动不认的字段会让整条查询失败，现按列名解析，失败时剔除报错字段重试并缓存结果；协商不成退回升级前的查询，并用行号补 GPU 序号。
+- AMD（amdgpu sysfs）：枚举全部 `cardN`，新增显存带宽、温度、功耗/上限、风扇、SM 频率、不可纠正 ECC；macOS 按 ioreg 顺序补序号。
+
+**存储与查询（Server）**
+- 时序标签新增 `gpu_index` / `gpu_uuid`，同型号多卡各自成序列；老 Agent 标签集与原序列不变。
+- 新增序列：`aiops_gpu_util_max_percent`、`aiops_gpu_mem_util_percent`、`aiops_gpu_power_watts`、`aiops_gpu_power_limit_watts`、`aiops_gpu_fan_percent`、`aiops_gpu_sm_clock_mhz`、`aiops_gpu_sm_clock_max_mhz`、`aiops_gpu_throttle_{thermal,power,hw}_ratio`、`aiops_gpu_ecc_uncorrected`、`aiops_gpu_proc_count`；未知值不写（不把"不支持"画成 0）。写入 / 读回 / 断点续接由同一张字段表驱动（`gpu_series.go`）。
+- RAM 1m/5m 降采样按 GPU 身份聚合；进程表只随 Latest 下发，历史层只存进程数。
+- hold-forward 对 GPU 与磁盘同口径限次续接，消失超过 4 个步长即移除。
+- GPU 告警 Scope 改为 `GPU<n> · 型号`，同型号多卡各自告警（老 Agent 仍为型号名，已有告警 key 不变）；利用率告警改按窗口均值评估，不再被单点毛刺触发。
+
+**展示（主机「近期趋势」）**
+- 每卡一条曲线，图例为 `GPU3 · NVIDIA A100`，按序号数值排序。
+- 新增图表：负载均衡（全卡均值 / 窗口峰值 / 最低卡）、显存用量（每卡已用 + 容量参照线，取代"已用+空闲"双线）、显存带宽利用率、功耗（对比功耗上限）、SM 频率（对比最高频率）、降频时间占比、风扇、计算进程数、不可纠正 ECC；无数据的维度不画空图。
+- 窗口概览新增 GPU 全卡均值 / 显存最高卡 / 温度最高卡 / 功耗合计，并显示"近期变化"（窗口末 1/4 对比首 1/4）。
+- GPU 图组末尾新增"当前 GPU 状态与进程占用"表；主机卡片显示序号与功耗，温度/硬件降频时显示警示。
+
+**验证**
+- 新增 Agent 测试 10 项（`cmd/agent/gpu_test.go`）、Server 测试 10 项（`cmd/server/gpu_series_test.go`），覆盖多卡身份、字段协商与回退、窗口聚合与突发捕获、过期判定、进程归卡、AMD 枚举、写入→读回全链路、指针不被原地修改、消失卡剪除、降采样按身份聚合、告警 Scope 区分。
+
+### 工程
+- 同步 `config.example.yaml` 与内嵌副本 `cmd/agent/config_example.yaml`（此前内嵌副本多出 2 行注释，`TestEmbeddedConfigExampleIsInSync` 失败）。
+- 趋势窗口概览跳过无数据项，避免 `st.cur` 空引用导致整个弹窗白屏。
+
 ## [v0.20.51] — 2026-11-08
 
 ### 安全修复

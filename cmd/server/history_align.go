@@ -82,7 +82,7 @@ func historyCoversWindow(samples []shared.Sample, from, to int64) bool {
 type histJoinCell struct {
 	s          shared.Sample
 	set        map[string]bool
-	gpuFields  map[string]map[string]bool // gpu name -> field short name
+	gpuFields  map[string]map[string]bool // gpu Key() -> field short name
 	diskFields map[string]map[string]bool // path -> field short name
 	connSet    bool
 }
@@ -132,13 +132,7 @@ func applyHistJoinMetric(byTs map[int64]*histJoinCell, ts int64, name, gpuName, 
 	c := ensureHistCell(byTs, ts)
 	switch {
 	case strings.HasPrefix(name, "aiops_gpu_"):
-		field := setSampleGPU(&c.s, gpuName, name, val)
-		if gpuName == "" {
-			gpuName = "GPU"
-		}
-		if field != "" {
-			c.markGPUField(gpuName, field)
-		}
+		applyHistJoinGPU(byTs, ts, name, shared.GPUInfo{Name: gpuName}, val)
 	case strings.HasPrefix(name, "aiops_disk_vol_"):
 		field := setSampleDisk(&c.s, diskPath, name, val)
 		if field != "" && diskPath != "" {
@@ -151,6 +145,18 @@ func applyHistJoinMetric(byTs map[int64]*histJoinCell, ts int64, name, gpuName, 
 		short := strings.TrimPrefix(name, "aiops_")
 		setSampleMetric(&c.s, name, val)
 		c.mark(short)
+	}
+}
+
+// applyHistJoinGPU writes one aiops_gpu_* point for the GPU identified by id
+// (name + gpu_index + gpu_uuid labels) into the join map.
+func applyHistJoinGPU(byTs map[int64]*histJoinCell, ts int64, metric string, id shared.GPUInfo, val float64) {
+	c := ensureHistCell(byTs, ts)
+	if id.Name == "" {
+		id.Name = "GPU"
+	}
+	if field := setSampleGPU(&c.s, id, metric, val); field != "" {
+		c.markGPUField(id.Key(), field)
 	}
 }
 
@@ -186,6 +192,7 @@ func finalizeHistJoin(byTs map[int64]*histJoinCell) []shared.Sample {
 		lastDisks                            []shared.DiskInfo
 		lastConns                            []shared.ConnStat
 		diskMiss                             map[string]int
+		gpuMiss                              map[string]int
 	)
 
 	out := make([]shared.Sample, 0, len(cells))
@@ -248,9 +255,17 @@ func finalizeHistJoin(byTs map[int64]*histJoinCell) []shared.Sample {
 
 		if len(c.gpuFields) > 0 {
 			c.s.GPUs = mergeGPUHoldForward(lastGPUs, c.s.GPUs, c.gpuFields)
+			// 以前 hold-forward 只并不删：掉卡、换卡、或升级后身份从"按型号"变成"按序号"，
+			// 旧身份会被一直续到窗口末尾，图上多出一条平直的假线。与磁盘同口径限次续接。
+			c.s.GPUs = pruneUnseenGPUs(c.s.GPUs, c.gpuFields, &gpuMiss)
 			lastGPUs = cloneGPUInfos(c.s.GPUs)
 		} else if len(lastGPUs) > 0 {
-			c.s.GPUs = cloneGPUInfos(lastGPUs)
+			if c.marked("cpu_percent") || c.marked("mem_percent") {
+				c.s.GPUs = pruneUnseenGPUs(cloneGPUInfos(lastGPUs), nil, &gpuMiss)
+			} else {
+				c.s.GPUs = cloneGPUInfos(lastGPUs)
+			}
+			lastGPUs = cloneGPUInfos(c.s.GPUs)
 		}
 		if len(c.diskFields) > 0 {
 			c.s.Disks = mergeDiskHoldForward(lastDisks, c.s.Disks, c.diskFields)
@@ -398,49 +413,70 @@ func mergeGPUHoldForward(prev, cur []shared.GPUInfo, fields map[string]map[strin
 	if len(cur) == 0 {
 		return cloneGPUInfos(prev)
 	}
-	byPrev := make(map[string]shared.GPUInfo, len(prev))
-	for _, g := range prev {
-		byPrev[g.Name] = g
-	}
 	by := make(map[string]shared.GPUInfo, len(prev)+len(cur))
 	for _, g := range prev {
-		by[g.Name] = g
+		by[g.Key()] = g
 	}
 	for _, g := range cur {
-		p, had := byPrev[g.Name]
+		k := g.Key()
+		p, had := by[k]
 		if !had {
-			by[g.Name] = g
+			by[k] = g
 			continue
 		}
-		fset := fields[g.Name]
+		// 只覆盖本格真正到达的字段：其余字段沿用上一格，避免把未到达的温度/显存刷成 0。
+		// spec.set 总是整体替换指针，merged 与 prev 共享的指针不会被原地改写。
 		merged := p
-		merged.Name = g.Name
-		if fset["util"] {
-			merged.UtilPercent = g.UtilPercent
+		merged.Name, merged.Index, merged.UUID = g.Name, g.Index, g.UUID
+		for short := range fields[k] {
+			if spec := gpuSpecByShort[short]; spec != nil {
+				v, _ := spec.get(g)
+				spec.set(&merged, v)
+			}
 		}
-		if fset["temp"] {
-			merged.Temp = g.Temp
-		}
-		if fset["mem_pct"] {
-			merged.MemPercent = g.MemPercent
-		}
-		if fset["mem_used"] {
-			merged.MemUsed = g.MemUsed
-		}
-		if fset["mem_free"] {
-			merged.MemFree = g.MemFree
-		}
-		if fset["mem_total"] {
-			merged.MemTotal = g.MemTotal
-		}
-		by[g.Name] = merged
+		by[k] = merged
 	}
 	out := make([]shared.GPUInfo, 0, len(by))
 	for _, g := range by {
 		out = append(out, g)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	sortGPUs(out)
 	return out
+}
+
+// pruneUnseenGPUs drops GPUs that have been absent from the series for more
+// than histDiskHoldMiss consecutive cells (same tolerance as disks: covers 1–2
+// staggered empty steps without carrying a removed card to the window's end).
+func pruneUnseenGPUs(gpus []shared.GPUInfo, seen map[string]map[string]bool, miss *map[string]int) []shared.GPUInfo {
+	if len(gpus) == 0 {
+		return gpus
+	}
+	if *miss == nil {
+		*miss = map[string]int{}
+	}
+	kept := make([]shared.GPUInfo, 0, len(gpus))
+	present := make(map[string]bool, len(gpus))
+	for _, g := range gpus {
+		k := g.Key()
+		if seen[k] != nil {
+			(*miss)[k] = 0
+			kept = append(kept, g)
+			present[k] = true
+			continue
+		}
+		n := (*miss)[k] + 1
+		(*miss)[k] = n
+		if n <= histDiskHoldMiss {
+			kept = append(kept, g)
+			present[k] = true
+		}
+	}
+	for k, n := range *miss {
+		if !present[k] && n > histDiskHoldMiss {
+			delete(*miss, k)
+		}
+	}
+	return kept
 }
 
 func mergeDiskHoldForward(prev, cur []shared.DiskInfo, fields map[string]map[string]bool) []shared.DiskInfo {

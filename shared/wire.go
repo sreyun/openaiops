@@ -55,14 +55,77 @@ type Metrics struct {
 // GPUInfo is per-GPU usage. Collection is best-effort and vendor-dependent:
 // NVIDIA via nvidia-smi (Linux/Windows), AMD via sysfs (Linux), Apple/other via
 // ioreg (macOS). Fields that a platform cannot supply are left zero.
+//
+// 身份：同型号多卡（8×A100）的 Name 完全相同，只靠 Name 区分会在时序库里写成同一条序列
+// （同标签同时间戳，后写覆盖前写），趋势图与告警也会把 8 块卡合并成 1 块。Key() 依次取
+// UUID（跨重启/掉卡后序号漂移仍稳定）→ Index → Name；旧 agent 不报 Index/UUID 时退回 Name，
+// 行为与升级前一致。
+//
+// 可选字段的取值约定：0 在物理上不可能出现的量（功耗、频率、功耗上限）用普通 float + omitempty，
+// 0 即"未知"；0 是合法读数的量（显存带宽繁忙度、风扇、ECC 计数、降频占比、进程数）用指针，
+// nil 才是"该平台/驱动不支持"，前端据此决定画不画这张图，而不是把"不支持"画成一条 0 线。
 type GPUInfo struct {
 	Name        string  `json:"name"`
-	UtilPercent float64 `json:"util_percent"`
+	Index       string  `json:"index,omitempty"` // 本机序号：nvidia-smi index / amdgpu cardN / ioreg 顺序
+	UUID        string  `json:"uuid,omitempty"`  // NVIDIA GPU-xxxxxxxx；其它平台为空
+	UtilPercent float64 `json:"util_percent"`    // 上报窗口内多次采样的均值
+	UtilMax     float64 `json:"util_max,omitempty"`
 	MemUsed     uint64  `json:"mem_used,omitempty"`
 	MemFree     uint64  `json:"mem_free,omitempty"` // VRAM 空闲字节（total-used 或直接采集）
 	MemTotal    uint64  `json:"mem_total,omitempty"`
 	MemPercent  float64 `json:"mem_percent,omitempty"`
-	Temp        float64 `json:"temp,omitempty"` // °C, 0 if unknown
+	Temp        float64 `json:"temp,omitempty"` // °C, 0 if unknown；窗口内峰值
+
+	MemUtilPercent *float64 `json:"mem_util_percent,omitempty"` // 显存控制器（带宽）繁忙度 %，窗口均值
+	PowerW         float64  `json:"power_w,omitempty"`          // 功耗 W，窗口均值
+	PowerLimitW    float64  `json:"power_limit_w,omitempty"`    // 当前功耗上限 W
+	FanPercent     *float64 `json:"fan_percent,omitempty"`      // 风扇转速 %（被动散热卡为 nil）
+	SMClockMHz     float64  `json:"sm_clock_mhz,omitempty"`     // SM 频率 MHz，窗口均值
+	SMClockMaxMHz  float64  `json:"sm_clock_max_mhz,omitempty"` // SM 最高频率 MHz
+	// 降频占比：窗口内处于该类降频的采样比例 0..1（1 = 整个窗口都在降频）。比"此刻是否降频"
+	// 更能反映趋势——间歇性功耗封顶在单点快照里大概率被漏掉。
+	ThrottleThermal *float64 `json:"throttle_thermal,omitempty"` // 软/硬件温度降频
+	ThrottlePower   *float64 `json:"throttle_power,omitempty"`   // 软件功耗封顶 / 硬件功耗刹车
+	ThrottleHW      *float64 `json:"throttle_hw,omitempty"`      // 硬件降频（HW Slowdown，频率减半以上）
+	ThrottleReasons []string `json:"throttle_reasons,omitempty"` // 窗口内出现过的降频原因（去重）
+	ECCUncorrected  *float64 `json:"ecc_uncorrected,omitempty"`  // 不可纠正 ECC 错误（易失计数，驱动重载清零）
+	ProcCount       *int     `json:"proc_count,omitempty"`       // 占用该卡的计算进程数
+	// Processes 是占用显存最多的若干计算进程，只随 Latest 下发；历史样本与时序库都不存
+	// （PID 是高基数标签，存进时序库会把序列数撑爆）。
+	Processes []GPUProcess `json:"processes,omitempty"`
+}
+
+// GPUProcess is one compute process holding memory on a GPU.
+type GPUProcess struct {
+	PID     int    `json:"pid"`
+	Name    string `json:"name"`
+	MemUsed uint64 `json:"mem_used"` // bytes
+}
+
+// Key is the GPU's identity within a host: UUID, else Index, else Name.
+func (g GPUInfo) Key() string {
+	switch {
+	case g.UUID != "":
+		return "uuid:" + g.UUID
+	case g.Index != "":
+		return "idx:" + g.Index
+	case g.Name != "":
+		return "name:" + g.Name
+	}
+	return "name:GPU"
+}
+
+// Label is the human-readable name: "GPU0 · NVIDIA A100" when the index is
+// known (so identical cards are distinguishable), else just the model name.
+func (g GPUInfo) Label() string {
+	name := g.Name
+	if name == "" {
+		name = "GPU"
+	}
+	if g.Index != "" {
+		return "GPU" + g.Index + " · " + name
+	}
+	return name
 }
 
 // ConnStat is a per-protocol, per-state socket count, powering the connection /

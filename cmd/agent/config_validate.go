@@ -160,6 +160,9 @@ func normalizeAndValidateConfig(cfg *config) error {
 	if cfg.PluginInterval < 5 || cfg.PluginInterval > 86400 {
 		return fmt.Errorf("plugin_interval 必须在 5..86400 秒之间")
 	}
+	if cfg.GPUSampleIntervalSec != 0 && (cfg.GPUSampleIntervalSec < 2 || cfg.GPUSampleIntervalSec > 300) {
+		return fmt.Errorf("gpu_sample_interval_sec 必须为 0（自动）或 2..300 秒")
+	}
 	if strings.TrimSpace(cfg.PluginsDir) == "" {
 		cfg.PluginsDir = "plugins"
 	}

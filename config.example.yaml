@@ -48,6 +48,8 @@ ca_cert: ""
 # ====================== 网关中继模式 relay（可选）=========================
 # relay=true 时 Agent 变为网关：监听 listen 端口，反向代理内网机器的上报到 server，
 # 内网机器无需直连公网，只把上报指向本网关即可。relay_secret 用于上游服务端验证中继来源。
+# 网关自己也照常采集并上报（直连 server，不绕自己一圈），所以它会出现在主机列表里、
+# 能被远程终端与自动升级管到——前提是这份配置里有 token（服务端开了安装 Token 校验时）。
 relay: false
 listen: ":8529"
 relay_secret: ""
@@ -67,6 +69,11 @@ hyperv_disabled: false             # 置 true 显式关闭 Hyper-V 采集
 # 检测到 docker 或 podman CLI 时【自动启用】，无需手工配置。用于容器页清单与资源摘要。
 container_interval_sec: 60         # 采集间隔(秒)，默认 60；负载高时可调到 120
 container_disabled: false          # 置 true 显式关闭容器采集（不卸 CLI 也能停）
+
+# ==================== GPU 采集（NVIDIA nvidia-smi / AMD amdgpu sysfs / macOS ioreg）====================
+# 有 GPU 时【自动启用】。后台按采样间隔多次采样，按上报窗口聚合：利用率均值+峰值、温度峰值、
+# 功耗/频率均值、降频占比；进程显存占用随最新样本上报。0 = 自动（report_interval/3，夹在 5~15 秒）。
+gpu_sample_interval_sec: 0         # GPU 采样间隔(秒)，0 为自动；允许 2~300
 
 # ============ Redfish 硬件状态采集 BMC/iDRAC/iLO（可选，服务器带外）========
 # 配置后 Agent 作为 Redfish REST 客户端轮询 BMC，采集 CPU/内存/存储/温度/风扇/电源/固件。

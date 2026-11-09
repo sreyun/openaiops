@@ -14,7 +14,9 @@ import (
 // read from VictoriaMetrics. Must stay ≥50 (host gauges + derived + GPU +
 // per-volume disk + conn + hardware/netflow aggregates). Never use aiops_.* —
 // that pulls every docker overlay / k8s PVC path as its own series.
-var hostHistoryMetricNames = []string{
+//
+// GPU 系列由 gpu_series.go 的字段表统一生成（gpuHistoryMetricNames），加维度不必改这里。
+var hostHistoryMetricNames = append([]string{
 	"aiops_cpu_percent", "aiops_cpu_cores", "aiops_cpu_idle_percent",
 	"aiops_mem_percent", "aiops_mem_used_bytes", "aiops_mem_total_bytes", "aiops_mem_free_bytes", "aiops_mem_free_percent",
 	"aiops_swap_percent", "aiops_swap_used_bytes", "aiops_swap_total_bytes", "aiops_swap_free_bytes",
@@ -25,14 +27,12 @@ var hostHistoryMetricNames = []string{
 	"aiops_load1", "aiops_load5", "aiops_load15", "aiops_load1_per_core", "aiops_load5_per_core", "aiops_load15_per_core",
 	"aiops_api_avail_percent", "aiops_api_avg_resp_ms", "aiops_api_p95_resp_ms", "aiops_api_throughput_rps",
 	"aiops_task_fail_count", "aiops_task_timeout_sec",
-	"aiops_gpus_count", "aiops_mounts_count",
-	"aiops_gpu_util_percent", "aiops_gpu_temp_c", "aiops_gpu_mem_percent",
-	"aiops_gpu_mem_used_bytes", "aiops_gpu_mem_free_bytes", "aiops_gpu_mem_total_bytes",
+	"aiops_mounts_count",
 	"aiops_disk_vol_percent", "aiops_disk_vol_used_bytes", "aiops_disk_vol_total_bytes",
 	"aiops_net_conn_count",
 	"aiops_hardware_health_score", "aiops_hardware_power_watts",
 	"aiops_netflow_total_bytes", "aiops_netflow_total_packets", "aiops_netflow_flows", "aiops_netflow_dropped",
-}
+}, gpuHistoryMetricNames()...)
 
 // ephemeralDiskPathRE drops overlay/kubelet PVC churn from disk_vol series.
 // Series without a path label (scalars) still match a negative path regex.
@@ -280,8 +280,7 @@ func vmNamesForMetricKeys(keys []string) []string {
 		case k == "load":
 			addFamily("aiops_load1", "aiops_load5", "aiops_load15", "aiops_load1_per_core", "aiops_load5_per_core", "aiops_load15_per_core", "aiops_proc_count")
 		case strings.HasPrefix(k, "gpu"):
-			addFamily("aiops_gpu_util_percent", "aiops_gpu_temp_c", "aiops_gpu_mem_percent",
-				"aiops_gpu_mem_used_bytes", "aiops_gpu_mem_free_bytes", "aiops_gpu_mem_total_bytes", "aiops_gpus_count")
+			addFamily(gpuHistoryMetricNames()...)
 		default:
 			add("aiops_" + k)
 		}

@@ -339,9 +339,15 @@ function hostCard(h) {
     const util = Math.max(0, Math.min(g.util_percent || 0, 100));
     const memTxt = (g.mem_total || 0) > 0 ? " · " + I18N.t("ui.gpu_mem_short") + " " + fmtGB(g.mem_used || 0) + "/" + fmtGB(g.mem_total || 0) + I18N.t("unit.gb") : "";
     const tempTxt = (g.temp || 0) > 0 ? " · " + Math.round(g.temp) + "℃" : "";
+    const powerTxt = (+g.power_w || 0) > 0 ? " · " + Math.round(+g.power_w) + "W" : "";
+    // 带序号："GPU3 A100"——8 块同型号卡在卡片上不再是 8 行一模一样的标签。
+    const idx = (g.index != null && g.index !== "") ? esc(String(g.index)) : "";
     const name = esc((g.name || "GPU").slice(0, 22));
-    return `<div class="metric gpu"><div class="row"><span class="label">GPU ${name}</span>
-      <span class="val mono">${(g.util_percent || 0).toFixed(0)}%${memTxt}${tempTxt}</span></div>
+    // 只对温度/硬件降频亮警示：满载时撞功耗墙（sw_power_cap）是常态，亮了只会是噪音。
+    const badThr = (g.throttle_reasons || []).filter(r => r !== "sw_power_cap");
+    const thr = badThr.length ? ` <span class="warn" title="${esc(badThr.join(", "))}">⚠</span>` : "";
+    return `<div class="metric gpu"><div class="row"><span class="label">GPU${idx} ${name}${thr}</span>
+      <span class="val mono">${(g.util_percent || 0).toFixed(0)}%${memTxt}${tempTxt}${powerTxt}</span></div>
       <div class="bar"><div class="fill" style="width:${util}%;background:${usageColor(g.util_percent || 0)}"></div></div></div>`;
   }).join("");
   let chips = "";
@@ -2005,9 +2011,146 @@ function trendStat(samples, get) {
     vals.push(v);
   }
   if (!n) return null;
-  vals.sort((a, b) => a - b);
-  const p95 = vals[Math.min(vals.length - 1, Math.floor(vals.length * 0.95))];
-  return { cur, avg: sum / n, p95, max };
+  // 近期变化：窗口最后 1/4 的均值 − 最前 1/4 的均值。"现在比刚才高了多少"是看趋势时
+  // 第一眼要的数，曲线上只能靠目测两端；点太少（<8）时不给，免得一个毛刺就显示成趋势。
+  let delta = null;
+  if (vals.length >= 8) {
+    const q = Math.max(1, Math.floor(vals.length / 4));
+    const mean = a => a.reduce((x, y) => x + y, 0) / a.length;
+    delta = mean(vals.slice(-q)) - mean(vals.slice(0, q));
+  }
+  const sorted = vals.slice().sort((a, b) => a - b);
+  const p95 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))];
+  return { cur, avg: sum / n, p95, max, delta };
+}
+
+// ---------------------------------------------------------------------------
+// GPU 趋势辅助：身份、按卡取值、跨卡聚合、进程表
+// ---------------------------------------------------------------------------
+
+/** 与 shared.GPUInfo.Key() 一致：uuid > index > name。 */
+function gpuKeyOf(g) {
+  if (!g) return "";
+  if (g.uuid) return "u:" + g.uuid;
+  if (g.index != null && g.index !== "") return "i:" + g.index;
+  return "n:" + (g.name || "GPU");
+}
+
+/** "GPU3 · NVIDIA A100"；老 agent 不报序号时就是型号名。 */
+function gpuLabelOf(g) {
+  const name = (g && g.name) || "GPU";
+  return (g && g.index != null && g.index !== "") ? `GPU${g.index} · ${name}` : name;
+}
+
+const _gpuSampleIndex = new WeakMap();
+function gpuMapOf(s) {
+  let m = _gpuSampleIndex.get(s);
+  if (!m) {
+    m = new Map();
+    for (const g of (s && s.gpus) || []) if (g) m.set(gpuKeyOf(g), g);
+    if (s && typeof s === "object") _gpuSampleIndex.set(s, m);
+  }
+  return m;
+}
+
+/** 窗口里出现过的 GPU（最新样本优先，否则取并集），按序号排序。 */
+function gpuInventory(samples) {
+  const meta = new Map();
+  const add = g => { const k = gpuKeyOf(g); if (k && !meta.has(k)) meta.set(k, g); };
+  ((samples[samples.length - 1] || {}).gpus || []).forEach(add);
+  if (!meta.size) samples.forEach(s => (s.gpus || []).forEach(add));
+  // 最新一份完整读数（取限值/容量这类水平量）
+  const latestOf = k => {
+    for (let i = samples.length - 1; i >= 0; i--) { const g = gpuMapOf(samples[i]).get(k); if (g) return g; }
+    return meta.get(k) || {};
+  };
+  const idxNum = g => { const n = parseInt(g.index, 10); return isFinite(n) ? n : 1e9; };
+  return [...meta.entries()]
+    .map(([key, g]) => ({ key, sk: key.replace(/[^\w-]/g, "_"), label: gpuLabelOf(g), latest: latestOf(key) }))
+    .sort((a, b) => idxNum(a.latest) - idxNum(b.latest) || a.label.localeCompare(b.label) || a.key.localeCompare(b.key));
+}
+
+/** 某块卡某字段的取值函数。opts.zeroIfMissing：老字段 omitempty，缺席即 0；opts.scale：单位换算。 */
+function gpuFieldOf(key, field, opts) {
+  const scale = (opts && opts.scale) || 1;
+  const zero = !!(opts && opts.zeroIfMissing);
+  return s => {
+    const g = gpuMapOf(s).get(key);
+    if (!g) return null;
+    const v = g[field];
+    if (v == null || !isFinite(+v)) return zero ? 0 : null;
+    return (+v) * scale;
+  };
+}
+
+function gpuAnyField(samples, field, positiveOnly) {
+  return (samples || []).some(s => ((s && s.gpus) || []).some(g => {
+    if (!g || g[field] == null || !isFinite(+g[field])) return false;
+    return !positiveOnly || +g[field] > 0;
+  }));
+}
+
+/** 跨卡聚合：mode = avg | max | min | sum。 */
+function gpuAggOf(field, mode, zeroIfMissing, scale) {
+  const k = scale || 1;
+  return s => {
+    const vals = [];
+    for (const g of (s && s.gpus) || []) {
+      if (!g) continue;
+      const v = g[field];
+      if (v == null || !isFinite(+v)) { if (zeroIfMissing) vals.push(0); continue; }
+      vals.push(+v);
+    }
+    if (!vals.length) return null;
+    let r;
+    if (mode === "max") r = Math.max(...vals);
+    else if (mode === "min") r = Math.min(...vals);
+    else if (mode === "sum") r = vals.reduce((a, b) => a + b, 0);
+    else r = vals.reduce((a, b) => a + b, 0) / vals.length;
+    return r * k;
+  };
+}
+
+/** 窗口峰值：新 agent 报 util_max；老 agent 没有，就用 util_percent 本身。 */
+function gpuPeakUtil(s) {
+  const gs = (s && s.gpus) || [];
+  if (!gs.length) return null;
+  return Math.max(...gs.map(g => Math.max(+g.util_max || 0, +g.util_percent || 0)));
+}
+
+/** 趋势弹窗那台主机的最新样本（带 GPU 进程表；历史样本不存进程）。 */
+function detailHostLatest() {
+  if (!DETAIL_HOST_ID) return null;
+  const list = (typeof LAST_HOSTS !== "undefined" && Array.isArray(LAST_HOSTS) && LAST_HOSTS.length)
+    ? LAST_HOSTS
+    : (Array.isArray(window._cachedHosts) ? window._cachedHosts : []);
+  const h = list.find(x => x && (x.id === DETAIL_HOST_ID || x.host_id === DETAIL_HOST_ID));
+  return (h && h.latest) || null;
+}
+
+/** 当前 GPU 状态表：每卡功耗/上限、频率、降频原因 + 占用显存最多的进程。 */
+function renderGPUStatusTable(latest) {
+  const gpus = ((latest && latest.gpus) || []).slice()
+    .sort((a, b) => (parseInt(a.index, 10) || 0) - (parseInt(b.index, 10) || 0));
+  if (!gpus.length) return "";
+  const gb = v => (v / 1073741824).toFixed(v >= 100 * 1073741824 ? 0 : 1) + I18N.t("unit.gb", "G");
+  const thrName = r => I18N.t("section.gpu_thr_" + r, r);
+  const rows = gpus.map(g => {
+    const power = (+g.power_w > 0) ? `${(+g.power_w).toFixed(0)}${+g.power_limit_w > 0 ? " / " + (+g.power_limit_w).toFixed(0) : ""} W` : "—";
+    const clk = (+g.sm_clock_mhz > 0) ? `${(+g.sm_clock_mhz).toFixed(0)}${+g.sm_clock_max_mhz > 0 ? " / " + (+g.sm_clock_max_mhz).toFixed(0) : ""} MHz` : "—";
+    const thr = (g.throttle_reasons || []).length ? g.throttle_reasons.map(thrName).join("、") : "—";
+    const procs = (g.processes || []).map(p => `${esc(p.name || "?")}<span class="muted">#${+p.pid || 0}</span> ${gb(+p.mem_used || 0)}`).join("<br>");
+    const procCell = procs || (g.proc_count != null ? (g.proc_count === 0 ? I18N.t("section.gpu_no_procs", "无计算进程") : String(g.proc_count)) : "—");
+    return `<tr><td>${esc(gpuLabelOf(g))}</td><td class="mono">${(+g.util_percent || 0).toFixed(0)}% / ${(Math.max(+g.util_max || 0, +g.util_percent || 0)).toFixed(0)}%</td>` +
+      `<td class="mono">${gb(+g.mem_used || 0)} / ${gb(+g.mem_total || 0)}</td><td class="mono">${(+g.temp > 0) ? (+g.temp).toFixed(0) + "℃" : "—"}</td>` +
+      `<td class="mono">${power}</td><td class="mono">${clk}</td><td>${esc(thr)}</td><td>${procCell}</td></tr>`;
+  }).join("");
+  return `<div class="gpu-status"><div class="chart-group-sub">${I18N.t("section.gpu_status_now", "当前 GPU 状态与进程占用")}</div>
+    <div class="table-wrap"><table class="gpu-status-tbl"><thead><tr>
+      <th>GPU</th><th>${I18N.t("section.gpu_util_avg_peak", "利用率 均值/峰值")}</th><th>${I18N.t("section.gpu_vram_short", "显存")}</th>
+      <th>${I18N.t("section.gpu_temp_short", "温度")}</th><th>${I18N.t("section.gpu_power_short", "功耗/上限")}</th>
+      <th>${I18N.t("section.gpu_clock_short", "SM 频率/最高")}</th><th>${I18N.t("section.gpu_throttle_short", "降频原因")}</th>
+      <th>${I18N.t("section.gpu_procs_top", "进程（按显存）")}</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
 }
 
 /** 阈值状态取自**峰值**：窗口里越过过告警线，就算此刻回落了也必须显示出来——
@@ -2021,15 +2164,26 @@ function trendStatClass(st, warn, crit) {
 }
 
 function renderTrendStats(items) {
-  const cells = items.filter(Boolean).map(it => {
+  // 没有数据的项（trendStat 返回 null）直接跳过：以前全靠调用方用 hasXxx 守卫，漏一处
+  // 就是 st.cur 的 TypeError，整个趋势弹窗白屏。
+  const cells = items.filter(it => it && it.st).map(it => {
     const st = it.st;
     const lim = [];
     if (+it.warn > 0) lim.push(`${I18N.t("chart.warn_line", "告警线")} ${it.fmt(+it.warn)}`);
     if (+it.crit > 0) lim.push(`${I18N.t("chart.crit_line", "严重线")} ${it.fmt(+it.crit)}`);
+    // it.delta：显示"近期变化"（最后 1/4 窗口 vs 最前 1/4）。变化小于峰值的 2% 视为持平。
+    let deltaHTML = "";
+    if (it.delta && st.delta != null) {
+      const d = st.delta, eps = Math.max(Math.abs(st.max) * 0.02, 1e-9);
+      const arrow = d > eps ? "↑" : d < -eps ? "↓" : "→";
+      const cls = d > eps ? " up" : d < -eps ? " down" : "";
+      deltaHTML = `<div class="tstat-delta${cls}">${I18N.t("section.stat_recent_change", "近期变化")} ${arrow} ${esc(it.fmt(Math.abs(d)))}</div>`;
+    }
     return `<div class="tstat${trendStatClass(st, it.warn, it.crit)}">
       <div class="tstat-k">${esc(it.label)}</div>
       <div class="tstat-v">${esc(it.fmt(st.cur))}</div>
       <div class="tstat-sub">${I18N.t("section.stat_avg", "均值")} ${esc(it.fmt(st.avg))} · P95 ${esc(it.fmt(st.p95))} · ${I18N.t("section.stat_max", "峰值")} ${esc(it.fmt(st.max))}</div>
+      ${deltaHTML}
       ${lim.length ? `<div class="tstat-lim">${esc(lim.join(" · "))}</div>` : ""}
     </div>`;
   });
@@ -2325,55 +2479,110 @@ async function loadAndRenderCharts() {
     }
 
     // ---------- GPU ----------
+    // 身份按 uuid > index > name（与 shared.GPUInfo.Key() 一致）。以前按型号名 find()，8 块
+    // 同型号卡全部匹配到第一块，图上永远只有一条线；现在每块卡一条，图例写成 "GPU3 · A100"。
+    //
+    // 编排：先看"忙不忙、均不均"（利用率 + 负载均衡），再看"为什么慢"（显存带宽、温度、
+    // 功耗与上限、SM 频率、降频占比），最后看"谁在用"（进程数 + 当前进程表）。没有数据的
+    // 维度（被动散热卡没有风扇、消费卡没有 ECC、AMD/macOS 没有进程）不画空图。
     if (hasGPU) {
       const gGPU = group(I18N.t("group.gpu", "GPU"));
-      const latestGpus = ((samples[samples.length - 1] || {}).gpus) || [];
-      const gpuNameSet = new Set();
-      latestGpus.forEach(g => {
-        const nm = (g && g.name) ? String(g.name) : "";
-        if (nm) gpuNameSet.add(nm);
-      });
-      if (!gpuNameSet.size) {
-        samples.forEach(s => (s.gpus || []).forEach(g => {
-          const nm = (g && g.name) ? String(g.name) : "";
-          if (nm) gpuNameSet.add(nm);
-        }));
-      }
-      const gpuNames = [...gpuNameSet].sort();
-      const gpalette = ['#8b5cf6', '#43b6f0', '#2fd07a', '#f7b23b', '#f2545b', '#e06c9a'];
+      gGPU.isGPU = true; // 该组末尾附"当前 GPU 状态与进程占用"表
+      const gpalette = ['#8b5cf6', '#43b6f0', '#2fd07a', '#f7b23b', '#f2545b', '#e06c9a', '#14b8a6', '#a3e635', '#fb923c', '#94a3b8'];
       const gcolor = idx => gpalette[idx % gpalette.length];
-      const gpuByName = (nm, field) => (s) => {
-        const g = (s.gpus || []).find(x => x && x.name === nm);
-        return g ? (g[field] || 0) : null;
-      };
-      const gpuBytesGB = (nm, field) => (s) => {
-        const g = (s.gpus || []).find(x => x && x.name === nm);
-        return g ? gib(g[field] || 0) : null;
-      };
-      put(gGPU, 'chartGPU', withTh(gpuNames.map((nm, idx) => ({
-        key: `gpu_${nm}`, label: nm, color: gcolor(idx), fmt: v => v.toFixed(0) + '%', transform: gpuByName(nm, 'util_percent')
-      })),
+      const gpuList = gpuInventory(samples);
+      const multi = gpuList.length > 1;
+      const fmtPct0 = v => v.toFixed(0) + '%';
+      const fmtC = v => v.toFixed(0) + '℃';
+      const fmtW = v => v.toFixed(0) + ' W';
+      const fmtMHz = v => v.toFixed(0) + ' MHz';
+      // zeroIfMissing：老字段（util/temp/mem_*）带 omitempty，值为 0 时 JSON 里干脆没有——
+      // 对这些字段"缺席 = 0"；新字段缺席才是"不支持"，返回 null 让曲线断开而不是贴 0。
+      const perGPU = (prefix, field, fmt, opts) => gpuList.map((g, idx) => ({
+        key: `${prefix}_${g.sk}`, label: g.label, color: gcolor(idx), fmt,
+        transform: gpuFieldOf(g.key, field, opts || {}),
+      }));
+      const refLine = (key, label, value, fmt) => (isFinite(+value) && +value > 0) ? {
+        key, label, color: '#94a3b8', dashed: true, kind: 'threshold', fmt, transform: () => +value,
+      } : null;
+
+      put(gGPU, 'chartGPU', withTh(perGPU('gpu', 'util_percent', fmtPct0, { zeroIfMissing: true }),
         [thLine('th_gpu_w', 'GPU', TH.gpu_warn, false, pct),
          thLine('th_gpu_c', 'GPU', TH.gpu_crit, true, pct)], true
-      ), 0, 100, I18N.t("section.gpu_usage"));
-      put(gGPU, 'chartGPUTemp', withTh(gpuNames.map((nm, idx) => ({
-        key: `gput_${nm}`, label: nm, color: gcolor(idx), fmt: v => v.toFixed(0) + '℃', transform: gpuByName(nm, 'temp')
-      })),
-        [thLine('th_gput_w', I18N.t("section.gpu_temp"), TH.gpu_temp_warn, false, v => v.toFixed(0) + '℃'),
-         thLine('th_gput_c', I18N.t("section.gpu_temp"), TH.gpu_temp_crit, true, v => v.toFixed(0) + '℃')], false
-      ), null, null, I18N.t("section.gpu_temp"));
-      put(gGPU, 'chartGPUMemPct', withTh(gpuNames.map((nm, idx) => ({
-        key: `gpump_${nm}`, label: nm, color: gcolor(idx), fmt: v => v.toFixed(0) + '%', transform: gpuByName(nm, 'mem_percent')
-      })),
+      ), 0, 100, I18N.t("section.gpu_usage") + " · " + I18N.t("section.gpu_window_avg", "窗口均值"));
+
+      // 负载均衡：多卡训练里"一块卡空转、其余打满"（数据加载/通信拖后腿）是最常见也最难
+      // 从 8 条交织曲线里看出来的问题——均值 / 峰值 / 最低卡三条线一拉开就一目了然。
+      // 单卡时退化为"均值 vs 窗口峰值"：均值 30% 而峰值 100% 说明是脉冲负载，不是空闲。
+      if (multi || gpuAnyField(samples, 'util_max')) {
+        const aggSeries = [
+          { key: 'gpu_agg_avg', label: I18N.t("section.gpu_all_avg", "全卡均值"), color: '#8b5cf6', fmt: fmtPct0, transform: gpuAggOf('util_percent', 'avg', true) },
+          { key: 'gpu_agg_peak', label: I18N.t("section.gpu_peak", "窗口峰值"), color: '#f2545b', fmt: fmtPct0, transform: gpuPeakUtil },
+        ];
+        if (multi) aggSeries.push({ key: 'gpu_agg_min', label: I18N.t("section.gpu_min_card", "最低卡"), color: '#43b6f0', fmt: fmtPct0, transform: gpuAggOf('util_percent', 'min', true) });
+        put(gGPU, 'chartGPUBalance', aggSeries, 0, 100, multi
+          ? I18N.t("section.gpu_balance", "GPU 负载均衡 · 全卡均值 / 峰值 / 最低卡")
+          : I18N.t("section.gpu_avg_peak", "GPU 利用率 · 均值 / 窗口峰值"));
+      }
+
+      put(gGPU, 'chartGPUMemPct', withTh(perGPU('gpump', 'mem_percent', fmtPct0, { zeroIfMissing: true }),
         [thLine('th_gpum_w', I18N.t("section.gpu_mem_pct"), TH.gpu_mem_warn, false, pct),
          thLine('th_gpum_c', I18N.t("section.gpu_mem_pct"), TH.gpu_mem_crit, true, pct)], true
       ), 0, 100, I18N.t("section.gpu_mem_pct"));
-      const gpuMemSeries = [];
-      gpuNames.forEach((nm, idx) => {
-        gpuMemSeries.push({ key: `gpumu_${nm}`, label: `${nm} · ${I18N.t("section.gpu_mem_used")}`, color: gcolor(idx * 2), fmt: fmtGB, transform: gpuBytesGB(nm, 'mem_used') });
-        gpuMemSeries.push({ key: `gpumf_${nm}`, label: `${nm} · ${I18N.t("section.gpu_mem_free")}`, color: gcolor(idx * 2 + 1), fmt: fmtGB, transform: gpuBytesGB(nm, 'mem_free') });
-      });
-      put(gGPU, 'chartGPUMem', gpuMemSeries, 0, null, I18N.t("section.gpu_vram"));
+
+      // 显存用量：每卡一条"已用"，容量画成一条虚线参照（以前每卡 已用+空闲 两条，8 卡就是
+      // 16 条线，而"空闲"= 容量 − 已用，纯属冗余）。
+      const vramCap = gpuList.reduce((a, g) => Math.max(a, +g.latest.mem_total || 0), 0);
+      put(gGPU, 'chartGPUMem', perGPU('gpumu', 'mem_used', fmtGB, { zeroIfMissing: true, scale: 1 / 1073741824 })
+        .concat([refLine('gpu_mem_cap', I18N.t("section.gpu_vram_cap", "显存容量"), gib(vramCap), fmtGB)].filter(Boolean)),
+        0, null, I18N.t("section.gpu_vram") + " · " + I18N.t("section.gpu_mem_used"));
+
+      if (gpuAnyField(samples, 'mem_util_percent')) {
+        put(gGPU, 'chartGPUMemBW', perGPU('gpubw', 'mem_util_percent', fmtPct0), 0, 100,
+          I18N.t("section.gpu_mem_bw", "显存带宽利用率（显存控制器繁忙度）"));
+      }
+
+      put(gGPU, 'chartGPUTemp', withTh(perGPU('gput', 'temp', fmtC, { zeroIfMissing: true }),
+        [thLine('th_gput_w', I18N.t("section.gpu_temp"), TH.gpu_temp_warn, false, fmtC),
+         thLine('th_gput_c', I18N.t("section.gpu_temp"), TH.gpu_temp_crit, true, fmtC)], false
+      ), null, null, I18N.t("section.gpu_temp") + " · " + I18N.t("section.gpu_window_peak", "窗口峰值"));
+
+      if (gpuAnyField(samples, 'power_w', true)) {
+        const pLimit = gpuList.reduce((a, g) => Math.max(a, +g.latest.power_limit_w || 0), 0);
+        put(gGPU, 'chartGPUPower', perGPU('gpupw', 'power_w', fmtW)
+          .concat([refLine('gpu_power_limit', I18N.t("section.gpu_power_limit", "功耗上限"), pLimit, fmtW)].filter(Boolean)),
+          0, null, I18N.t("section.gpu_power", "GPU 功耗") + " · " + I18N.t("section.gpu_vs_limit", "对比功耗上限"));
+      }
+
+      if (gpuAnyField(samples, 'sm_clock_mhz', true)) {
+        const clkMax = gpuList.reduce((a, g) => Math.max(a, +g.latest.sm_clock_max_mhz || 0), 0);
+        put(gGPU, 'chartGPUClock', perGPU('gpuclk', 'sm_clock_mhz', fmtMHz)
+          .concat([refLine('gpu_clk_max', I18N.t("section.gpu_clock_max", "最高频率"), clkMax, fmtMHz)].filter(Boolean)),
+          0, null, I18N.t("section.gpu_clock", "SM 频率（下探 = 降频）"));
+      }
+
+      // 降频占比只在窗口里真的发生过时才画：一张全 0 的图只会占地方。取最严重的那块卡。
+      const thrFields = [
+        ['throttle_thermal', I18N.t("section.gpu_thr_thermal", "温度降频"), '#f2545b'],
+        ['throttle_power', I18N.t("section.gpu_thr_power", "功耗封顶"), '#f7b23b'],
+        ['throttle_hw', I18N.t("section.gpu_thr_hw", "硬件降频"), '#8b5cf6'],
+      ].filter(([f]) => gpuAnyField(samples, f, true));
+      if (thrFields.length) {
+        put(gGPU, 'chartGPUThrottle', thrFields.map(([f, label, color]) => ({
+          key: `gputhr_${f}`, label, color, fmt: fmtPct0, transform: gpuAggOf(f, 'max', false, 100),
+        })), 0, 100, I18N.t("section.gpu_throttle", "GPU 降频时间占比（取最严重的卡）"));
+      }
+
+      if (gpuAnyField(samples, 'fan_percent')) {
+        put(gGPU, 'chartGPUFan', perGPU('gpufan', 'fan_percent', fmtPct0), 0, 100, I18N.t("section.gpu_fan", "GPU 风扇转速"));
+      }
+      if (gpuAnyField(samples, 'proc_count')) {
+        put(gGPU, 'chartGPUProcs', perGPU('gpuproc', 'proc_count', fmtCount), 0, null, I18N.t("section.gpu_procs", "GPU 计算进程数"));
+      }
+      if (gpuAnyField(samples, 'ecc_uncorrected', true)) {
+        put(gGPU, 'chartGPUECC', perGPU('gpuecc', 'ecc_uncorrected', fmtCount), 0, null,
+          I18N.t("section.gpu_ecc", "不可纠正 ECC 错误（上升 = 显存硬件故障）"));
+      }
     }
 
     // ---------- 业务与任务 ----------
@@ -2418,7 +2627,13 @@ async function loadAndRenderCharts() {
       hasUptime ? { label: I18N.t("section.uptime_label", "已运行"), st: trendStat(samples, sm => sm.uptime != null ? (+sm.uptime) / 3600 : null), fmt: fmtHours, warn: 0, crit: 0 } : null,
       hasAPI ? { label: I18N.t("section.api_avail", "接口可用率"), st: trendStat(samples, sm => +sm.api_avail_percent), fmt: pct, warn: 0, crit: 0 } : null,
       hasAPI ? { label: I18N.t("section.api_p95_label", "P95") + " · " + I18N.t("section.api_latency_short", "接口延时"), st: trendStat(samples, sm => +sm.api_p95_resp_ms), fmt: fmtMs, warn: 0, crit: 0 } : null,
+      // GPU：多卡取"全卡均值 / 最热的卡 / 显存最满的卡 / 功耗合计"，并给出近期变化。
+      hasGPU ? { label: I18N.t("section.gpu_usage") + " · " + I18N.t("section.gpu_all_avg", "全卡均值"), st: trendStat(samples, gpuAggOf('util_percent', 'avg', true)), fmt: pct, warn: TH.gpu_warn, crit: TH.gpu_crit, delta: true } : null,
+      hasGPU ? { label: I18N.t("section.gpu_mem_pct") + " · " + I18N.t("section.gpu_max_card", "最高卡"), st: trendStat(samples, gpuAggOf('mem_percent', 'max', true)), fmt: pct, warn: TH.gpu_mem_warn, crit: TH.gpu_mem_crit, delta: true } : null,
+      hasGPU && gpuAnyField(samples, 'temp', true) ? { label: I18N.t("section.gpu_temp") + " · " + I18N.t("section.gpu_max_card", "最高卡"), st: trendStat(samples, gpuAggOf('temp', 'max', false)), fmt: v => v.toFixed(0) + '℃', warn: TH.gpu_temp_warn, crit: TH.gpu_temp_crit, delta: true } : null,
+      hasGPU && gpuAnyField(samples, 'power_w', true) ? { label: I18N.t("section.gpu_power", "GPU 功耗") + " · " + I18N.t("section.gpu_sum", "合计"), st: trendStat(samples, gpuAggOf('power_w', 'sum', false)), fmt: v => v.toFixed(0) + ' W', warn: 0, crit: 0, delta: true } : null,
     ]);
+    const gpuStatusHTML = hasGPU ? renderGPUStatusTable(detailHostLatest()) : "";
 
     const wrap = id => `<div class="chart-wrap" data-lazy-chart="${id}"><canvas id="${id}" width="1000" height="240"></canvas>` +
       `<button class="chart-enlarge" data-chart="${id}" title="${I18N.t('ui.zoom_preview')}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg></button></div>`;
@@ -2429,7 +2644,8 @@ async function loadAndRenderCharts() {
       ${statsHTML}
       <div class="chart-container">
         ${groups.filter(g => g.ids.length).map(g =>
-          `<div class="chart-group-title">${esc(g.title)}</div>` + g.ids.map(wrap).join("")
+          `<div class="chart-group-title">${esc(g.title)}</div>` + g.ids.map(wrap).join("") +
+          (g.isGPU ? gpuStatusHTML : "")
         ).join("")}
       </div>
       <div class="hint">${I18N.t("section.sample_points")}: ${samples.length} · ${I18N.t("section.granularity")}: ${gran} · ${I18N.t("section.chart_count", "图表")}: ${chartCount}${coverHint}${srcHint}</div>
@@ -2654,7 +2870,10 @@ function analyzeHostDetailAI() {
     `负载：当前 load1=${(last.load1 || 0).toFixed(2)} load5=${(last.load5 || 0).toFixed(2)} load15=${(last.load15 || 0).toFixed(2)}`,
   ];
   if (Array.isArray(last.gpus) && last.gpus.length) {
-    lines.push("GPU：" + last.gpus.map(g => `${g.name || "GPU"} util=${(g.util_percent || 0).toFixed(0)}% mem=${(g.mem_percent || 0).toFixed(0)}%`).join("；"));
+    lines.push("GPU：" + last.gpus.map(g => `${gpuLabelOf(g)} util=${(g.util_percent || 0).toFixed(0)}%` +
+      (g.util_max ? ` peak=${(+g.util_max).toFixed(0)}%` : "") + ` mem=${(g.mem_percent || 0).toFixed(0)}%` +
+      (g.temp ? ` temp=${(+g.temp).toFixed(0)}C` : "") + (g.power_w ? ` power=${(+g.power_w).toFixed(0)}W${g.power_limit_w ? "/" + (+g.power_limit_w).toFixed(0) + "W" : ""}` : "") +
+      ((g.throttle_reasons || []).length ? ` throttle=${g.throttle_reasons.join("+")}` : "")).join("；"));
   }
   openAIAssist({
     task: "chart_analysis",

@@ -314,24 +314,28 @@ func Evaluate(hosts []*Host, t Thresholds) []Alert {
 			}
 		}
 		// GPU alerts (configurable): 核心算力使用率 / 温度 / 显存占用率。三项用不同 Scope
-		// （name、name/temp、name/mem），否则 alertKey=host/gpu/name 冲突会互相覆盖。
+		// （label、label/temp、label/mem），否则 alertKey=host/gpu/scope 冲突会互相覆盖。
+		// Scope 用 Label()（"GPU3 · NVIDIA A100"）而不是型号名：8 块同型号卡的型号名相同，
+		// 按型号做 Scope 时后一块卡的告警覆盖前一块，最热的那块卡可能根本报不出来。老 agent
+		// 不报序号，Label() 即型号名，已有告警的 key 不变。
 		for _, g := range m.GPUs {
+			label := g.Label()
 			if lv := classify(g.UtilPercent, t.GPUWarn, t.GPUCrit); lv != "" {
 				tempStr := ""
 				if g.Temp > 0 {
 					tempStr = Tz("alert.gpu_temp", int(g.Temp))
 				}
 				alerts = append(alerts, Alert{
-					HostID: h.ID, Hostname: h.Hostname, IP: h.IP, Level: lv, Type: "gpu", Scope: g.Name,
-					Message: Tz("alert.gpu_high", g.Name, g.UtilPercent, tempStr),
+					HostID: h.ID, Hostname: h.Hostname, IP: h.IP, Level: lv, Type: "gpu", Scope: label,
+					Message: Tz("alert.gpu_high", label, g.UtilPercent, tempStr),
 					Value:   g.UtilPercent, Timestamp: now,
 				})
 			}
 			if g.Temp > 0 && t.GPUTempWarn > 0 {
 				if lv := classify(g.Temp, t.GPUTempWarn, t.GPUTempCrit); lv != "" {
 					alerts = append(alerts, Alert{
-						HostID: h.ID, Hostname: h.Hostname, IP: h.IP, Level: lv, Type: "gpu", Scope: g.Name + "/temp",
-						Message: Tz("alert.gpu_temp_high", g.Name, int(g.Temp)),
+						HostID: h.ID, Hostname: h.Hostname, IP: h.IP, Level: lv, Type: "gpu", Scope: label + "/temp",
+						Message: Tz("alert.gpu_temp_high", label, int(g.Temp)),
 						Value:   g.Temp, Timestamp: now,
 					})
 				}
@@ -339,8 +343,8 @@ func Evaluate(hosts []*Host, t Thresholds) []Alert {
 			if g.MemPercent > 0 && t.GPUMemWarn > 0 {
 				if lv := classify(g.MemPercent, t.GPUMemWarn, t.GPUMemCrit); lv != "" {
 					alerts = append(alerts, Alert{
-						HostID: h.ID, Hostname: h.Hostname, IP: h.IP, Level: lv, Type: "gpu", Scope: g.Name + "/mem",
-						Message: Tz("alert.gpu_mem_high", g.Name, g.MemPercent, fmtBytes(g.MemUsed), fmtBytes(g.MemTotal)),
+						HostID: h.ID, Hostname: h.Hostname, IP: h.IP, Level: lv, Type: "gpu", Scope: label + "/mem",
+						Message: Tz("alert.gpu_mem_high", label, g.MemPercent, fmtBytes(g.MemUsed), fmtBytes(g.MemTotal)),
 						Value:   g.MemPercent, Timestamp: now,
 					})
 				}

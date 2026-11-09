@@ -1910,6 +1910,18 @@ svg.sparkline{width:100%; height:46px; display:block}
 .tstat.is-warn .tstat-v{color:#f7b23b}
 .tstat.is-crit{border-color:#f2545b; box-shadow:inset 3px 0 0 #f2545b}
 .tstat.is-crit .tstat-v{color:#f2545b}
+/* 近期变化（最后 1/4 窗口 vs 最前 1/4）：GPU 概览格用，升高标琥珀、回落标蓝，持平灰色。 */
+.tstat-delta{font-size:11px; color:var(--muted); margin-top:1px; font-variant-numeric:tabular-nums}
+.tstat-delta.up{color:#f7b23b}
+.tstat-delta.down{color:#43b6f0}
+/* 当前 GPU 状态与进程占用：挂在 GPU 图组末尾，独占一整行。窄屏横向滚动，不撑破弹窗。 */
+.gpu-status{grid-column:1/-1; min-width:0}
+.gpu-status .chart-group-sub{font-size:12px; font-weight:600; color:var(--muted); margin:2px 0 6px}
+.gpu-status .table-wrap{overflow-x:auto; border:1px solid var(--line); border-radius:var(--r)}
+.gpu-status-tbl{width:100%; border-collapse:collapse}
+.gpu-status-tbl th, .gpu-status-tbl td{padding:6px 10px; font-size:12px; white-space:nowrap; vertical-align:top}
+.gpu-status-tbl td:last-child{white-space:normal; min-width:180px}
+.gpu-status-tbl .muted{color:var(--muted); font-size:11px; margin-left:2px}
 /* 分组标题：主机趋势一屏二十多张图，没有分组只能靠滚动碰运气。占满整行（grid-column
    1/-1），否则它会被当成一张图挤进网格的一格里。 */
 .chart-group-title{grid-column:1/-1; display:flex; align-items:center; gap:10px; margin:10px 0 -4px; font-weight:600; font-size:13px; color:var(--muted); letter-spacing:.02em}

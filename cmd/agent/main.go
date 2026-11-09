@@ -60,6 +60,8 @@ type config struct {
 	// Docker/Podman 容器清单：有 CLI 时自动采集
 	ContainerIntervalSec int  `json:"container_interval_sec,omitempty"`
 	ContainerDisabled    bool `json:"container_disabled,omitempty"`
+	// GPU 采样间隔(秒)：0 = 自动（report_interval/3，夹在 5~15s）。后台多次采样、按上报窗口聚合。
+	GPUSampleIntervalSec int `json:"gpu_sample_interval_sec,omitempty"`
 }
 
 func defaultConfig() config {
@@ -573,6 +575,7 @@ func main() {
 	} else {
 		slog.Info("中继网关：跳过 systemd 单元提权自愈（不改动 aiops-relay 服务），仅上报与远程能力照常")
 	}
+	configureGPUSampling(time.Duration(cfg.ReportInterval)*time.Second, time.Duration(cfg.GPUSampleIntervalSec)*time.Second)
 	agent := NewAgent(
 		servers,
 		time.Duration(cfg.ReportInterval)*time.Second,

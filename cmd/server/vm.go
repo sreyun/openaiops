@@ -1157,13 +1157,7 @@ func (v *vmWriter) push(url string, samples []vmSample) bool {
 			fmt.Fprintf(&b, "aiops_disk_vol_total_bytes{%s} %g %d\n", dl, float64(d.Total), ms)
 		}
 		for _, g := range s.m.GPUs {
-			gl := lbl + fmt.Sprintf(`,gpu="%s"`, lblEsc(g.Name))
-			fmt.Fprintf(&b, "aiops_gpu_util_percent{%s} %g %d\n", gl, g.UtilPercent, ms)
-			fmt.Fprintf(&b, "aiops_gpu_temp_c{%s} %g %d\n", gl, g.Temp, ms)
-			fmt.Fprintf(&b, "aiops_gpu_mem_percent{%s} %g %d\n", gl, g.MemPercent, ms)
-			fmt.Fprintf(&b, "aiops_gpu_mem_used_bytes{%s} %g %d\n", gl, float64(g.MemUsed), ms)
-			fmt.Fprintf(&b, "aiops_gpu_mem_free_bytes{%s} %g %d\n", gl, float64(g.MemFree), ms)
-			fmt.Fprintf(&b, "aiops_gpu_mem_total_bytes{%s} %g %d\n", gl, float64(g.MemTotal), ms)
+			writeGPUSeries(&b, lbl, g, ms) // 表驱动，见 gpu_series.go（含 gpu_index/gpu_uuid 身份标签）
 		}
 		// 每 (协议,状态) 一条连接计数序列，支撑「连接数 / 会话状态」趋势图
 		for _, c := range s.m.Conns {
@@ -1247,46 +1241,6 @@ func setSampleMetric(s *shared.Sample, name string, val float64) {
 	case "task_timeout_sec":
 		s.TaskTimeoutSec = val
 	}
-}
-
-// setSampleGPU 把一条带 gpu 标签的 aiops_gpu_* 系列（按显卡名区分）并回该时间点样本的 GPUs
-// 数组，按名重建每块显卡的 利用率/温度/显存 各字段。返回写入的字段短名（供 presence 合并）。
-func setSampleGPU(s *shared.Sample, gpuName, name string, val float64) string {
-	if gpuName == "" {
-		gpuName = "GPU"
-	}
-	idx := -1
-	for i := range s.GPUs {
-		if s.GPUs[i].Name == gpuName {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		s.GPUs = append(s.GPUs, shared.GPUInfo{Name: gpuName})
-		idx = len(s.GPUs) - 1
-	}
-	switch name {
-	case "aiops_gpu_util_percent":
-		s.GPUs[idx].UtilPercent = val
-		return "util"
-	case "aiops_gpu_temp_c":
-		s.GPUs[idx].Temp = val
-		return "temp"
-	case "aiops_gpu_mem_percent":
-		s.GPUs[idx].MemPercent = val
-		return "mem_pct"
-	case "aiops_gpu_mem_used_bytes":
-		s.GPUs[idx].MemUsed = uint64(val)
-		return "mem_used"
-	case "aiops_gpu_mem_free_bytes":
-		s.GPUs[idx].MemFree = uint64(val)
-		return "mem_free"
-	case "aiops_gpu_mem_total_bytes":
-		s.GPUs[idx].MemTotal = uint64(val)
-		return "mem_total"
-	}
-	return ""
 }
 
 // setSampleConn 把一条带 proto+state 标签的 aiops_net_conn_count 系列并回样本的 Conns 数组，
@@ -1487,7 +1441,6 @@ func (v *vmWriter) queryHistoryRangeNames(hostID string, from, to, step int64, n
 		if name == "" {
 			continue
 		}
-		gpuName := ser.Labels["gpu"]
 		diskPath := ser.Labels["path"]
 		connProto := ser.Labels["proto"]
 		connState := ser.Labels["state"]
@@ -1496,7 +1449,11 @@ func (v *vmWriter) queryHistoryRangeNames(hostID string, from, to, step int64, n
 			if !ok {
 				continue
 			}
-			applyHistJoinMetric(byTs, ts, name, gpuName, diskPath, connProto, connState, pt[1])
+			if strings.HasPrefix(name, "aiops_gpu_") {
+				applyHistJoinGPU(byTs, ts, name, gpuIdentFromLabels(ser.Labels), pt[1])
+				continue
+			}
+			applyHistJoinMetric(byTs, ts, name, "", diskPath, connProto, connState, pt[1])
 		}
 	}
 	out := finalizeHistJoin(byTs)
@@ -1524,7 +1481,6 @@ func parseVMExport(r io.Reader) []shared.Sample {
 			continue
 		}
 		name := line.Metric["__name__"]
-		gpuName := line.Metric["gpu"]     // GPU 系列带 gpu 标签（每块显卡一条），需按名重建 s.GPUs
 		diskPath := line.Metric["path"]   // 磁盘分区系列带 path 标签（每个分区一条），需按路径重建 s.Disks
 		connProto := line.Metric["proto"] // 连接计数系列带 proto+state 标签，需按 (协议,状态) 重建 s.Conns
 		connState := line.Metric["state"]
@@ -1533,7 +1489,11 @@ func parseVMExport(r io.Reader) []shared.Sample {
 				break
 			}
 			ts := line.Timestamps[i] / 1000
-			applyHistJoinMetric(byTs, ts, name, gpuName, diskPath, connProto, connState, line.Values[i])
+			if strings.HasPrefix(name, "aiops_gpu_") { // GPU 系列按 gpu/gpu_index/gpu_uuid 标签重建每块卡
+				applyHistJoinGPU(byTs, ts, name, gpuIdentFromLabels(line.Metric), line.Values[i])
+				continue
+			}
+			applyHistJoinMetric(byTs, ts, name, "", diskPath, connProto, connState, line.Values[i])
 		}
 	}
 	return finalizeHistJoin(byTs)
@@ -1546,7 +1506,7 @@ func stabilizeSampleArrays(s *shared.Sample) {
 		return
 	}
 	if len(s.GPUs) > 1 {
-		sort.Slice(s.GPUs, func(a, b int) bool { return s.GPUs[a].Name < s.GPUs[b].Name })
+		sortGPUs(s.GPUs)
 	}
 	if len(s.Disks) > 1 {
 		sort.Slice(s.Disks, func(a, b int) bool { return s.Disks[a].Path < s.Disks[b].Path })
