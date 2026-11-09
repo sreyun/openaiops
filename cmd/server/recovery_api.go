@@ -170,11 +170,20 @@ func (s *Server) handleRecoverVerifyMFA(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "recovery.mfa_not_configured")})
 		return
 	}
+	// The TOTP here guards the account against someone who only holds the
+	// mailbox, so it shares the per-account login throttle and each wrong code
+	// counts against the email code (voided after 5) — see recordSecondFactorFailure.
+	if !s.auth.loginAccountAllowed(user.Username) {
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": Tr(r, "auth.too_many_attempts")})
+		return
+	}
 	// Verify TOTP without consuming first — email code must succeed too, otherwise
 	// a mistyped email code would burn a still-valid authenticator digit.
 	totpRes, totpStep := s.auth.checkTOTP(user.Username, user.MFASecret, req.TOTPCode)
 	if totpRes != totpOK {
 		if totpRes == totpInvalid {
+			s.emailMgr.recordSecondFactorFailure(user.Email, req.Purpose)
+			s.auth.loginAccountFailed(user.Username)
 			s.store.AddLog(LogEntry{Kind: KindOperation, Level: "warning", Actor: s.clientIP(r), Message: Tz("log.totp_recovery_failed", user.Username)})
 		}
 		s.writeTOTPFailure(w, r, totpRes, http.StatusUnauthorized)
@@ -309,7 +318,11 @@ func (s *Server) handleRecoverUsername(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "recovery.invalid_email")})
 		return
 	}
-	if user, found := s.cfg.UserByEmail(req.Email); found {
+	// Every branch below answers with the same generic 200: this endpoint is public,
+	// so "ok:false / send failed" for a real address (and nothing for an unknown one)
+	// was an account-enumeration oracle. reserveSend also caps it at one mail per
+	// address per 60s — before, it had no send limit at all (mailbox flooding).
+	if user, found := s.cfg.UserByEmail(req.Email); found && s.emailMgr.reserveSend(user.Email) {
 		cfg := s.cfg.Get()
 		if cfg.SMTP.Enabled && cfg.SMTP.Host != "" {
 			html := fmt.Sprintf(`<div style="font-family:sans-serif;padding:20px;max-width:500px;margin:0 auto">
@@ -318,12 +331,11 @@ func (s *Server) handleRecoverUsername(w http.ResponseWriter, r *http.Request) {
   <p style="color:#888;font-size:13px">%s</p>
   <p style="color:#888;font-size:13px">%s</p>
 </div>`, Tz("recovery.email_username_subject"), fmt.Sprintf(Tz("recovery.email_username_body"), user.Username), Tz("recovery.email_disclaimer"), fmt.Sprintf(Tz("recovery.email_time"), time.Now().Format("2006-01-02 15:04:05")))
-			if err := sendEmail(cfg.SMTP, req.Email, Tz("recovery.email_username_subject"), html); err != nil {
+			if err := sendEmail(cfg.SMTP, user.Email, Tz("recovery.email_username_subject"), html); err != nil {
 				s.store.AddLog(LogEntry{Kind: KindOperation, Level: "warning", Actor: s.clientIP(r), Message: Tz("log.username_email_failed", err.Error())})
-				writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": Tr(r, "recovery.email_send_failed")})
-				return
+			} else {
+				s.store.AddLog(LogEntry{Kind: KindOperation, Level: "info", Actor: s.clientIP(r), Message: Tz("log.username_email_sent")})
 			}
-			s.store.AddLog(LogEntry{Kind: KindOperation, Level: "info", Actor: s.clientIP(r), Message: Tz("log.username_email_sent")})
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": Tr(r, "recovery.username_sent")})
@@ -344,19 +356,25 @@ func (s *Server) handleSendResetCode(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "recovery.username_required")})
 		return
 	}
-	user, found := s.cfg.UserByName(req.Username)
-	if !found || user.Email == "" {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": Tr(r, "recovery.code_sent")})
-		return
-	}
+	// Same anti-enumeration contract as handleRecoverSendCode: SMTP availability is
+	// checked BEFORE the user lookup, and rate-limit / send failures answer with the
+	// generic "code sent". This legacy endpoint used to return 400 no_smtp, 429 and
+	// ok:false only for usernames that exist — a username oracle the new flow had
+	// already closed.
 	cfg := s.cfg.Get()
 	if !cfg.SMTP.Enabled || cfg.SMTP.Host == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "recovery.no_smtp")})
 		return
 	}
+	user, found := s.cfg.UserByName(req.Username)
+	if !found || user.Email == "" {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": Tr(r, "recovery.code_sent")})
+		return
+	}
 	code, err := s.emailMgr.issueCode(user.Email, "reset_password")
 	if err != nil {
-		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": err.Error()})
+		s.store.AddLog(LogEntry{Kind: KindOperation, Level: "warning", Actor: s.clientIP(r), Message: Tz("log.reset_code_failed", err.Error())})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": Tr(r, "recovery.code_sent")})
 		return
 	}
 	html := fmt.Sprintf(`<div style="font-family:sans-serif;padding:20px;max-width:500px;margin:0 auto">
@@ -368,7 +386,7 @@ func (s *Server) handleSendResetCode(w http.ResponseWriter, r *http.Request) {
 </div>`, Tz("recovery.email_reset_subject"), fmt.Sprintf(Tz("recovery.email_reset_body"), code), Tz("recovery.email_reset_validity"), Tz("recovery.email_reset_disclaimer"), fmt.Sprintf(Tz("recovery.email_time"), time.Now().Format("2006-01-02 15:04:05")))
 	if err := sendEmail(cfg.SMTP, user.Email, Tz("recovery.email_reset_subject"), html); err != nil {
 		s.store.AddLog(LogEntry{Kind: KindOperation, Level: "warning", Actor: s.clientIP(r), Message: Tz("log.reset_code_failed", err.Error())})
-		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": Tr(r, "recovery.email_send_failed")})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": Tr(r, "recovery.code_sent")})
 		return
 	}
 	s.store.AddLog(LogEntry{Kind: KindOperation, Level: "info", Actor: s.clientIP(r), Message: Tz("log.reset_code_sent")})

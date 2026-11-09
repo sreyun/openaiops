@@ -203,6 +203,58 @@ func NewAuth(cfg *ConfigStore) *Auth {
 	return &Auth{cfg: cfg, sessions: map[string]session{}, proxyTokens: map[string]proxyToken{}, loginHit: map[string][]int64{}, loginHitUser: map[string][]int64{}, totpUsed: map[string]int64{}, termAttempts: map[string]int{}, termLocked: map[string]time.Time{}}
 }
 
+// maxLoginFailureKeys bounds the per-IP and per-account failure maps.
+const maxLoginFailureKeys = 4096
+
+// boundFailureMap keeps a failure-history map under max WITHOUT discarding the
+// entries that matter. Expired timestamps are pruned first; if the map is still
+// too big, the keys with the FEWEST recent failures are evicted (never keep).
+//
+// The previous safety valve reset the whole map once it passed 4096 keys, which
+// let an attacker spray 4097 throw-away usernames (or source IPs) to wipe the
+// counter of the account they were actually brute-forcing — defeating exactly
+// the IP-rotation defence the per-account throttle exists for. Spray entries
+// carry a single failure each, so evicting the lowest counts first drops them
+// and keeps the near-threshold key.
+func boundFailureMap(m map[string][]int64, cutoff int64, max, threshold int, keep string) {
+	if len(m) <= max {
+		return
+	}
+	for k, v := range m {
+		n := 0
+		for _, t := range v {
+			if t >= cutoff {
+				v[n] = t
+				n++
+			}
+		}
+		if n == 0 {
+			delete(m, k)
+		} else {
+			m[k] = v[:n]
+		}
+	}
+	for lvl := 1; len(m) > max && lvl < threshold; lvl++ {
+		for k, v := range m {
+			if k != keep && len(v) <= lvl {
+				delete(m, k)
+			}
+		}
+	}
+	if len(m) <= max {
+		return
+	}
+	// Only keys at/above the lockout threshold remain: fall back to arbitrary eviction.
+	for k := range m {
+		if len(m) <= max {
+			break
+		}
+		if k != keep {
+			delete(m, k)
+		}
+	}
+}
+
 // loginAllowed reports whether ip is under the failed-attempt threshold. It also
 // prunes stale entries so the map stays bounded.
 func (a *Auth) loginAllowed(ip string) bool {
@@ -210,9 +262,7 @@ func (a *Auth) loginAllowed(ip string) bool {
 	cutoff := now - loginWindowSec
 	a.limMu.Lock()
 	defer a.limMu.Unlock()
-	if len(a.loginHit) > 4096 { // safety valve against unbounded growth
-		a.loginHit = map[string][]int64{}
-	}
+	boundFailureMap(a.loginHit, cutoff, maxLoginFailureKeys, loginMaxFailures, ip)
 	kept := a.loginHit[ip][:0]
 	for _, t := range a.loginHit[ip] {
 		if t >= cutoff {
@@ -247,9 +297,7 @@ func (a *Auth) loginAccountAllowed(user string) bool {
 	cutoff := now - loginAccountWindowSec
 	a.limMu.Lock()
 	defer a.limMu.Unlock()
-	if len(a.loginHitUser) > 4096 { // safety valve against unbounded growth
-		a.loginHitUser = map[string][]int64{}
-	}
+	boundFailureMap(a.loginHitUser, cutoff, maxLoginFailureKeys, loginAccountMaxFail, key)
 	kept := a.loginHitUser[key][:0]
 	for _, t := range a.loginHitUser[key] {
 		if t >= cutoff {
@@ -420,29 +468,42 @@ func sessionKey(tok string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (a *Auth) validate(tok string) bool {
-	if tok == "" {
-		return false
-	}
-	key := sessionKey(tok)
-	a.mu.Lock()
-	defer a.mu.Unlock()
+// liveSessionLocked returns the session stored under key if it is still valid,
+// enforcing BOTH the absolute cap (expires) and the sliding idle timeout; a dead
+// entry is deleted. touch=true slides the idle window (real activity). Caller
+// must hold a.mu.
+//
+// Every session read goes through here. Previously only validate() applied the
+// idle timeout, and validate() was reachable solely from ValidateRequest — which
+// nothing in production called — so the 24h idle expiry was dead code and an
+// abandoned session stayed usable for the full 7-day TTL.
+func (a *Auth) liveSessionLocked(key string, now time.Time, touch bool) (session, bool) {
 	s, ok := a.sessions[key]
 	if !ok {
-		return false
+		return session{}, false
 	}
-	now := time.Now()
-	// Absolute expiry (hard cap) OR sliding idle timeout — either invalidates.
 	// A zero lastSeen (e.g. a session imported before this field existed) is
 	// treated as active so a restart doesn't force everyone to re-login.
 	if now.After(s.expires) || (!s.lastSeen.IsZero() && now.Sub(s.lastSeen) > sessionIdleTimeout) {
 		delete(a.sessions, key)
 		a.dirty = true
+		return session{}, false
+	}
+	if touch {
+		s.lastSeen = now
+		a.sessions[key] = s
+	}
+	return s, true
+}
+
+func (a *Auth) validate(tok string) bool {
+	if tok == "" {
 		return false
 	}
-	s.lastSeen = now // slide the idle window on activity
-	a.sessions[key] = s
-	return true
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	_, ok := a.liveSessionLocked(sessionKey(tok), time.Now(), true)
+	return ok
 }
 
 func (a *Auth) ValidateRequest(r *http.Request) bool {
@@ -513,11 +574,8 @@ func (a *Auth) isRestricted(r *http.Request) bool {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	s, ok := a.sessions[sessionKey(c.Value)]
-	if !ok || time.Now().After(s.expires) {
-		return false
-	}
-	return s.restricted
+	s, ok := a.liveSessionLocked(sessionKey(c.Value), time.Now(), false)
+	return ok && s.restricted
 }
 
 // isPasswordChangeOnly reports whether the session may only complete a forced
@@ -529,11 +587,8 @@ func (a *Auth) isPasswordChangeOnly(r *http.Request) bool {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	s, ok := a.sessions[sessionKey(c.Value)]
-	if !ok || time.Now().After(s.expires) {
-		return false
-	}
-	return s.pwChangeOnly
+	s, ok := a.liveSessionLocked(sessionKey(c.Value), time.Now(), false)
+	return ok && s.pwChangeOnly
 }
 
 // upgradeSession lifts a restricted session to a full session (called after MFA enrollment).
@@ -551,17 +606,36 @@ func (a *Auth) upgradeSession(r *http.Request) {
 	}
 }
 
-// userForRequest returns the username bound to a valid (unexpired) session
-// cookie, or "" if there is none.
+// userForRequest returns the username bound to a valid session cookie (neither
+// past its absolute cap nor idle-expired), or "" if there is none. It is the
+// gate authMiddleware uses, so it also slides the idle window.
 func (a *Auth) userForRequest(r *http.Request) string {
 	c, err := r.Cookie(sessionCookie)
-	if err != nil {
+	if err != nil || c.Value == "" {
 		return ""
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	s, ok := a.sessions[sessionKey(c.Value)]
-	if !ok || time.Now().After(s.expires) {
+	s, ok := a.liveSessionLocked(sessionKey(c.Value), time.Now(), true)
+	if !ok {
+		return ""
+	}
+	return s.user
+}
+
+// fullSessionUser returns the user only for an unrestricted session — not a
+// forced-password-change or MFA-enrollment-only one. For handlers that sit on a
+// public path and authenticate themselves (e.g. /metrics), where authMiddleware's
+// restricted-session gates never run.
+func (a *Auth) fullSessionUser(r *http.Request) string {
+	c, err := r.Cookie(sessionCookie)
+	if err != nil || c.Value == "" {
+		return ""
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	s, ok := a.liveSessionLocked(sessionKey(c.Value), time.Now(), true)
+	if !ok || s.restricted || s.pwChangeOnly {
 		return ""
 	}
 	return s.user

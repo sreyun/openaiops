@@ -77,8 +77,10 @@ func breakerStateCode(s string) int {
 // handleMetrics GET /metrics —— Prometheus 文本格式。
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if !metricsTokenOK(r) {
-		// 没配令牌就退回会话鉴权（浏览器里点开也能看）。
-		if s.auth == nil || s.auth.userForRequest(r) == "" {
+		// 没配令牌就退回会话鉴权（浏览器里点开也能看）。本路由在 isPublicPath 里（采集端
+		// 只带 Bearer），authMiddleware 的"强制改密/仅限绑定 MFA"受限会话闸门不会经过这里，
+		// 所以必须用 fullSessionUser 自己把受限会话挡掉。
+		if s.auth == nil || s.auth.fullSessionUser(r) == "" {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="aiops-metrics"`)
 			writeJSON(w, http.StatusUnauthorized, map[string]string{
 				"error": "metrics requires a session or AIOPS_METRICS_TOKEN bearer token",

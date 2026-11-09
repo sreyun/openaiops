@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/big"
 	"net/http"
@@ -45,7 +46,8 @@ func isPublicPath(r *http.Request) bool {
 		"/api/v1/agent/logs",                 // fingerprint-gated log ingest (checked in the handler)
 		"/api/v1/brand",                      // public console branding metadata
 		"/status",                            // public Status Page (HTML)
-		"/api/v1/public/status":              // public Status Page (JSON; optional token in handler)
+		"/api/v1/public/status",              // public Status Page (JSON; optional token in handler)
+		"/metrics":                           // Prometheus scrape: AIOPS_METRICS_TOKEN Bearer or full session, checked in handleMetrics
 		return true
 	}
 	if strings.HasPrefix(p, "/api/v1/brand/logo/") {
@@ -356,11 +358,22 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		SMSCode   string `json:"sms_code"`   // OTP for login_type=sms
 	}
 	ip := s.clientIP(r)
+	s.warnUntrustedProxyOnce(r)
 	if !s.auth.loginAllowed(ip) {
-		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": Tr(r, "auth.too_many_attempts")})
+		// 反代没被信任时，这个 IP 是全公司共用的 127.0.0.1 —— 被挡住的人多半不是
+		// 输错密码的那个。不把这条线索说出来，运维只会以为"是我自己密码错太多次"。
+		// （v0.20.38 移除 Vue v2 时连同这段一起删掉了，i18n 键与测试却还在。）
+		msg := Tr(r, "auth.too_many_attempts")
+		if s.untrustedProxyDetected(r) {
+			msg += " " + Tr(r, "auth.too_many_attempts_proxy")
+		}
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": msg})
 		return
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// Bound the login body explicitly: this endpoint is unauthenticated and runs a
+	// 600k-round PBKDF2 per attempt, so it must not also accept the global 100 MiB
+	// body that bodyLimitMiddleware allows for file-upload routes.
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": Tr(r, "common.invalid_json")})
 		return
 	}
@@ -424,6 +437,14 @@ func (s *Server) authenticateAccountLogin(w http.ResponseWriter, r *http.Request
 // handles PBKDF2 upgrade). Returns the resolved account and whether authentication
 // succeeded. On failure, writes the error response and returns false.
 func (s *Server) authenticateUsernameLogin(w http.ResponseWriter, r *http.Request, username, password, ip string) (AccountConfig, bool) {
+	// Per-account throttle MUST run before the password check. It used to be
+	// recorded (loginAccountFailed) but never consulted on this — the default —
+	// login path, so an IP-rotating attacker faced no per-account limit at all,
+	// and the MFA code behind a known password could be brute-forced the same way.
+	if !s.auth.loginAccountAllowed(username) {
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": Tr(r, "auth.too_many_attempts")})
+		return AccountConfig{}, false
+	}
 	acc, ok := s.auth.CheckPassword(username, password)
 	if !ok {
 		s.auth.loginFailed(ip)
@@ -454,6 +475,13 @@ func (s *Server) authenticatePhoneLogin(w http.ResponseWriter, r *http.Request, 
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": Tr(r, "auth.invalid_credentials")})
 		return acc, false
 	}
+	// Throttle check BEFORE verifying: checking it only after a correct password
+	// meant a locked-out attacker got 401 for wrong guesses and 429 exactly when
+	// the guess was right — a password oracle that also bypassed the lockout.
+	if !s.auth.loginAccountAllowed(acc.Username) {
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": Tr(r, "auth.too_many_attempts")})
+		return AccountConfig{}, false
+	}
 	if !verifyPassword(password, acc.Salt, acc.Hash) {
 		s.auth.loginFailed(ip)
 		s.auth.loginAccountFailed(acc.Username)
@@ -462,11 +490,7 @@ func (s *Server) authenticatePhoneLogin(w http.ResponseWriter, r *http.Request, 
 			s.autoDefendOnLoginLockout(ip, acc.Username)
 		}
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": Tr(r, "auth.invalid_credentials")})
-		return acc, false
-	}
-	if !s.auth.loginAccountAllowed(acc.Username) {
-		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": Tr(r, "auth.too_many_attempts")})
-		return acc, false
+		return AccountConfig{}, false
 	}
 	return acc, true
 }

@@ -32,9 +32,13 @@ var (
 )
 
 // diagCommandAllowed 校验诊断命令是否为「只读命令 + 只读管道过滤」。
-// 保留原语义；实现委托给 evaluateDiagCommand。
+// 先按命令名白名单 / 元字符 / 敏感路径判定（evaluateDiagCommand），再逐段拦截
+// 白名单命令自带的写入 / 破坏性参数（diagArgsReadOnly，见 cmdpolicy_diag_args.go）。
 func diagCommandAllowed(command string) (bool, string) {
-	return evaluateDiagCommand(command)
+	if ok, reason := evaluateDiagCommand(command); !ok {
+		return false, reason
+	}
+	return diagArgsReadOnly(command)
 }
 
 func evaluateDiagCommand(command string) (bool, string) {

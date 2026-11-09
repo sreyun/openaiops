@@ -784,6 +784,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /uninstall.sh", s.handleUninstallScript)
 	mux.HandleFunc("GET /uninstall.ps1", s.handleUninstallScript)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	// 平台自身可观测（docs/CAPACITY.md、CHANGELOG 均已承诺）：handler 早在 v0.20.39 就写好，
+	// 却从未注册，Prometheus 抓过来一直是 SPA 外壳 / 404。鉴权在 handler 内（令牌或完整会话）。
+	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	// robots.txt：监控控制台不应被搜索引擎索引（内容需鉴权，索引 URL 也徒增暴露面）。
 	mux.HandleFunc("GET /robots.txt", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -810,23 +813,9 @@ func (s *Server) Routes() http.Handler {
 			}
 			_, _ = w.Write(data)
 		})
-		// /app.js: 把 web/js/ 下的 8 个源模块按依赖顺序拼成【单个脚本】返回。
-		// 必须作为单脚本加载——整文件函数提升(hoisting)才生效；若用 8 个独立
-		// <script> 标签，早模块顶层调用晚模块里定义的 helper/handler 会因
-		// 每脚本独立提升而 ReferenceError。源码保持拆分(便于维护)，运行时=单文件。
-		mux.HandleFunc("GET /app.js", func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
-			w.Header().Set("Cache-Control", "no-cache")
-			for _, m := range []string{"core", "export", "duplicates", "overview", "hosts", "host-picker", "forecast", "agent-update", "terminal", "desktop", "settings", "nav", "attachments", "sre", "host-inspect", "ai-assist", "ops-actions", "apimon", "governance", "datasource", "sql-toolkit", "cicd", "hardware", "hyperv", "containers", "k8s", "netflow", "snmp", "content-audit", "security-overview", "host-security", "security-feeds", "web-security", "security-center", "scrape", "dash_charts", "dashboard", "init"} {
-				b, err := webFS.ReadFile("web/js/" + m + ".js")
-				if err != nil {
-					http.Error(w, "js module missing: "+m, http.StatusInternalServerError)
-					return
-				}
-				_, _ = w.Write(b)
-				_, _ = w.Write([]byte("\n;\n")) // 模块间安全分隔（空语句），防 ASI 边界问题
-			}
-		})
+		// /app.js: 把 web/js/ 下的源模块按依赖顺序拼成【单个脚本】返回（只拼一次，带强 ETag），
+		// 源码保持拆分(便于维护)，运行时=单文件。见 web_appjs.go。
+		mux.HandleFunc("GET /app.js", serveClassicAppJS)
 		mux.Handle("GET /theme-init.js", fsrv) // 主题预置（外置内联脚本，配合 CSP 去 unsafe-inline）
 		mux.Handle("GET /i18n-dashboard.js", fsrv)
 		mux.Handle("GET /i18n-dashboard.en.js", fsrv)

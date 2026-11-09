@@ -18,7 +18,38 @@
 import json
 import sys
 import os
+import re
 import subprocess
+import urllib.parse
+import urllib.request
+
+# systemd 单元名：字母数字与 -@._: ，以及 systemd 转义用的反斜杠（如 dev-disk-by\x2duuid），
+# 且不能以 '-' 开头（否则会被 systemctl 当成选项解析，例如 "--host=user@other" / "--all"）。
+_UNIT_RE = re.compile(r"^[-A-Za-z0-9@._:\\]{1,128}$")
+
+# clear_cache 允许清理的根目录（按真实路径判定）。
+_CACHE_ROOTS = ("/tmp", "/var/cache")
+
+
+def _valid_unit(name: str) -> bool:
+    return bool(name) and not name.startswith("-") and bool(_UNIT_RE.match(name))
+
+
+def _under_cache_root(real_path: str) -> bool:
+    """real_path 必须是某个允许根目录的【子路径】（不含根目录本身）。
+
+    旧实现用 abspath(...).startswith("/tmp")：既放过 /tmpX、/var/cache_evil 这类同前缀
+    兄弟目录，又不解析符号链接——/tmp 人人可写，建一个 /tmp/x -> / 的链接，os.walk
+    会跟进顶层链接，于是"清缓存"变成以服务进程权限递归删除整个文件系统。
+    """
+    for root in _CACHE_ROOTS:
+        root_real = os.path.realpath(root)
+        try:
+            if os.path.commonpath([real_path, root_real]) == root_real and real_path != root_real:
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 def restart_service(host_id: str, args: dict) -> str:
@@ -26,6 +57,8 @@ def restart_service(host_id: str, args: dict) -> str:
     service = args.get("service", "")
     if not service:
         return "错误：请指定服务名称 (service)"
+    if not _valid_unit(service):
+        return f"错误：非法的服务名称 {service!r}"
     # 通过 systemctl 重启（需要在 Agent 主机上执行）
     try:
         result = subprocess.run(
@@ -45,12 +78,17 @@ def clear_cache(host_id: str, args: dict) -> str:
     """清理指定路径的缓存"""
     path = args.get("path", "/tmp/cache")
     try:
+        if not isinstance(path, str) or not path:
+            return "错误：请指定要清理的路径 (path)"
         if not os.path.exists(path):
             return f"路径 {path} 不存在，无需清理"
-        # 安全检查：只允许清理 /tmp 和 /var/cache 下的路径
-        abs_path = os.path.abspath(path)
-        if not (abs_path.startswith("/tmp") or abs_path.startswith("/var/cache")):
-            return f"安全限制：不允许清理 {path}，仅允许 /tmp 和 /var/cache 下的路径"
+        # 安全检查：只允许清理 /tmp 和 /var/cache 下的路径——按 realpath（解析全部符号链接）
+        # 判定，且拒绝路径本身是符号链接；os.walk 默认不跟随子目录里的链接。
+        if os.path.islink(path):
+            return f"安全限制：{path} 是符号链接，拒绝清理"
+        abs_path = os.path.realpath(path)
+        if not _under_cache_root(abs_path):
+            return f"安全限制：不允许清理 {path}，仅允许 /tmp 和 /var/cache 下的子目录"
         # 统计清理前的大小
         total_size = 0
         for root, dirs, files in os.walk(abs_path):
@@ -97,11 +135,21 @@ def scale_pods(host_id: str, args: dict) -> str:
                 "也可让助手直接调用工具 k8s_scale。")
     base = (os.environ.get("AIOPS_URL") or os.environ.get("AIOPS_PUBLIC_URL") or "http://127.0.0.1:8529").rstrip("/")
     token = os.environ.get("AIOPS_TOKEN") or os.environ.get("AIOPS_API_TOKEN") or ""
-    url = f"{base}/api/v1/k8s/clusters/{cluster_id}/deployments/{namespace}/{deployment}/scale"
     try:
-        import urllib.request
+        replicas = int(replicas)
+    except (TypeError, ValueError):
+        return f"错误：replicas 必须是整数，得到 {replicas!r}"
+    if replicas < 0:
+        return "错误：replicas 不能为负数"
+    # 路径段逐个转义：否则 deployment="../../../admin/..." 会把带令牌的 POST 打到任意 API 路径上。
+    seg = lambda v: urllib.parse.quote(str(v), safe="")
+    url = (f"{base}/api/v1/k8s/clusters/{seg(cluster_id)}/deployments/"
+           f"{seg(namespace)}/{seg(deployment)}/scale")
+    try:
+        # urllib.request 在模块顶部导入：函数内的 `import urllib.request` 会把 urllib 变成
+        # 本函数的局部名，上面的 seg() 在它执行前引用 urllib 会抛 UnboundLocalError。
         req = urllib.request.Request(
-            url, data=json.dumps({"replicas": int(replicas)}).encode("utf-8"),
+            url, data=json.dumps({"replicas": replicas}).encode("utf-8"),
             headers={"Content-Type": "application/json", **({"Authorization": f"Bearer {token}"} if token else {})},
             method="POST",
         )
@@ -117,6 +165,8 @@ def check_service_status(host_id: str, args: dict) -> str:
     service = args.get("service", "")
     if not service:
         return "错误：请指定服务名称"
+    if not _valid_unit(service):
+        return f"错误：非法的服务名称 {service!r}"
     try:
         result = subprocess.run(
             ["systemctl", "status", service, "--no-pager"],

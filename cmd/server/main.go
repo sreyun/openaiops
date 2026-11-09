@@ -475,10 +475,21 @@ func main() {
 	// flush PostgreSQL state, then exit.
 	// This replaces the old os.Exit(0) approach which bypassed defer cleanup
 	// and forcibly dropped active connections.
-	sigCh := make(chan os.Signal, 1)
+	//
+	// shutdownDone 必须由 main 等待：srv.Shutdown 一被调用，ListenAndServe 就立刻返回
+	// ErrServerClosed（见 net/http 文档），main 若随即 return，进程会在下面这串 VM 排空 /
+	// PG 终刷还没跑完时就退出——上面注释说要修的"重启在每条曲线上打个洞"其实一直没修好。
+	sigCh := make(chan os.Signal, 2)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	shutdownDone := make(chan struct{})
 	go func() {
 		<-sigCh
+		// 第二次信号 = 运维不想再等（PG 卡住等），立即退出。
+		go func() {
+			<-sigCh
+			slog.Warn("再次收到停止信号，跳过剩余清理立即退出")
+			os.Exit(1)
+		}()
 		slog.Info("收到停止信号，正在优雅关闭…")
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -493,7 +504,7 @@ func main() {
 		// Final flush of all relational state to PostgreSQL, then close cleanly.
 		server.pgFlush(pg, true)
 		pg.close()
-		os.Exit(0)
+		close(shutdownDone)
 	}()
 
 	slog.Info(Tz("server.started"))
@@ -532,12 +543,14 @@ func main() {
 		if err := srv.ListenAndServeTLS(certFile, keyFile); err != nil && err != http.ErrServerClosed {
 			log.Fatal(err)
 		}
+		<-shutdownDone // 等优雅关闭（VM 排空 + PG 终刷）真正完成再退出
 		return
 	}
 	slog.Warn("未配置 TLS（AIOPS_TLS_CERT/AIOPS_TLS_KEY）：以明文 HTTP 提供服务。生产环境请启用 TLS，或置于 HTTPS 终止代理之后，否则登录凭据/会话/终端数据将明文传输")
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
+	<-shutdownDone // 同上
 }
 
 // startupDisplayHost turns a listen address into something clickable in the

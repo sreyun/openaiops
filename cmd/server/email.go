@@ -156,37 +156,83 @@ func genResetToken() string {
 	return hex.EncodeToString(b)
 }
 
-// canSend checks the 60s rate limit for an email address.
-func (em *emailManager) canSend(email string) bool {
-	em.mu.Lock()
-	defer em.mu.Unlock()
-	key := strings.ToLower(email)
-	if t, ok := em.lastSent[key]; ok {
-		if time.Since(t) < 60*time.Second {
-			return false
+// reserveSendLocked claims the 60s send slot for email (check-and-set under one
+// lock, so two concurrent requests can't both pass a separate canSend check) and
+// opportunistically drops expired codes / tokens / send stamps. Caller holds em.mu.
+func (em *emailManager) reserveSendLocked(email string, now time.Time) bool {
+	if t, ok := em.lastSent[email]; ok && now.Sub(t) < 60*time.Second {
+		return false
+	}
+	em.lastSent[email] = now
+	for k, t := range em.lastSent {
+		if now.Sub(t) >= 60*time.Second && k != email {
+			delete(em.lastSent, k)
+		}
+	}
+	for k, c := range em.codes {
+		if now.After(c.expires) {
+			delete(em.codes, k)
+		}
+	}
+	for k, t := range em.resetToken {
+		if now.After(t.expires) {
+			delete(em.resetToken, k)
 		}
 	}
 	return true
+}
+
+// reserveSend claims the per-address send slot for mails that carry no code
+// (legacy username-recovery mail). Without it that public endpoint could be used
+// to flood a registered mailbox / burn the SMTP quota with no limit at all.
+func (em *emailManager) reserveSend(email string) bool {
+	email = strings.ToLower(strings.TrimSpace(email))
+	em.mu.Lock()
+	defer em.mu.Unlock()
+	return em.reserveSendLocked(email, time.Now())
 }
 
 // issueCode generates and stores a 6-digit code for the given email + purpose.
 // TTL is 10 minutes. Returns the code and an error (if rate-limited).
 func (em *emailManager) issueCode(email, purpose string) (string, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
-	if !em.canSend(email) {
+	code := genCode()
+	now := time.Now()
+	em.mu.Lock()
+	defer em.mu.Unlock()
+	if !em.reserveSendLocked(email, now) {
 		return "", fmt.Errorf("%s", Tz("recovery.rate_limited"))
 	}
-	code := genCode()
-	em.mu.Lock()
 	em.codes[email] = emailCode{
 		code:    code,
-		expires: time.Now().Add(10 * time.Minute),
+		expires: now.Add(10 * time.Minute),
 		purpose: purpose,
 		email:   email,
 	}
-	em.lastSent[email] = time.Now()
-	em.mu.Unlock()
 	return code, nil
+}
+
+// recordSecondFactorFailure counts a wrong TOTP against an email code that has
+// already passed markCodeVerified, voiding the code after 5 failures.
+//
+// markCodeVerified resets the attempt counter for the MFA step, but nothing ever
+// incremented it again: a caller holding the mailbox (the exact threat the MFA
+// step exists for) could guess the 6-digit TOTP indefinitely for the code's
+// 10-minute life. Voiding the code forces a new email (itself 60s-limited).
+func (em *emailManager) recordSecondFactorFailure(email, purpose string) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	em.mu.Lock()
+	defer em.mu.Unlock()
+	entry, ok := em.codes[email]
+	if !ok || entry.purpose != purpose || !entry.emailVerified {
+		return
+	}
+	entry.attempts++
+	if entry.attempts >= 5 {
+		delete(em.codes, email)
+		return
+	}
+	em.codes[email] = entry
 }
 
 // verifyCode checks and consumes a one-time code. Returns false if invalid,

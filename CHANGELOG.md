@@ -33,6 +33,29 @@
 
 ---
 
+## [v0.20.51] — 2026-11-08
+
+### 安全修复
+- **逐账号登录限流此前从未生效**：用户名登录（默认路径）只记录失败、从不检查；手机号登录在**密码正确之后**才检查，形成"429 = 密码猜对了"的口令探测信号。现两条路径都在校验密码前执行限流。
+- **限流表可被清空**：失败计数表超过 4096 个键时整表重置，攻击者喷洒 4097 个随机用户名/IP 即可清掉目标账号的计数。改为先清过期、再按失败次数从低到高淘汰，保留临界账号。
+- **24h 滑动空闲超时是死代码**：只有测试调用的 `ValidateRequest` 会检查空闲，生产鉴权路径 `userForRequest` 只看 7 天绝对期限。现所有会话读取统一经 `liveSessionLocked` 校验。
+- **只读诊断通道可写文件 / 改系统状态**（`run_diagnostic`，MCP `sre` 作用域与 AI 均可达）：白名单只校验命令名，`sort -o` / `--compress-program`、`uniq IN OUT`、`journalctl --vacuum-*`、`dmesg -C`、`date -s`、`hostname <名>`、`ss -K`、`sar -o`、`kubectl get secrets` 均可通过。新增参数级拦截（`cmdpolicy_diag_args.go`）。
+- **账号找回**：`recover-verify-mfa` 的 TOTP 错码不计数，持有邮箱者可无限猜第二因子——现计入账号限流且 5 次错码作废邮件验证码；旧版 `send-reset-code` 仍存在按用户名枚举（`no_smtp` / 429 / `ok:false` 仅对真实用户返回）——已与新流程统一为恒定响应；旧版 `recover-username` 无发送频控（可轰炸邮箱）——已限 60s/地址。
+- `sreyun_actions.py`：`clear_cache` 前缀判断可被 `/tmpX` 与 `/tmp/x -> /` 符号链接绕过（递归删除）；服务名可被当作 systemctl 选项；`scale_pods` 路径段未转义。均已修复。
+- 登录请求体单独限制为 64 KiB（未鉴权 + 每次 60 万轮 PBKDF2，不应接受全局 100 MiB 上限）。
+
+### 缺陷修复
+- **优雅关闭从未完成**：`srv.Shutdown` 一调用 `ListenAndServe` 即返回，`main` 随即退出，VM 排空与 PG 终刷被截断（重启仍会在曲线上打洞）。现 `main` 等待关闭流程结束；二次信号可强制退出。
+- **`GET /metrics` 从未注册**：文档（CAPACITY.md / CHANGELOG）承诺的 Prometheus 出口一直不可达。已注册，令牌或完整会话鉴权（受限会话不放行）。
+- **`/app.js` 缓存丢失**：5000 台规模计划中的单次拼接 + 强 ETag 实现被回退，每次打开页面都重新读取拼接三十余个模块且无法 304；缺模块时先回 200 再拼一行报错文本（白屏但状态码正常）。已恢复。
+- **登录限流的反代提示被误删**（v0.20.38 移除 Vue v2 时连带删除）：trust_proxy 未开时被挡用户看不到原因。已恢复。
+
+### 工程
+- **`go test` / `go vet` 在 `cmd/server`、`cmd/agent` 上无法编译**（CI 测试实际处于失效状态）：授权系统移除后测试仍引用 `licenseResetForTest` / `aiops_license_*`；`/app.js` 缓存回退导致 `classicAppJS` 未定义；Windows 下重复的测试文件导致符号重复声明。均已修复，`go vet ./...` 恢复全量分析。
+- 新增 `review_fixes_test.go` 覆盖以上修复。
+
+---
+
 ## [v0.20.49] — 2026-09-01
 
 ### 文档
